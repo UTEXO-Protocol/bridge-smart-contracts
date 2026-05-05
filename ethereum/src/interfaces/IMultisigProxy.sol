@@ -5,9 +5,12 @@ pragma solidity ^0.8.20;
 /// @notice Two-level ECDSA multisig proxy that owns the Bridge and the CommissionManager.
 ///
 /// @dev ENCLAVE SIGNERS (TEE / Nitro Enclave)
-///      Authorise routine bridge value-transfer operations via `execute()`.
-///      Restricted to a configurable allowlist of Bridge function selectors.
-///      Uses per-selector nonces.
+///      Authorise routine value-transfer operations via `execute()` (single call to
+///      Bridge) or `executeBatch()` (atomic multi-call to any allowlisted target,
+///      e.g. Bridge.fundsOut + LZAdapter.sendOut for outbound RGB → non-Arbitrum).
+///      Restricted to a configurable per-(target, selector) allowlist.
+///      Uses per-selector nonces for `execute()` and a sequential `batchNonce` for
+///      `executeBatch()`.
 ///
 ///      FEDERATION SIGNERS (governance / admin nodes)
 ///      All administrative operations go through a two-phase timelock:
@@ -42,7 +45,7 @@ interface IMultisigProxy {
     error TimelockTooLong();
     error Expired();
     error CallDataTooShort();
-    error SelectorNotAllowed();
+    error CallNotAllowed(address target, bytes4 selector);
     error InvalidNonce();
     error NotPending();
     error TimelockActive();
@@ -60,6 +63,11 @@ interface IMultisigProxy {
     error CallFailed();
     error UnknownOperationType();
     error ZeroRecipient();
+    error ZeroTarget();
+    error BatchEmpty();
+    error BatchLengthMismatch();
+    error BatchTooLarge();
+    error BatchValueMismatch();
 
     // =========================================================================
     // Types
@@ -71,7 +79,7 @@ interface IMultisigProxy {
         UpdateFederationSigners,         // 2
         UpdateBridge,                    // 3
         SetCommissionRecipient,          // 4
-        SetTeeAllowedSelector,           // 5
+        SetTeeAllowedCall,               // 5 — (target, selector, allowed) entry in TEE allowlist
         SetTimelockDuration,             // 6
         AdminExecuteCommissionManager,   // 7 — generic call into CommissionManager
         WithdrawTokenCommissionCM,       // 8 — CM.withdrawTokenCommission -> commissionRecipient
@@ -95,6 +103,7 @@ interface IMultisigProxy {
 
     // TEE
     event Executed(bytes4 indexed selector, uint256 nonce, uint256 enclaveBitmap);
+    event BatchExecuted(uint256 indexed nonce, uint256 enclaveBitmap, address[] targets, bytes4[] selectors);
 
     // Federation proposals
     event ProposalCreated(
@@ -118,7 +127,7 @@ interface IMultisigProxy {
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
     event CommissionRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
-    event TeeAllowedSelectorUpdated(bytes4 indexed selector, bool allowed);
+    event TeeAllowedCallUpdated(address indexed target, bytes4 indexed selector, bool allowed);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
     event NativeCommissionWithdrawn(uint256 amount, address indexed recipient);
     event TimelockDurationUpdated(uint256 newDuration);
@@ -128,7 +137,7 @@ interface IMultisigProxy {
     // =========================================================================
 
     /// @notice Execute a Bridge call authorised by M-of-N enclave signatures.
-    ///         Selector must be in the TEE allowlist. Per-selector nonces.
+    ///         Selector must be in the TEE allowlist for the Bridge target. Per-selector nonces.
     function execute(
         bytes calldata callData,
         uint256 nonce,
@@ -136,6 +145,21 @@ interface IMultisigProxy {
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external;
+
+    /// @notice Execute multiple calls atomically, authorised by a single set of M-of-N
+    ///         enclave signatures over the whole batch.
+    /// @dev Each `(targets[i], selector(callDatas[i]))` must be in the TEE allowlist.
+    ///      `sum(values) == msg.value`. Either all succeed or the batch reverts.
+    ///      Uses sequential `batchNonce` for replay protection.
+    function executeBatch(
+        address[] calldata targets,
+        bytes[] calldata callDatas,
+        uint256[] calldata values,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 enclaveBitmap,
+        bytes[] calldata enclaveSigs
+    ) external payable;
 
     // =========================================================================
     // Federation instant (no timelock)
@@ -214,9 +238,10 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose adding/removing a TEE-allowed selector.
-    /// @dev opData = abi.encode(bytes4 selector, bool allowed)
-    function proposeSetTeeAllowedSelector(
+    /// @notice Propose adding/removing a TEE-allowed (target, selector) pair.
+    /// @dev opData = abi.encode(address target, bytes4 selector, bool allowed)
+    function proposeSetTeeAllowedCall(
+        address target,
         bytes4 selector,
         bool allowed,
         uint256 nonce,
@@ -319,7 +344,8 @@ interface IMultisigProxy {
     function getFederationSigners() external view returns (address[] memory);
     function federationThreshold() external view returns (uint256);
     function commissionRecipient() external view returns (address);
-    function teeAllowedSelectors(bytes4 selector) external view returns (bool);
+    function teeAllowedCalls(address target, bytes4 selector) external view returns (bool);
+    function batchNonce() external view returns (uint256);
     function DOMAIN_SEPARATOR() external view returns (bytes32);
     function proposalNonce() external view returns (uint256);
     function timelockDuration() external view returns (uint256);

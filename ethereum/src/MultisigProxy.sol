@@ -25,8 +25,12 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Per-selector nonce for TEE execute() calls.
     mapping(bytes4 => uint256) public nonces;
 
-    /// @notice Allowed Bridge function selectors for TEE execute().
-    mapping(bytes4 => bool) public teeAllowedSelectors;
+    /// @notice Sequential nonce for TEE executeBatch() calls.
+    uint256 public batchNonce;
+
+    /// @notice Allowed (target, selector) pairs for TEE execute() / executeBatch().
+    ///         Federation governance maintains this allowlist via SetTeeAllowedCall.
+    mapping(address => mapping(bytes4 => bool)) public teeAllowedCalls;
 
     /// @notice Federation proposals.
     mapping(bytes32 => Proposal) private _proposals;
@@ -44,6 +48,9 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Maximum allowed time between proposal creation and its deadline.
     uint256 public constant MAX_PROPOSAL_LIFETIME = 30 days;
 
+    /// @notice Hard upper bound on `executeBatch` size to keep gas use bounded.
+    uint256 public constant MAX_BATCH_SIZE = 3;
+
     bytes32 public immutable DOMAIN_SEPARATOR;
 
     bytes32 private constant _DOMAIN_TYPEHASH = keccak256(
@@ -53,6 +60,9 @@ contract MultisigProxy is IMultisigProxy {
     // TEE
     bytes32 private constant _BRIDGE_OP_TYPEHASH = keccak256(
         'BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _BRIDGE_BATCH_OP_TYPEHASH = keccak256(
+        'BridgeBatchOperation(address[] targets,bytes[] callDatas,uint256[] values,uint256 nonce,uint256 deadline)'
     );
 
     // Federation propose — typed EIP-712 structs per operation (Bridge side)
@@ -71,8 +81,8 @@ contract MultisigProxy is IMultisigProxy {
     bytes32 private constant _PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH = keccak256(
         'ProposeSetCommissionRecipient(address newRecipient,uint256 nonce,uint256 deadline)'
     );
-    bytes32 private constant _PROPOSE_SET_TEE_SELECTOR_TYPEHASH = keccak256(
-        'ProposeSetTeeAllowedSelector(bytes4 selector,bool allowed,uint256 nonce,uint256 deadline)'
+    bytes32 private constant _PROPOSE_SET_TEE_CALL_TYPEHASH = keccak256(
+        'ProposeSetTeeAllowedCall(address target,bytes4 selector,bool allowed,uint256 nonce,uint256 deadline)'
     );
     bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH = keccak256(
         'ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)'
@@ -140,8 +150,10 @@ contract MultisigProxy is IMultisigProxy {
         commissionRecipient = commissionRecipient_;
         timelockDuration = timelockDuration_;
 
-        // Default TEE allowlist (Bridge.fundsOut signature).
-        teeAllowedSelectors[
+        // Default TEE allowlist: Bridge.fundsOut. Additional (target, selector) pairs
+        // (e.g. for the LayerZero adapter's outbound `sendOut`) are added later via
+        // federation governance through `proposeSetTeeAllowedCall`.
+        teeAllowedCalls[bridge_][
             bytes4(keccak256(
                 'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
             ))
@@ -174,7 +186,7 @@ contract MultisigProxy is IMultisigProxy {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
-        if (!teeAllowedSelectors[selector]) revert SelectorNotAllowed();
+        if (!teeAllowedCalls[bridge][selector]) revert CallNotAllowed(bridge, selector);
         if (nonce != nonces[selector]) revert InvalidNonce();
 
         bytes32 digest = _buildDigest(_BRIDGE_OP_TYPEHASH, selector, callData, nonce, deadline);
@@ -186,6 +198,55 @@ contract MultisigProxy is IMultisigProxy {
         _propagateRevert(ok, ret);
 
         emit Executed(selector, nonce, enclaveBitmap);
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function executeBatch(
+        address[] calldata targets,
+        bytes[]   calldata callDatas,
+        uint256[] calldata values,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 enclaveBitmap,
+        bytes[] calldata enclaveSigs
+    ) external payable {
+        if (block.timestamp > deadline) revert Expired();
+        uint256 n = targets.length;
+        if (n == 0) revert BatchEmpty();
+        if (n > MAX_BATCH_SIZE) revert BatchTooLarge();
+        if (callDatas.length != n || values.length != n) revert BatchLengthMismatch();
+        if (nonce != batchNonce) revert InvalidNonce();
+
+        // 1. Allowlist + selector extraction + native value accounting.
+        bytes4[] memory selectors = new bytes4[](n);
+        uint256 totalValue;
+        for (uint256 i = 0; i < n; i++) {
+            if (callDatas[i].length < 4) revert CallDataTooShort();
+
+            bytes calldata cd = callDatas[i];
+            bytes4 sel;
+            assembly { sel := calldataload(cd.offset) }
+
+            if (!teeAllowedCalls[targets[i]][sel]) revert CallNotAllowed(targets[i], sel);
+
+            selectors[i] = sel;
+            totalValue  += values[i];
+        }
+        if (totalValue != msg.value) revert BatchValueMismatch();
+
+        // 2. EIP-712 digest over the whole batch + M-of-N enclave verification.
+        bytes32 digest = _buildBatchDigest(targets, callDatas, values, nonce, deadline);
+        _verifySignatures(digest, enclaveBitmap, enclaveSigs, _enclaveSigners, enclaveThreshold);
+
+        batchNonce++;
+
+        // 3. Atomic dispatch — any inner revert rolls back the whole batch.
+        for (uint256 i = 0; i < n; i++) {
+            (bool ok, bytes memory ret) = targets[i].call{ value: values[i] }(callDatas[i]);
+            _propagateRevert(ok, ret);
+        }
+
+        emit BatchExecuted(nonce, enclaveBitmap, targets, selectors);
     }
 
     // =========================================================================
@@ -343,7 +404,8 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     /// @inheritdoc IMultisigProxy
-    function proposeSetTeeAllowedSelector(
+    function proposeSetTeeAllowedCall(
+        address target,
         bytes4 selector,
         bool allowed,
         uint256 nonce,
@@ -351,13 +413,15 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
+        if (target == address(0)) revert ZeroTarget();
+
         bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_SET_TEE_SELECTOR_TYPEHASH, selector, allowed, nonce, deadline
+            _PROPOSE_SET_TEE_CALL_TYPEHASH, target, selector, allowed, nonce, deadline
         ));
 
         return _propose(
-            OperationType.SetTeeAllowedSelector,
-            abi.encode(selector, allowed),
+            OperationType.SetTeeAllowedCall,
+            abi.encode(target, selector, allowed),
             nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
@@ -632,10 +696,11 @@ contract MultisigProxy is IMultisigProxy {
             commissionRecipient = newRecipient;
             emit CommissionRecipientUpdated(old, newRecipient);
 
-        } else if (opType == OperationType.SetTeeAllowedSelector) {
-            (bytes4 sel, bool allowed) = abi.decode(opData, (bytes4, bool));
-            teeAllowedSelectors[sel] = allowed;
-            emit TeeAllowedSelectorUpdated(sel, allowed);
+        } else if (opType == OperationType.SetTeeAllowedCall) {
+            (address target, bytes4 sel, bool allowed) = abi.decode(opData, (address, bytes4, bool));
+            if (target == address(0)) revert ZeroTarget();
+            teeAllowedCalls[target][sel] = allowed;
+            emit TeeAllowedCallUpdated(target, sel, allowed);
 
         } else if (opType == OperationType.SetTimelockDuration) {
             uint256 newDuration = abi.decode(opData, (uint256));
@@ -704,6 +769,33 @@ contract MultisigProxy is IMultisigProxy {
         return _hashTypedData(
             keccak256(abi.encode(typeHash, selector, keccak256(callData), nonce, deadline))
         );
+    }
+
+    /// @dev Builds an EIP-712 digest for TEE executeBatch().
+    ///      Per EIP-712 array encoding:
+    ///        - address[] / uint256[] hashes are keccak256 of their packed elements,
+    ///        - bytes[] hashes are keccak256 of the packed per-element keccak256.
+    function _buildBatchDigest(
+        address[] calldata targets,
+        bytes[]   calldata callDatas,
+        uint256[] calldata values,
+        uint256 nonce,
+        uint256 deadline
+    ) private view returns (bytes32) {
+        bytes32[] memory cdHashes = new bytes32[](callDatas.length);
+        for (uint256 i = 0; i < callDatas.length; i++) {
+            cdHashes[i] = keccak256(callDatas[i]);
+        }
+
+        bytes32 structHash = keccak256(abi.encode(
+            _BRIDGE_BATCH_OP_TYPEHASH,
+            keccak256(abi.encodePacked(targets)),
+            keccak256(abi.encodePacked(cdHashes)),
+            keccak256(abi.encodePacked(values)),
+            nonce,
+            deadline
+        ));
+        return _hashTypedData(structHash);
     }
 
     /// @dev Verifies M-of-N bitmap signatures against the given signer set.
