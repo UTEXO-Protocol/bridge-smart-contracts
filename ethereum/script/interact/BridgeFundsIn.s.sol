@@ -26,8 +26,14 @@ contract BridgeFundsIn is Script {
         address token = bridge.TOKEN();
 
         ICommissionManager cm = bridge.commissionManager();
+        // FIXME(PR2): the chain identifiers become uint256 throughout in the
+        // matching Bridge refactor. Until then, the script keccak-casts the
+        // strings to satisfy the new CM signature.
         (, uint256 nativeCommission, ) = cm.calculateFundsInCommission(
-            bridge.sourceChainName(), dChain, token, amount
+            uint256(keccak256(bytes(bridge.sourceChainName()))),
+            uint256(keccak256(bytes(dChain))),
+            token,
+            amount
         );
 
         console2.log('Native commission (wei):', nativeCommission);

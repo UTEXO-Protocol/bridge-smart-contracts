@@ -103,14 +103,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (bytes(destinationChain).length == 0)   revert InvalidDestinationChain();
         if (fundsInRecords[operationId] != 0)      revert DuplicateOperationId();
 
-        // Quote commission for this route.
         (
             uint256 tokenCommission,
             uint256 nativeCommission,
             uint256 netAmount
         ) = commissionManager.calculateFundsInCommission(
-            _sourceChainName,
-            destinationChain,
+            block.chainid,
+            uint256(keccak256(bytes(destinationChain))),
             TOKEN,
             amount
         );
@@ -202,14 +201,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // Verify Bitcoin block header is known to BtcRelay (reverts if unknown).
         IBtcRelayView(btcRelay).verifyBlockheaderHash(blockHeight, commitmentHash);
 
-        // Quote commission for the outbound route.
         (
             uint256 tokenCommission,
             uint256 nativeCommission,
             uint256 netAmount
         ) = commissionManager.calculateFundsOutCommission(
-            sourceChain,
-            destChain,
+            uint256(keccak256(bytes(sourceChain))),
+            uint256(keccak256(bytes(destChain))),
             TOKEN,
             amount
         );

@@ -110,7 +110,7 @@ contract BridgeTest is Test {
     function _setFundsInTokenRule(uint256 percent) internal {
         vm.prank(deployer);
         cm.setCommissionRule(
-            SOURCE_CHAIN, DST_CHAIN, address(usdt0),
+            uint256(keccak256(bytes(SOURCE_CHAIN))), uint256(keccak256(bytes(DST_CHAIN))), address(usdt0),
             CommissionConfig({
                 stablePercent: percent,
                 multiplier: 100,
@@ -124,7 +124,7 @@ contract BridgeTest is Test {
     function _setFundsInNativeRule(uint256 percent) internal {
         vm.prank(deployer);
         cm.setCommissionRule(
-            SOURCE_CHAIN, DST_CHAIN, address(usdt0),
+            uint256(keccak256(bytes(SOURCE_CHAIN))), uint256(keccak256(bytes(DST_CHAIN))), address(usdt0),
             CommissionConfig({
                 stablePercent: percent,
                 multiplier: 100,
@@ -138,7 +138,7 @@ contract BridgeTest is Test {
     function _setFundsOutTokenRule(uint256 percent) internal {
         vm.prank(deployer);
         cm.setCommissionRule(
-            SRC_CHAIN, DST_CHAIN_OUT, address(usdt0),
+            uint256(keccak256(bytes(SRC_CHAIN))), uint256(keccak256(bytes(DST_CHAIN_OUT))), address(usdt0),
             CommissionConfig({
                 stablePercent: percent,
                 multiplier: 100,
@@ -152,7 +152,7 @@ contract BridgeTest is Test {
     function _setFundsOutNativeRule(uint256 percent) internal {
         vm.prank(deployer);
         cm.setCommissionRule(
-            SRC_CHAIN, DST_CHAIN_OUT, address(usdt0),
+            uint256(keccak256(bytes(SRC_CHAIN))), uint256(keccak256(bytes(DST_CHAIN_OUT))), address(usdt0),
             CommissionConfig({
                 stablePercent: percent,
                 multiplier: 100,
@@ -547,7 +547,7 @@ contract BridgeTest is Test {
         cm.setMockTokenToNativeRate(rate);
 
         (uint256 tokenC, uint256 nativeC, uint256 net) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN, DST_CHAIN, address(usdt0), AMOUNT);
+            cm.calculateFundsInCommission(uint256(keccak256(bytes(SOURCE_CHAIN))), uint256(keccak256(bytes(DST_CHAIN))), address(usdt0), AMOUNT);
         assertEq(tokenC, 0);
         assertGt(nativeC, 0);
         assertEq(net, AMOUNT);

@@ -4,6 +4,12 @@ pragma solidity 0.8.20;
 /**
  * @title ICommissionManager types & interface
  * @notice Shared enums and struct for {CommissionManager}; see `ICommissionManager` for the external API.
+ *
+ *         Chain identifiers — both `sourceChainId` and `destChainId` — are uint256
+ *         values. EVM chains use their native `block.chainid`. Non-EVM
+ *         destinations (RGB, Bitcoin, …) are assigned numeric ids by the Utexo
+ *         backend in a namespace reserved above the EVM range (see project
+ *         README for the conventions).
  */
 
 /// @notice Which bridge operation a route fee is tied to.
@@ -62,15 +68,15 @@ interface ICommissionManager {
     );
 
     event CommissionRuleUpdated(
-        string sourceChain,
-        string destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address indexed token,
         CommissionConfig config
     );
 
     event CommissionRuleCleared(
-        string sourceChain,
-        string destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address indexed token
     );
 
@@ -110,8 +116,8 @@ interface ICommissionManager {
     // ============ Core calculations ============
 
     function calculateFundsInCommission(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token,
         uint256 amount
     )
@@ -120,8 +126,8 @@ interface ICommissionManager {
         returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount);
 
     function calculateFundsOutCommission(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token,
         uint256 amount
     )
@@ -157,15 +163,15 @@ interface ICommissionManager {
     function setMockTokenToNativeRateForToken(address token, uint256 rate) external;
 
     function setCommissionRule(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token,
         CommissionConfig calldata config
     ) external;
 
     function clearCommissionRule(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token
     ) external;
 
@@ -182,14 +188,14 @@ interface ICommissionManager {
         );
 
     function getCommissionRule(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token
     ) external view returns (CommissionConfig memory);
 
     function buildRouteKey(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token
     ) external pure returns (bytes32);
 

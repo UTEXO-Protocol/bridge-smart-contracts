@@ -761,7 +761,7 @@ contract MultisigProxyTest is Test {
         // Seed commission by setting a fundsIn TOKEN rule and doing a deposit.
         vm.prank(address(proxy));
         cm.setCommissionRule(
-            SOURCE_CHAIN, DST_CHAIN, address(token),
+            uint256(keccak256(bytes(SOURCE_CHAIN))), uint256(keccak256(bytes(DST_CHAIN))), address(token),
             CommissionConfig({
                 stablePercent: 400, // 4%
                 multiplier: 100,

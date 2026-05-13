@@ -19,9 +19,11 @@ import {
  * @author UTEXO bridge stack
  * @notice On-chain commission quotes, owner configuration, and custody of bridge fees (ERC-20 and native).
  * @dev Blueprint v3-style design: **global defaults** plus optional **per-route overrides** keyed by
- *      `keccak256(abi.encode(sourceChain, destChain, token))`. Routes are **directional** (swapping
- *      source and destination yields a different key), so independent rules can apply to each leg of a
- *      round trip (e.g. ETH→RGB vs RGB→ETH).
+ *      `keccak256(abi.encode(sourceChainId, destChainId, token))`. Chain ids are `uint256` values: EVM
+ *      chains use their native `block.chainid`; non-EVM endpoints (RGB, Bitcoin, …) are assigned
+ *      numeric ids by the Utexo backend in a namespace reserved above the EVM range (see README).
+ *      Routes are **directional** (swapping source and destination yields a different key), so
+ *      independent rules can apply to each leg of a round trip (e.g. ETH→RGB vs RGB→ETH).
  *
  *      **Side (`CommissionSide`):** For a given route config, commission applies only to **either**
  *      `FUNDS_IN` **or** `FUNDS_OUT`, matching `calculateFundsInCommission` vs `calculateFundsOutCommission`.
@@ -52,7 +54,7 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
     /// @notice Maximum allowed `stablePercent` (9000 = 90%).
     uint256 private constant _MAX_STABLE_PERCENT = 9000;
 
-    /// @notice Per-route overrides; key = `buildRouteKey(sourceChain, destChain, token)`.
+    /// @notice Per-route overrides; key = `buildRouteKey(sourceChainId, destChainId, token)`.
     mapping(bytes32 => CommissionConfig) public commissionRules;
 
     /// @notice Accrued ERC-20 commission per token (tracks balance held for that token).
@@ -94,8 +96,11 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
 
     /**
      * @notice Quote commission for an inbound (`fundsIn`) transfer on this chain.
-     * @param sourceChain Origin chain id (must match configured route keys).
-     * @param destChain Destination chain id.
+     * @param sourceChainId Origin chain id (must match configured route keys).
+     *                      EVM source uses `block.chainid`; non-EVM source uses
+     *                      the backend's assigned numeric id.
+     * @param destChainId Destination chain id (EVM `block.chainid` or assigned
+     *                    backend id for non-EVM targets).
      * @param token ERC-20 token used for the transfer.
      * @param amount Gross amount bridged (same units as token).
      * @return tokenCommission Fee in token smallest units (0 if not `TOKEN` currency).
@@ -105,8 +110,8 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
      *      `resolvedMockTokenToNativeRate` and `IERC20Metadata(token).decimals()`.
      */
     function calculateFundsInCommission(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token,
         uint256 amount
     )
@@ -118,7 +123,7 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
             uint256 netAmount
         )
     {
-        bytes32 ruleKey = buildRouteKey(sourceChain, destChain, token);
+        bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
         CommissionConfig memory config = getEffectiveConfig(ruleKey);
 
         // Only calculate if this config is for FUNDS_IN
@@ -154,8 +159,10 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
 
     /**
      * @notice Quote commission for an outbound (`fundsOut`) release on this chain.
-     * @param sourceChain Origin chain id (must match configured route keys).
-     * @param destChain Destination chain id.
+     * @param sourceChainId Origin chain id (must match configured route keys).
+     *                      For RGB→EVM the source is the backend's assigned id
+     *                      for the Bitcoin-side network.
+     * @param destChainId Destination chain id (the EVM chain receiving the release).
      * @param token ERC-20 token being released.
      * @param amount Gross amount to release before fee.
      * @return tokenCommission Fee in token units (0 if not `TOKEN` currency).
@@ -164,8 +171,8 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
      * @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_OUT`. See `calculateFundsInCommission` for rates/decimals.
      */
     function calculateFundsOutCommission(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token,
         uint256 amount
     )
@@ -177,7 +184,7 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
             uint256 netAmount
         )
     {
-        bytes32 ruleKey = buildRouteKey(sourceChain, destChain, token);
+        bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
         CommissionConfig memory config = getEffectiveConfig(ruleKey);
 
         // Only calculate if this config is for FUNDS_OUT
@@ -312,15 +319,15 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
     }
 
     /**
-     * @notice Writes or replaces the override for `buildRouteKey(sourceChain, destChain, token)`.
-     * @param sourceChain Route source id (directional; paired with `destChain`).
-     * @param destChain Route destination id.
+     * @notice Writes or replaces the override for `buildRouteKey(sourceChainId, destChainId, token)`.
+     * @param sourceChainId Route source id (directional; paired with `destChainId`).
+     * @param destChainId Route destination id.
      * @param token ERC-20 token (non-zero).
      * @param config Rule parameters; `isSet` is forced true on store.
      */
     function setCommissionRule(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token,
         CommissionConfig calldata config
     ) external onlyOwner {
@@ -330,29 +337,29 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
         if (config.multiplier == 0) revert MultiplierZero();
 
         // Build route key
-        bytes32 key = buildRouteKey(sourceChain, destChain, token);
+        bytes32 key = buildRouteKey(sourceChainId, destChainId, token);
 
         commissionRules[key] = config;
         commissionRules[key].isSet = true;
 
-        emit CommissionRuleUpdated(sourceChain, destChain, token, config);
+        emit CommissionRuleUpdated(sourceChainId, destChainId, token, config);
     }
 
     /**
      * @notice Deletes the override for this route key; `getEffectiveConfig` will use globals.
-     * @param sourceChain Route source id.
-     * @param destChain Route destination id.
+     * @param sourceChainId Route source id.
+     * @param destChainId Route destination id.
      * @param token ERC-20 token (non-zero).
      */
     function clearCommissionRule(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token
     ) external onlyOwner {
         if (token == address(0)) revert InvalidToken();
-        bytes32 key = buildRouteKey(sourceChain, destChain, token);
+        bytes32 key = buildRouteKey(sourceChainId, destChainId, token);
         delete commissionRules[key];
-        emit CommissionRuleCleared(sourceChain, destChain, token);
+        emit CommissionRuleCleared(sourceChainId, destChainId, token);
     }
 
     /**
@@ -419,34 +426,33 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
 
     /**
      * @notice Raw storage read for a route (may be unset; check `config.isSet`).
-     * @param sourceChain Route source id.
-     * @param destChain Route destination id.
+     * @param sourceChainId Route source id.
+     * @param destChainId Route destination id.
      * @param token ERC-20 token.
      * @return config Stored override or empty struct if never set.
      */
     function getCommissionRule(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token
     ) external view returns (CommissionConfig memory) {
-        bytes32 ruleKey = buildRouteKey(sourceChain, destChain, token);
+        bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
         return commissionRules[ruleKey];
     }
 
     /**
      * @notice Deterministic route id for commission rules.
-     * @param sourceChain Route source id.
-     * @param destChain Route destination id.
+     * @param sourceChainId Route source id.
+     * @param destChainId Route destination id.
      * @param token ERC-20 token address.
-     * @return key `keccak256(abi.encode(sourceChain, destChain, token))`.
-     * @dev Uses `abi.encode` (not `encodePacked`) to avoid ambiguous hashing over dynamic strings.
+     * @return key `keccak256(abi.encode(sourceChainId, destChainId, token))`.
      */
     function buildRouteKey(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token
     ) public pure returns (bytes32) {
-        return keccak256(abi.encode(sourceChain, destChain, token));
+        return keccak256(abi.encode(sourceChainId, destChainId, token));
     }
 
     // ============ Commission Collection Functions ============

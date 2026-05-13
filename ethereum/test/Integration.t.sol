@@ -200,7 +200,7 @@ contract IntegrationTest is Test {
 
         // Sanity: CM now quotes commission for both routes.
         (uint256 tInQuote,, uint256 netIn) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN, RGB_CHAIN, address(token), USER_DEPOSIT);
+            cm.calculateFundsInCommission(uint256(keccak256(bytes(SOURCE_CHAIN))), uint256(keccak256(bytes(RGB_CHAIN))), address(token), USER_DEPOSIT);
         assertEq(tInQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, 'quote in');
         assertEq(netIn,    USER_DEPOSIT - tInQuote, 'net in');
 
@@ -353,7 +353,7 @@ contract IntegrationTest is Test {
         );
 
         (, uint256 nativeQuote, uint256 netQuote) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN, RGB_CHAIN, address(token), USER_DEPOSIT);
+            cm.calculateFundsInCommission(uint256(keccak256(bytes(SOURCE_CHAIN))), uint256(keccak256(bytes(RGB_CHAIN))), address(token), USER_DEPOSIT);
         assertEq(netQuote,    USER_DEPOSIT,                                        'NATIVE: full amount bridges');
         assertEq(nativeQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, 'native quote matches 1:1 rate');
 
