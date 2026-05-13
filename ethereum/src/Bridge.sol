@@ -16,15 +16,24 @@ import { ICommissionManager } from './interfaces/ICommissionManager.sol';
 ///         commission to a standalone CommissionManager so protocol fees are held
 ///         separately from bridge liquidity.
 ///
-/// @dev - Owner must be MultisigProxy. fundsOut is called via MultisigProxy.execute()
-///        (TEE M-of-N).
-///      - fundsIn is open — any user can lock tokens. Validation of destination
-///        address and chain happens on the backend before minting on the other side.
-///      - fundsOut verifies the Bitcoin block header via BtcRelay before releasing funds.
-///      - Commission routing: fundsIn uses route key
-///        `(sourceChainName, destinationChain, TOKEN)`; fundsOut uses
-///        `(sourceChain, destChain, TOKEN)`. NATIVE currency is only supported on
-///        fundsIn — revert on fundsOut.
+/// @dev - Owner is `MultisigProxy`. `fundsOut` is called via
+///        `MultisigProxy.execute()` (TEE M-of-N).
+///      - `fundsIn` has two overloads:
+///        • Public 4-arg: any EVM user on this chain can lock tokens; the
+///          source chain id is filled with `block.chainid`.
+///        • Adapter-only 5-arg: callable only by the trusted `lzAdapter`,
+///          which forwards a non-spoofable `sourceChainId` carried in
+///          `composeMsg` from the source chain. Both overloads share the same
+///          private body via `_fundsIn`.
+///      - `fundsOut` verifies the Bitcoin block header via BtcRelay and the
+///        referenced `fundsIn` records before releasing funds.
+///      - Commission routing keys on `(sourceChainId, destinationChainId,
+///        TOKEN)` for both directions. NATIVE currency is only supported on
+///        `fundsIn`; `fundsOut` reverts if a NATIVE rule is configured.
+///      - `lzAdapter` is mutable so federation governance can rotate adapter
+///        deployments without redeploying the Bridge (the adapter itself
+///        immutably points back at the Bridge, so a swap is a one-way
+///        Bridge → Adapter pointer update).
 contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -38,10 +47,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
-    /// @notice Hash of this bridge's chain identifier (the `sourceChain` half of
-    ///         the fundsIn route key). The string itself is kept immutable-ish via
-    ///         storage + an immutable hash for quick equality checks if ever needed.
-    string private _sourceChainName;
+    /// @inheritdoc IBridge
+    address public override lzAdapter;
 
     /// @notice On-chain record of fundsIn operations: operationId => netAmount.
     ///         Stores the amount actually bridged after token commission is deducted;
@@ -55,37 +62,53 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     mapping(uint256 => bool) public consumedBurnIds;
 
     // =========================================================================
+    // Modifiers
+    // =========================================================================
+
+    /// @dev Restricts a function to the configured `lzAdapter`. Until federation
+    ///      sets a non-zero adapter, the modifier closes the function for every
+    ///      caller (no EOA or contract has `address(0)` as its `msg.sender`).
+    modifier onlyLZAdapter() {
+        if (msg.sender != lzAdapter) revert NotLZAdapter();
+        _;
+    }
+
+    // =========================================================================
     // Constructor
     // =========================================================================
 
     /// @param usdt0_             USDT0 token address on this chain.
     /// @param btcRelay_          BtcRelay contract for Bitcoin header verification.
     /// @param commissionManager_ CommissionManager that receives protocol fees.
-    /// @param sourceChainName_   This bridge's chain id as used in CommissionManager
-    ///                           route keys (e.g. "arbitrum"). Non-empty, immutable.
+    /// @param lzAdapter_         Initial trusted LayerZero adapter; pass
+    ///                           `address(0)` if it has not been deployed yet
+    ///                           (federation can wire it up later via
+    ///                           `setLZAdapter`).
     constructor(
         address usdt0_,
         address btcRelay_,
         address payable commissionManager_,
-        string memory sourceChainName_
+        address lzAdapter_
     ) BridgeBase(usdt0_) {
         if (btcRelay_ == address(0))          revert InvalidBtcRelayAddress();
         if (commissionManager_ == address(0)) revert InvalidCommissionManagerAddress();
-        if (bytes(sourceChainName_).length == 0) revert InvalidSourceChainName();
 
         btcRelay          = btcRelay_;
         commissionManager = ICommissionManager(commissionManager_);
-        _sourceChainName  = sourceChainName_;
+        lzAdapter         = lzAdapter_;
     }
 
     // =========================================================================
-    // View
+    // External — admin
     // =========================================================================
 
-    /// @notice Returns the source chain identifier used as the origin side of the
-    ///         CommissionManager route key for fundsIn.
-    function sourceChainName() external view returns (string memory) {
-        return _sourceChainName;
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`; federation governance gates this call on
+    ///      its M-of-N timelock flow.
+    function setLZAdapter(address newAdapter) external override onlyOwner {
+        address old = lzAdapter;
+        lzAdapter = newAdapter;
+        emit LZAdapterUpdated(old, newAdapter);
     }
 
     // =========================================================================
@@ -95,56 +118,35 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @inheritdoc IBridge
     function fundsIn(
         uint256 amount,
-        string  calldata destinationChain,
+        uint256 destinationChainId,
         string  calldata destinationAddress,
         uint256 operationId
-    ) external payable whenNotPaused nonReentrant {
-        if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
-        if (bytes(destinationChain).length == 0)   revert InvalidDestinationChain();
-        if (fundsInRecords[operationId] != 0)      revert DuplicateOperationId();
-
-        (
-            uint256 tokenCommission,
-            uint256 nativeCommission,
-            uint256 netAmount
-        ) = commissionManager.calculateFundsInCommission(
-            block.chainid,
-            uint256(keccak256(bytes(destinationChain))),
-            TOKEN,
-            amount
-        );
-
-        // Native payment must match the quote exactly (includes the zero-native case).
-        if (msg.value != nativeCommission) revert NativeValueMismatch();
-
-        // Pull the full gross amount from the user into this contract.
-        IERC20(TOKEN).safeTransferFrom(_msgSender(), address(this), amount);
-
-        // Record the net amount as the bridged liquidity for this operation.
-        fundsInRecords[operationId] = netAmount;
-
-        // Forward token commission, if any, to the CommissionManager pool.
-        if (tokenCommission != 0) {
-            IERC20(TOKEN).safeTransfer(address(commissionManager), tokenCommission);
-            commissionManager.receiveTokenCommission(TOKEN);
-        }
-
-        // Forward native commission, if any, to the CommissionManager pool.
-        if (nativeCommission != 0) {
-            (bool ok, ) = address(commissionManager).call{ value: nativeCommission }('');
-            if (!ok) revert NativeValueMismatch();
-        }
-
-        emit FundsIn(_msgSender(), operationId, netAmount);
-        emit BridgeFundsIn(
+    ) external payable override whenNotPaused nonReentrant {
+        _fundsIn(
             _msgSender(),
-            operationId,
             amount,
-            netAmount,
-            tokenCommission,
-            nativeCommission,
-            destinationChain,
-            destinationAddress
+            block.chainid,
+            destinationChainId,
+            destinationAddress,
+            operationId
+        );
+    }
+
+    /// @inheritdoc IBridge
+    function fundsIn(
+        uint256 amount,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string  calldata destinationAddress,
+        uint256 operationId
+    ) external payable override whenNotPaused nonReentrant onlyLZAdapter {
+        _fundsIn(
+            _msgSender(),
+            amount,
+            sourceChainId,
+            destinationChainId,
+            destinationAddress,
+            operationId
         );
     }
 
@@ -158,14 +160,16 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 amount,
         uint256 operationId,
         uint256 burnId,
-        string  calldata sourceChain,
-        string  calldata destChain,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
         string  calldata sourceAddress,
         uint256 blockHeight,
         bytes32 commitmentHash,
         uint256[] calldata fundsInIds
-    ) external onlyOwner nonReentrant {
-        if (recipient == address(0)) revert InvalidRecipientAddress();
+    ) external override onlyOwner nonReentrant {
+        if (recipient == address(0))               revert InvalidRecipientAddress();
+        if (sourceChainId == 0)                    revert InvalidSourceChainId();
+        if (destinationChainId == 0)               revert InvalidDestinationChainId();
         if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 
         // Set the flag before any external interaction so a revert
@@ -206,8 +210,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             uint256 nativeCommission,
             uint256 netAmount
         ) = commissionManager.calculateFundsOutCommission(
-            uint256(keccak256(bytes(sourceChain))),
-            uint256(keccak256(bytes(destChain))),
+            sourceChainId,
+            destinationChainId,
             TOKEN,
             amount
         );
@@ -232,8 +236,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             tokenCommission,
             operationId,
             burnId,
-            sourceChain,
-            destChain,
+            sourceChainId,
+            destinationChainId,
             sourceAddress,
             blockHeight,
             commitmentHash
@@ -248,5 +252,69 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         onlyOwner
     {
         revert RenounceOwnershipBlocked();
+    }
+
+    // =========================================================================
+    // Internal
+    // =========================================================================
+
+    /// @dev Shared body for both `fundsIn` overloads.
+    function _fundsIn(
+        address from,
+        uint256 amount,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string memory destinationAddress,
+        uint256 operationId
+    ) private {
+        if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
+        if (sourceChainId == 0)                    revert InvalidSourceChainId();
+        if (destinationChainId == 0)               revert InvalidDestinationChainId();
+        if (fundsInRecords[operationId] != 0)      revert DuplicateOperationId();
+
+        (
+            uint256 tokenCommission,
+            uint256 nativeCommission,
+            uint256 netAmount
+        ) = commissionManager.calculateFundsInCommission(
+            sourceChainId,
+            destinationChainId,
+            TOKEN,
+            amount
+        );
+
+        // Native payment must match the quote exactly (includes the zero-native case).
+        if (msg.value != nativeCommission) revert NativeValueMismatch();
+
+        // Pull the full gross amount from `from` into this contract.
+        IERC20(TOKEN).safeTransferFrom(from, address(this), amount);
+
+        // Record the net amount as the bridged liquidity for this operation.
+        fundsInRecords[operationId] = netAmount;
+
+        // Forward token commission, if any, to the CommissionManager pool.
+        if (tokenCommission != 0) {
+            IERC20(TOKEN).safeTransfer(address(commissionManager), tokenCommission);
+            commissionManager.receiveTokenCommission(TOKEN);
+        }
+
+        // Forward native commission, if any, to the CommissionManager pool.
+        if (nativeCommission != 0) {
+            (bool ok, ) = address(commissionManager).call{ value: nativeCommission }('');
+            if (!ok) revert NativeValueMismatch();
+        }
+
+        emit FundsIn(from, operationId, netAmount);
+        emit BridgeFundsIn(
+            from,
+            operationId,
+            amount,
+            netAmount,
+            tokenCommission,
+            nativeCommission,
+            sourceChainId,
+            destinationChainId,
+            destinationAddress
+        );
     }
 }

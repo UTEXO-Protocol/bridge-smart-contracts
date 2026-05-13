@@ -124,7 +124,7 @@ contract IntegrationTest is Test {
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 1);
 
         cm     = new CommissionManager(predictedBridge);
-        bridge = new Bridge(address(token), address(btcRelay), payable(address(cm)), SOURCE_CHAIN);
+        bridge = new Bridge(address(token), address(btcRelay), payable(address(cm)), address(0));
 
         address[] memory enc = new address[](3);
         enc[0] = encA1; enc[1] = encA2; enc[2] = encA3;
@@ -212,7 +212,7 @@ contract IntegrationTest is Test {
         vm.prank(user);
         bridge.fundsIn(
             USER_DEPOSIT,
-            RGB_CHAIN,
+            uint256(keccak256(bytes(RGB_CHAIN))),
             'rgb:asset1qp0y3mq/utxo1abc',
             TX_ID_IN
         );
@@ -362,7 +362,7 @@ contract IntegrationTest is Test {
         vm.prank(user);
         bridge.fundsIn{ value: nativeQuote }(
             USER_DEPOSIT,
-            RGB_CHAIN,
+            uint256(keccak256(bytes(RGB_CHAIN))),
             'rgb:asset1qp0y3mq/utxo1abc',
             TX_ID_IN
         );

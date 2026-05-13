@@ -14,7 +14,10 @@ import { Bridge } from '../../src/Bridge.sol';
 ///   USDT0_ADDRESS             — accepted ERC-20 token
 ///   BTC_RELAY_ADDRESS         — BtcRelay contract for Bitcoin header verification
 ///   COMMISSION_MANAGER        — CommissionManager contract (must already be deployed)
-///   SOURCE_CHAIN_NAME         — this bridge's chain id for CM route keys (e.g. "arbitrum")
+///   LZ_ADAPTER                — Optional initial LayerZero adapter address;
+///                               pass `0x0` if the adapter has not been deployed
+///                               yet, and wire it in later via federation
+///                               governance (`setLZAdapter`).
 ///
 /// Usage:
 ///   forge script script/deploy/DeployBridge.s.sol \
@@ -25,10 +28,10 @@ contract DeployBridge is Script {
         address usdt0             = vm.envAddress('USDT0_ADDRESS');
         address btcRelay          = vm.envAddress('BTC_RELAY_ADDRESS');
         address commissionManager = vm.envAddress('COMMISSION_MANAGER');
-        string memory srcChain    = vm.envString('SOURCE_CHAIN_NAME');
+        address lzAdapter         = vm.envOr('LZ_ADAPTER', address(0));
 
         vm.startBroadcast(pk);
-        bridge = new Bridge(usdt0, btcRelay, payable(commissionManager), srcChain);
+        bridge = new Bridge(usdt0, btcRelay, payable(commissionManager), lzAdapter);
         vm.stopBroadcast();
 
         console2.log('Bridge deployed at:  ', address(bridge));
@@ -36,6 +39,6 @@ contract DeployBridge is Script {
         console2.log('Token:               ', bridge.TOKEN());
         console2.log('BtcRelay:            ', bridge.btcRelay());
         console2.log('CommissionManager:   ', address(bridge.commissionManager()));
-        console2.log('Source chain name:   ', bridge.sourceChainName());
+        console2.log('LZ adapter:          ', bridge.lzAdapter());
     }
 }

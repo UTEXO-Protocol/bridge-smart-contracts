@@ -89,7 +89,7 @@ contract MultisigProxyTest is Test {
     uint256 constant BTC_CONFIRMATIONS = 6;
 
     bytes4  constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+        'fundsOut(address,uint256,uint256,uint256,uint256,uint256,string,uint256,bytes32,uint256[])'
     ));
 
     function setUp() public {
@@ -109,7 +109,7 @@ contract MultisigProxyTest is Test {
         cm = new CommissionManager(deployer);
 
         vm.prank(deployer);
-        bridge = new Bridge(address(token), address(btcRelay), payable(address(cm)), SOURCE_CHAIN);
+        bridge = new Bridge(address(token), address(btcRelay), payable(address(cm)), address(0));
 
         vm.prank(deployer);
         cm.setBridgeAddress(address(bridge));
@@ -142,7 +142,7 @@ contract MultisigProxyTest is Test {
         vm.prank(user);
         token.approve(address(bridge), type(uint256).max);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT * 5, DST_CHAIN, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT * 5, uint256(keccak256(bytes(DST_CHAIN))), DST_ADDR, TX_ID);
     }
 
     // ========================================================================
@@ -171,7 +171,7 @@ contract MultisigProxyTest is Test {
     function _fundsOutCalldata() internal view returns (bytes memory) {
         return abi.encodeWithSelector(
             FUNDS_OUT_SELECTOR,
-            recipient, AMOUNT, TX_ID, BURN_ID, SRC_CHAIN, DST_CHAIN_OUT, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _fundsInIds()
+            recipient, AMOUNT, TX_ID, BURN_ID, uint256(keccak256(bytes(SRC_CHAIN))), uint256(keccak256(bytes(DST_CHAIN_OUT))), SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _fundsInIds()
         );
     }
 
@@ -773,7 +773,7 @@ contract MultisigProxyTest is Test {
 
         uint256 depositAmount = 100e18;
         vm.prank(user);
-        bridge.fundsIn(depositAmount, DST_CHAIN, DST_ADDR, TX_ID + 1);
+        bridge.fundsIn(depositAmount, uint256(keccak256(bytes(DST_CHAIN))), DST_ADDR, TX_ID + 1);
 
         uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
         assertEq(cm.tokenCommissionPool(address(token)), expectedCommission);
