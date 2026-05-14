@@ -54,8 +54,13 @@ contract DeployMultisigProxy is Script {
         console2.log('Commission recipient:     ', proxy.commissionRecipient());
         console2.log('Timelock duration (sec):  ', proxy.timelockDuration());
         console2.log('');
+        console2.log('lzAdapter (proxy):        ', proxy.lzAdapter());
+        console2.log('');
         console2.log('Next steps:');
         console2.log('  1) Transfer Bridge ownership to MultisigProxy.');
         console2.log('  2) Transfer CommissionManager ownership to MultisigProxy.');
+        console2.log('  3) Once the LayerZero adapter is deployed:');
+        console2.log('     a) propose Bridge.setLZAdapter(adapter) via proposeAdminExecute');
+        console2.log('     b) propose MultisigProxy.lzAdapter via proposeUpdateLZAdapter');
     }
 }

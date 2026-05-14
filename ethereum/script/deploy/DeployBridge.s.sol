@@ -15,9 +15,14 @@ import { Bridge } from '../../src/Bridge.sol';
 ///   BTC_RELAY_ADDRESS         — BtcRelay contract for Bitcoin header verification
 ///   COMMISSION_MANAGER        — CommissionManager contract (must already be deployed)
 ///   LZ_ADAPTER                — Optional initial LayerZero adapter address;
-///                               pass `0x0` if the adapter has not been deployed
-///                               yet, and wire it in later via federation
-///                               governance (`setLZAdapter`).
+///                               omit or pass `0x0` if the adapter has not been
+///                               deployed yet. Once the adapter exists in
+///                               `utexo-usdt0-contracts`, wire it in via
+///                               federation governance: `proposeAdminExecute`
+///                               on MultisigProxy with calldata
+///                               `Bridge.setLZAdapter(adapter)`. The Bridge
+///                               accepts adapter-only `fundsInFromAdapter`
+///                               calls *only* from the configured adapter.
 ///
 /// Usage:
 ///   forge script script/deploy/DeployBridge.s.sol \

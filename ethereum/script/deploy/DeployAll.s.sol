@@ -20,10 +20,6 @@ import { MultisigProxy } from '../../src/MultisigProxy.sol';
 ///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD,
 ///   COMMISSION_RECIPIENT, TIMELOCK_DURATION
 ///
-/// Note: the Bridge's `lzAdapter` is left as `address(0)` here. After this
-/// flow finishes the adapter is deployed in `utexo-usdt0-contracts` and
-/// federation governance points the Bridge at it via `setLZAdapter` on the
-/// MultisigProxy admin-execute path.
 ///
 /// Usage:
 ///   forge script script/deploy/DeployAll.s.sol \
