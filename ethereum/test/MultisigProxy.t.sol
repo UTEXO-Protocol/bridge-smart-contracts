@@ -40,6 +40,7 @@ contract MultisigProxyTest is Test {
     event TeeAllowedCallUpdated(address indexed target, bytes4 indexed selector, bool allowed);
     event TimelockDurationUpdated(uint256 newDuration);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
+    event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
 
     MultisigProxy     proxy;
     Bridge            bridge;
@@ -73,12 +74,11 @@ contract MultisigProxyTest is Test {
     bytes32 domainSep;
 
     // Canonical constants for Bridge calls
-    string  constant SOURCE_CHAIN = 'arbitrum';
-    string  constant DST_CHAIN    = 'rgb';
-    string  constant DST_ADDR     = 'rgb:asset/utxo1abc';
-    string  constant SRC_CHAIN    = 'rgb';
-    string  constant DST_CHAIN_OUT = 'arbitrum';
-    string  constant SRC_ADDR     = 'rgb:sender/utxo1src';
+    // Chain identifiers are uint256: foundry tests run with block.chainid = 31337.
+    uint256 constant SOURCE_CHAIN_ID = 31337;
+    uint256 constant RGB_CHAIN_ID    = 1_000_001;
+    string  constant DST_ADDR        = 'rgb:asset/utxo1abc';
+    string  constant SRC_ADDR        = 'rgb:sender/utxo1src';
     uint256 constant AMOUNT    = 100e18;
     uint256 constant TX_ID     = 42;
     uint256 constant BURN_ID   = 9_001;
@@ -142,7 +142,7 @@ contract MultisigProxyTest is Test {
         vm.prank(user);
         token.approve(address(bridge), type(uint256).max);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT * 5, uint256(keccak256(bytes(DST_CHAIN))), DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT * 5, RGB_CHAIN_ID, DST_ADDR, TX_ID);
     }
 
     // ========================================================================
@@ -171,7 +171,7 @@ contract MultisigProxyTest is Test {
     function _fundsOutCalldata() internal view returns (bytes memory) {
         return abi.encodeWithSelector(
             FUNDS_OUT_SELECTOR,
-            recipient, AMOUNT, TX_ID, BURN_ID, uint256(keccak256(bytes(SRC_CHAIN))), uint256(keccak256(bytes(DST_CHAIN_OUT))), SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _fundsInIds()
+            recipient, AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _fundsInIds()
         );
     }
 
@@ -761,7 +761,7 @@ contract MultisigProxyTest is Test {
         // Seed commission by setting a fundsIn TOKEN rule and doing a deposit.
         vm.prank(address(proxy));
         cm.setCommissionRule(
-            uint256(keccak256(bytes(SOURCE_CHAIN))), uint256(keccak256(bytes(DST_CHAIN))), address(token),
+            SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token),
             CommissionConfig({
                 stablePercent: 400, // 4%
                 multiplier: 100,
@@ -773,7 +773,7 @@ contract MultisigProxyTest is Test {
 
         uint256 depositAmount = 100e18;
         vm.prank(user);
-        bridge.fundsIn(depositAmount, uint256(keccak256(bytes(DST_CHAIN))), DST_ADDR, TX_ID + 1);
+        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, TX_ID + 1);
 
         uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
         assertEq(cm.tokenCommissionPool(address(token)), expectedCommission);
@@ -905,6 +905,173 @@ contract MultisigProxyTest is Test {
 
         vm.expectRevert(IMultisigProxy.IndexOutOfRange.selector);
         proxy.verifyEnclaveSignature(digest, sig, 99);
+    }
+
+    // ========================================================================
+    // Propose + Execute — UpdateLZAdapter
+    // ========================================================================
+
+    function _proposeUpdateLZAdapter(address newAdapter) internal returns (bytes32 id) {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeUpdateLZAdapter(domainSep, newAdapter, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+        id = proxy.proposeUpdateLZAdapter(newAdapter, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_lzAdapter_defaultsToZero() public view {
+        assertEq(proxy.lzAdapter(), address(0));
+    }
+
+    function test_proposeUpdateLZAdapter_executeSetsAdapter() public {
+        address newAdapter = makeAddr('lzAdapter');
+        bytes32 id = _proposeUpdateLZAdapter(newAdapter);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        vm.expectEmit(true, true, false, false);
+        emit LZAdapterUpdated(address(0), newAdapter);
+
+        proxy.executeProposal(id, abi.encode(newAdapter));
+        assertEq(proxy.lzAdapter(), newAdapter);
+    }
+
+    function test_proposeUpdateLZAdapter_canRotateToZero() public {
+        address newAdapter = makeAddr('lzAdapter');
+        bytes32 id = _proposeUpdateLZAdapter(newAdapter);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, abi.encode(newAdapter));
+        assertEq(proxy.lzAdapter(), newAdapter);
+
+        // Rotate back to zero — closes AdminExecuteAdapter path.
+        // proposalNonce auto-increments, so the second proposal lives at a different id.
+        bytes32 id2 = _proposeUpdateLZAdapter(address(0));
+        // Fresh timelock from the *second* proposal's proposedAt. Use a large
+        // absolute warp so the timelock check passes regardless of foundry's
+        // current block.timestamp evaluation quirks.
+        vm.warp(block.timestamp + 2 * TIMELOCK + 2);
+
+        proxy.executeProposal(id2, abi.encode(address(0)));
+        assertEq(proxy.lzAdapter(), address(0));
+    }
+
+    function test_proposeUpdateLZAdapter_revertsOnDataMismatch() public {
+        address newAdapter = makeAddr('lzAdapter');
+        bytes32 id = _proposeUpdateLZAdapter(newAdapter);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.DataMismatch.selector);
+        proxy.executeProposal(id, abi.encode(makeAddr('different')));
+    }
+
+    function test_proposeUpdateLZAdapter_canBeCancelled() public {
+        address newAdapter = makeAddr('lzAdapter');
+        bytes32 id = _proposeUpdateLZAdapter(newAdapter);
+
+        uint256 cNonce = proxy.proposalNonce();
+        uint256 cDeadline = block.timestamp + 1 hours;
+        bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cNonce, cDeadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory cSigs = MultisigHelper.signAll(vm, cDigest, pks);
+
+        vm.expectEmit(true, false, false, false);
+        emit ProposalCancelled(id);
+        proxy.cancelProposal(id, cNonce, cDeadline, bitmap, cSigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.NotPending.selector);
+        proxy.executeProposal(id, abi.encode(newAdapter));
+        assertEq(proxy.lzAdapter(), address(0));
+    }
+
+    // ========================================================================
+    // Propose + Execute — AdminExecuteAdapter
+    // ========================================================================
+
+    function test_proposeAdminExecuteAdapter_revertsIfAdapterUnset() public {
+        // Register an arbitrary adapter call; lzAdapter is still address(0).
+        bytes memory callData = abi.encodeWithSignature('mint(address,uint256)', user, 1e18);
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteAdapter(
+            domainSep, bytes4(callData), callData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.ZeroTarget.selector);
+        proxy.executeProposal(id, callData);
+    }
+
+    function test_proposeAdminExecuteAdapter_executesCallOnAdapter() public {
+        // 1. Set lzAdapter to a MockERC20 (its `mint(address,uint256)` is public).
+        MockERC20 adapter = new MockERC20('LZ Stub', 'LZS');
+        bytes32 idSet = _proposeUpdateLZAdapter(address(adapter));
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(idSet, abi.encode(address(adapter)));
+        assertEq(proxy.lzAdapter(), address(adapter));
+
+        // 2. Propose an AdminExecuteAdapter call: mint 1e18 to `recipient`.
+        bytes memory callData = abi.encodeWithSignature('mint(address,uint256)', recipient, 1e18);
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteAdapter(
+            domainSep, bytes4(callData), callData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, callData);
+
+        assertEq(adapter.balanceOf(recipient), 1e18);
+    }
+
+    function test_proposeAdminExecuteAdapter_revertsOnEmptyCallData() public {
+        bytes memory callData = '';
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        // We can't really build a valid digest for empty calldata via the proxy's
+        // assembly-based selector load — just confirm the explicit guard fires.
+        bytes[] memory sigs = new bytes[](pks.length);
+        for (uint256 i = 0; i < pks.length; i++) sigs[i] = new bytes(65);
+
+        vm.expectRevert(IMultisigProxy.CallDataTooShort.selector);
+        proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_proposeAdminExecuteAdapter_propagatesAdapterRevert() public {
+        // Adapter = MockERC20. Call a non-existent function so the fallback reverts.
+        MockERC20 adapter = new MockERC20('LZ Stub', 'LZS');
+        bytes32 idSet = _proposeUpdateLZAdapter(address(adapter));
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(idSet, abi.encode(address(adapter)));
+
+        bytes memory callData = abi.encodeWithSignature('nonExistent()');
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteAdapter(
+            domainSep, bytes4(callData), callData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        // MockERC20 has no fallback — call returns false and _propagateRevert bubbles up.
+        vm.expectRevert();
+        proxy.executeProposal(id, callData);
     }
 
     function test_domainSeparator_matchesHelper() public view {

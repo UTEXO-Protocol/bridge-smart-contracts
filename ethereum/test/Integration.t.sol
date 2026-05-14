@@ -61,8 +61,8 @@ contract IntegrationTest is Test {
     // Constants
     // =========================================================================
 
-    string  constant SOURCE_CHAIN = 'arbitrum'; // this chain
-    string  constant RGB_CHAIN    = 'rgb';
+    uint256 constant SOURCE_CHAIN_ID = 31337;     // foundry default block.chainid
+    uint256 constant RGB_CHAIN_ID    = 1_000_001; // backend-assigned for RGB
 
     uint256 constant USER_DEPOSIT = 100 ether; // 100 tokens gross
     // FUNDS_IN route: 2% token commission (stablePercent = 200, multiplier = 100 → 200/100/100 = 2%).
@@ -83,7 +83,7 @@ contract IntegrationTest is Test {
     uint256 constant TIMELOCK = 1 hours;
 
     bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+        'fundsOut(address,uint256,uint256,uint256,uint256,uint256,string,uint256,bytes32,uint256[])'
     ));
 
     // =========================================================================
@@ -97,8 +97,8 @@ contract IntegrationTest is Test {
         uint256 tokenCommission,
         uint256 operationId,
         uint256 burnId,
-        string  sourceChain,
-        string  destChain,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
         string  sourceAddress,
         uint256 blockHeight,
         bytes32 commitmentHash
@@ -173,7 +173,7 @@ contract IntegrationTest is Test {
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
                 ICommissionManager.setCommissionRule.selector,
-                SOURCE_CHAIN, RGB_CHAIN, address(token),
+                SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_IN_PERCENT,
                     multiplier:    FUNDS_IN_MULT,
@@ -187,7 +187,7 @@ contract IntegrationTest is Test {
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
                 ICommissionManager.setCommissionRule.selector,
-                RGB_CHAIN, SOURCE_CHAIN, address(token),
+                RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_OUT_PERCENT,
                     multiplier:    FUNDS_OUT_MULT,
@@ -200,7 +200,7 @@ contract IntegrationTest is Test {
 
         // Sanity: CM now quotes commission for both routes.
         (uint256 tInQuote,, uint256 netIn) =
-            cm.calculateFundsInCommission(uint256(keccak256(bytes(SOURCE_CHAIN))), uint256(keccak256(bytes(RGB_CHAIN))), address(token), USER_DEPOSIT);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT);
         assertEq(tInQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, 'quote in');
         assertEq(netIn,    USER_DEPOSIT - tInQuote, 'net in');
 
@@ -212,7 +212,7 @@ contract IntegrationTest is Test {
         vm.prank(user);
         bridge.fundsIn(
             USER_DEPOSIT,
-            uint256(keccak256(bytes(RGB_CHAIN))),
+            RGB_CHAIN_ID,
             'rgb:asset1qp0y3mq/utxo1abc',
             TX_ID_IN
         );
@@ -239,8 +239,8 @@ contract IntegrationTest is Test {
             netBridgedIn,          // amount = full bridged pool from this deposit
             TX_ID_OUT,
             BURN_ID,
-            RGB_CHAIN,
-            SOURCE_CHAIN,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
             'rgb:sender/utxo1src',
             BLOCK_HEIGHT,
             COMMITMENT_HASH,
@@ -265,8 +265,8 @@ contract IntegrationTest is Test {
             tokenCommissionOut,
             TX_ID_OUT,
             BURN_ID,
-            RGB_CHAIN,
-            SOURCE_CHAIN,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
             'rgb:sender/utxo1src',
             BLOCK_HEIGHT,
             COMMITMENT_HASH
@@ -341,7 +341,7 @@ contract IntegrationTest is Test {
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
                 ICommissionManager.setCommissionRule.selector,
-                SOURCE_CHAIN, RGB_CHAIN, address(token),
+                SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_IN_PERCENT,
                     multiplier:    FUNDS_IN_MULT,
@@ -353,7 +353,7 @@ contract IntegrationTest is Test {
         );
 
         (, uint256 nativeQuote, uint256 netQuote) =
-            cm.calculateFundsInCommission(uint256(keccak256(bytes(SOURCE_CHAIN))), uint256(keccak256(bytes(RGB_CHAIN))), address(token), USER_DEPOSIT);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT);
         assertEq(netQuote,    USER_DEPOSIT,                                        'NATIVE: full amount bridges');
         assertEq(nativeQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, 'native quote matches 1:1 rate');
 
@@ -362,7 +362,7 @@ contract IntegrationTest is Test {
         vm.prank(user);
         bridge.fundsIn{ value: nativeQuote }(
             USER_DEPOSIT,
-            uint256(keccak256(bytes(RGB_CHAIN))),
+            RGB_CHAIN_ID,
             'rgb:asset1qp0y3mq/utxo1abc',
             TX_ID_IN
         );
