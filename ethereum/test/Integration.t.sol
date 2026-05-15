@@ -14,8 +14,9 @@ import {
     ICommissionManager
 } from '../src/interfaces/ICommissionManager.sol';
 
-import { MockERC20 }     from './helpers/MockERC20.sol';
-import { MockBtcRelay }  from './helpers/MockBtcRelay.sol';
+import { MockERC20 }        from './helpers/MockERC20.sol';
+import { MockBtcRelay }     from './helpers/MockBtcRelay.sol';
+import { MockAggregatorV3 } from './helpers/MockAggregatorV3.sol';
 import { MultisigHelper } from './helpers/MultisigHelper.sol';
 
 /// @title IntegrationTest
@@ -52,6 +53,7 @@ contract IntegrationTest is Test {
 
     MockERC20         token;
     MockBtcRelay      btcRelay;
+    MockAggregatorV3  ethUsdFeed;
     CommissionManager cm;
     Bridge            bridge;
     MultisigProxy     proxy;
@@ -329,13 +331,18 @@ contract IntegrationTest is Test {
 
     function test_endToEnd_nativeCommission_inboundAndWithdraw() public {
         // Configure a NATIVE FUNDS_IN route (2% on token amount, paid in wei).
-        // Set a mock rate: 1 token unit = 1 wei (rate = 10**tokenDecimals per 10**tokenDecimals units
-        // would be 1:1; MockERC20 is 18 decimals, so `convertTokenToNative` returns tokenFee * rate / 1e18).
-        // We set rate = 1e18 so nativeCommission == tokenFee (simple for the assertion).
+        // Wire up a Chainlink ETH/USD feed ($2000 / ETH, 8 decimals, fresh)
+        // via federation governance — the same path production will use.
+        // Heartbeat is 1 day so the two federation timelock warps below (2 x
+        // TIMELOCK) don't push `updatedAt` past the staleness window. Real
+        // Chainlink feeds keep updating; the mock holds `updatedAt` fixed at
+        // its deploy block timestamp.
+        ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
-                ICommissionManager.setMockTokenToNativeRate.selector,
-                uint256(1e18)
+                ICommissionManager.setEthUsdFeed.selector,
+                address(ethUsdFeed),
+                uint256(1 days)
             )
         );
         _proposeAndExecuteCmAdminCall(
@@ -354,8 +361,10 @@ contract IntegrationTest is Test {
 
         (, uint256 nativeQuote, uint256 netQuote) =
             cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT);
-        assertEq(netQuote,    USER_DEPOSIT,                                        'NATIVE: full amount bridges');
-        assertEq(nativeQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, 'native quote matches 1:1 rate');
+        assertEq(netQuote, USER_DEPOSIT, 'NATIVE: full amount bridges');
+        // 2% of USER_DEPOSIT in token units, converted to wei via the feed.
+        uint256 stableFee = USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT;
+        assertEq(nativeQuote, cm.convertTokenFeeToNative(stableFee, 18), 'native quote matches feed');
 
         vm.deal(user, nativeQuote);
 

@@ -14,6 +14,7 @@ import {
 } from '../src/interfaces/ICommissionManager.sol';
 import { MockERC20 } from './helpers/MockERC20.sol';
 import { MockBtcRelay } from './helpers/MockBtcRelay.sol';
+import { MockAggregatorV3 } from './helpers/MockAggregatorV3.sol';
 import { Ownable }   from '@openzeppelin/contracts/access/Ownable.sol';
 import { Pausable }  from '@openzeppelin/contracts/utils/Pausable.sol';
 
@@ -50,6 +51,7 @@ contract BridgeTest is Test {
     MockERC20         usdt0;
     MockBtcRelay      btcRelay;
     CommissionManager cm;
+    MockAggregatorV3  ethUsdFeed;
 
     address deployer  = makeAddr('deployer');
     address user      = makeAddr('user');
@@ -89,6 +91,13 @@ contract BridgeTest is Test {
         // Point the CM to the real bridge.
         vm.prank(deployer);
         cm.setBridgeAddress(address(bridge));
+
+        // Wire a Chainlink ETH/USD feed (8 decimals, $2000 / ETH) for NATIVE
+        // commission quoting. Tests that need to exercise stale/zero/unset
+        // branches override or close the feed inline.
+        ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);
+        vm.prank(deployer);
+        cm.setEthUsdFeed(address(ethUsdFeed), 1 hours);
 
         // deployer transfers ownership to multisig (production flow)
         vm.prank(deployer);
@@ -598,17 +607,13 @@ contract BridgeTest is Test {
     // ========================================================================
 
     function test_fundsIn_nativeCommission_routesToCM() public {
-        // 1% native-currency commission
+        // 1% native-currency commission.
         uint256 percent = 100; // 1%
         _setFundsInNativeRule(percent);
 
-        // Set mock rate: 1 token unit = 1e12 wei (so 100e18 tokens * 1% = 1e18 tokens -> 1e6 * 1e12 = 1e18 wei? Let's compute)
-        // stableFee = AMOUNT * 100 / 100 / 100 = AMOUNT/100 = 1e18 token units
-        // decimals 18, rate wei per 1e18 token units. Pick rate=1e15 => nativeFee = 1e18*1e15/1e18 = 1e15 wei.
-        uint256 rate = 1e15;
-        vm.prank(deployer);
-        cm.setMockTokenToNativeRate(rate);
-
+        // ETH/USD feed is configured in setUp ($2000 / ETH, fresh). The exact
+        // native-fee value is asserted via `convertTokenFeeToNative` below, so
+        // the test stays correct under any reasonable feed configuration.
         (uint256 tokenC, uint256 nativeC, uint256 net) =
             cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
         assertEq(tokenC, 0);
@@ -660,8 +665,8 @@ contract BridgeTest is Test {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
 
         _setFundsOutNativeRule(100);
-        vm.prank(deployer);
-        cm.setMockTokenToNativeRate(1e12);
+        // The ETH/USD feed configured in setUp produces a positive native quote,
+        // so the bridge reaches the `NativeCommissionNotAllowedOnFundsOut` guard.
 
         vm.expectRevert(IBridge.NativeCommissionNotAllowedOnFundsOut.selector);
         vm.prank(multisig);
@@ -682,8 +687,8 @@ contract BridgeTest is Test {
 
     function test_fundsIn_revertsOnNativeValueMismatch_nativeRuleButNoValue() public {
         _setFundsInNativeRule(100);
-        vm.prank(deployer);
-        cm.setMockTokenToNativeRate(1e15);
+        // ETH/USD feed configured in setUp → positive native quote, bridge
+        // expects `msg.value > 0` and reverts when the user sends nothing.
 
         vm.expectRevert(IBridge.NativeValueMismatch.selector);
         vm.prank(user);
