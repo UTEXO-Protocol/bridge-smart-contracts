@@ -14,10 +14,10 @@ import {
     ICommissionManager
 } from '../src/interfaces/ICommissionManager.sol';
 
-import { MockERC20 }        from './helpers/MockERC20.sol';
-import { MockBtcRelay }     from './helpers/MockBtcRelay.sol';
-import { MockAggregatorV3 } from './helpers/MockAggregatorV3.sol';
-import { MultisigHelper } from './helpers/MultisigHelper.sol';
+import { MockERC20 }        from './mocks/MockERC20.sol';
+import { MockBtcRelay }     from './mocks/MockBtcRelay.sol';
+import { MockAggregatorV3 } from './mocks/MockAggregatorV3.sol';
+import { MultisigHelper } from './mocks/MultisigHelper.sol';
 
 /// @title IntegrationTest
 /// @notice End-to-end lifecycle:

@@ -10,8 +10,8 @@ import {
     CommissionSide,
     ICommissionManager
 } from '../src/interfaces/ICommissionManager.sol';
-import { MockERC20 } from './helpers/MockERC20.sol';
-import { MockAggregatorV3 } from './helpers/MockAggregatorV3.sol';
+import { MockERC20 } from './mocks/MockERC20.sol';
+import { MockAggregatorV3 } from './mocks/MockAggregatorV3.sol';
 
 contract CommissionManagerTest is Test {
     CommissionManager internal cm;

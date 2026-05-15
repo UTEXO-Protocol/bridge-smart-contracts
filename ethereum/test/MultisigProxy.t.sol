@@ -12,9 +12,9 @@ import {
     CommissionCurrency,
     ICommissionManager
 } from '../src/interfaces/ICommissionManager.sol';
-import { MockERC20 } from './helpers/MockERC20.sol';
-import { MockBtcRelay } from './helpers/MockBtcRelay.sol';
-import { MultisigHelper } from './helpers/MultisigHelper.sol';
+import { MockERC20 } from './mocks/MockERC20.sol';
+import { MockBtcRelay } from './mocks/MockBtcRelay.sol';
+import { MultisigHelper } from './mocks/MultisigHelper.sol';
 
 contract MultisigProxyTest is Test {
     using MultisigHelper for bytes32;

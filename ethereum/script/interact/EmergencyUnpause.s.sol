@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 import { Script, console2 } from 'forge-std/Script.sol';
 import { MultisigProxy } from '../../src/MultisigProxy.sol';
-import { MultisigHelper } from '../../test/helpers/MultisigHelper.sol';
+import { MultisigHelper } from '../../test/mocks/MultisigHelper.sol';
 
 /// @title EmergencyUnpause
 /// @notice Locally signs and submits MultisigProxy.emergencyUnpause().
