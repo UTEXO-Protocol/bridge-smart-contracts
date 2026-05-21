@@ -7,33 +7,32 @@ import { ReentrancyGuard }   from '@openzeppelin/contracts/utils/ReentrancyGuard
 
 import { BridgeBase }         from './BridgeBase.sol';
 import { IBridge }            from './interfaces/IBridge.sol';
-import { IBtcRelayView }      from './interfaces/IBtcRelayView.sol';
 import { ICommissionManager } from './interfaces/ICommissionManager.sol';
+import { IRouteRegistry }     from './interfaces/IRouteRegistry.sol';
+import { FundsInContext, FundsOutContext } from './interfaces/RouteTypes.sol';
 
 /// @title Bridge
-/// @notice Production bridge for locking USDT0 on Arbitrum and unlocking it back.
-///         Extends BridgeBase with full event data for the UTEXO backend and routes
-///         commission to a standalone CommissionManager so protocol fees are held
-///         separately from bridge liquidity.
+/// @notice Production bridge for locking USDT0 on Arbitrum and unlocking it
+///         back. Extends BridgeBase with full event data for the UTEXO
+///         backend and routes commission to a standalone CommissionManager so
+///         protocol fees are held separately from bridge liquidity.
 ///
 /// @dev - Owner is `MultisigProxy`. `fundsOut` is called via
 ///        `MultisigProxy.execute()` (TEE M-of-N).
+///      - Route-specific finality verification and per-route settlement
+///        accounting (RGB `fundsInRecords` etc.) live behind the
+///        `RouteRegistry` dispatcher in dedicated plugin contracts. Bridge
+///        only owns: token custody, the common `burnId` replay guard, and
+///        commission routing.
 ///      - `fundsIn` has two overloads:
-///        • Public 4-arg: any EVM user on this chain can lock tokens; the
+///        • Public 5-arg: any EVM user on this chain can lock tokens; the
 ///          source chain id is filled with `block.chainid`.
-///        • Adapter-only 5-arg: callable only by the trusted `lzAdapter`,
+///        • Adapter-only 6-arg: callable only by the trusted `lzAdapter`,
 ///          which forwards a non-spoofable `sourceChainId` carried in
-///          `composeMsg` from the source chain. Both overloads share the same
-///          private body via `_fundsIn`.
-///      - `fundsOut` verifies the Bitcoin block header via BtcRelay and the
-///        referenced `fundsIn` records before releasing funds.
-///      - Commission routing keys on `(sourceChainId, destinationChainId,
-///        TOKEN)` for both directions. NATIVE currency is only supported on
-///        `fundsIn`; `fundsOut` reverts if a NATIVE rule is configured.
+///          `composeMsg` from the source chain. Both overloads share the
+///          same private body via `_fundsIn`.
 ///      - `lzAdapter` is mutable so federation governance can rotate adapter
-///        deployments without redeploying the Bridge (the adapter itself
-///        immutably points back at the Bridge, so a swap is a one-way
-///        Bridge → Adapter pointer update).
+///        deployments without redeploying the Bridge.
 contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -41,33 +40,29 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // State
     // =========================================================================
 
-    /// @notice BtcRelay contract used to verify Bitcoin block headers.
-    address public immutable btcRelay;
-
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
     /// @inheritdoc IBridge
+    /// @dev Mutable so federation can rotate registry deployments via
+    ///      `UpdateRouteRegistry` governance op without redeploying the
+    ///      Bridge.
+    address public override routeRegistry;
+
+    /// @inheritdoc IBridge
     address public override lzAdapter;
 
-    /// @notice On-chain record of fundsIn operations: operationId => netAmount.
-    ///         Stores the amount actually bridged after token commission is deducted;
-    ///         used by fundsOut to verify that referenced deposits actually happened.
-    ///         Records may be partially consumed by fundsOut — the residual stays
-    ///         under the same `operationId` until fully drained.
-    mapping(uint256 => uint256) public fundsInRecords;
-
-    /// @notice Set of burn identifiers already consumed by a successful `fundsOut`.
-    ///         This mapping enforces single-use semantics on-chain.
-    mapping(uint256 => bool) public consumedBurnIds;
+    /// @notice Set of burn identifiers already consumed by a successful
+    ///         `fundsOut`.
+    mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
     // =========================================================================
     // Modifiers
     // =========================================================================
 
-    /// @dev Restricts a function to the configured `lzAdapter`. Until federation
-    ///      sets a non-zero adapter, the modifier closes the function for every
-    ///      caller (no EOA or contract has `address(0)` as its `msg.sender`).
+    /// @dev Restricts a function to the configured `lzAdapter`. Until
+    ///      federation sets a non-zero adapter, the modifier closes the
+    ///      function for every caller.
     modifier onlyLZAdapter() {
         if (msg.sender != lzAdapter) revert NotLZAdapter();
         _;
@@ -78,22 +73,23 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // =========================================================================
 
     /// @param usdt0_             USDT0 token address on this chain.
-    /// @param btcRelay_          BtcRelay contract for Bitcoin header verification.
+    /// @param routeRegistry_     `RouteRegistry` deployment paired with this
+    ///                           Bridge.
     /// @param commissionManager_ CommissionManager that receives protocol fees.
     /// @param lzAdapter_         Initial trusted LayerZero adapter; pass
     ///                           `address(0)` if it has not been deployed yet
     ///                           (federation can wire it up later via
     ///                           `setLZAdapter`).
     constructor(
-        address usdt0_,
-        address btcRelay_,
-        address payable commissionManager_,
-        address lzAdapter_
+        address          usdt0_,
+        address          routeRegistry_,
+        address payable  commissionManager_,
+        address          lzAdapter_
     ) BridgeBase(usdt0_) {
-        if (btcRelay_ == address(0))          revert InvalidBtcRelayAddress();
+        if (routeRegistry_     == address(0)) revert InvalidRouteRegistryAddress();
         if (commissionManager_ == address(0)) revert InvalidCommissionManagerAddress();
 
-        btcRelay          = btcRelay_;
+        routeRegistry     = routeRegistry_;
         commissionManager = ICommissionManager(commissionManager_);
         lzAdapter         = lzAdapter_;
     }
@@ -103,12 +99,22 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // =========================================================================
 
     /// @inheritdoc IBridge
-    /// @dev Owner is `MultisigProxy`; federation governance gates this call on
-    ///      its M-of-N timelock flow.
+    /// @dev Owner is `MultisigProxy`; federation governance gates this call
+    ///      on its M-of-N timelock flow.
     function setLZAdapter(address newAdapter) external override onlyOwner {
         address old = lzAdapter;
         lzAdapter = newAdapter;
         emit LZAdapterUpdated(old, newAdapter);
+    }
+
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`; federation gates this on its M-of-N
+    ///      timelock flow via `proposeUpdateRouteRegistry`.
+    function setRouteRegistry(address newRouteRegistry) external override onlyOwner {
+        if (newRouteRegistry == address(0)) revert InvalidRouteRegistryAddress();
+        address old = routeRegistry;
+        routeRegistry = newRouteRegistry;
+        emit RouteRegistryUpdated(old, newRouteRegistry);
     }
 
     // =========================================================================
@@ -120,7 +126,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 amount,
         uint256 destinationChainId,
         string  calldata destinationAddress,
-        uint256 operationId
+        uint256 operationId,
+        bytes   calldata settlementData
     ) external payable override whenNotPaused nonReentrant {
         _fundsIn(
             _msgSender(),
@@ -128,7 +135,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             block.chainid,
             destinationChainId,
             destinationAddress,
-            operationId
+            operationId,
+            settlementData
         );
     }
 
@@ -138,7 +146,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  calldata destinationAddress,
-        uint256 operationId
+        uint256 operationId,
+        bytes   calldata settlementData
     ) external payable override whenNotPaused nonReentrant onlyLZAdapter {
         _fundsIn(
             _msgSender(),
@@ -146,7 +155,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             sourceChainId,
             destinationChainId,
             destinationAddress,
-            operationId
+            operationId,
+            settlementData
         );
     }
 
@@ -158,53 +168,26 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     function fundsOut(
         address recipient,
         uint256 amount,
-        uint256 operationId,
         uint256 burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  calldata sourceAddress,
-        uint256 blockHeight,
-        bytes32 commitmentHash,
-        uint256[] calldata fundsInIds
+        bytes   calldata proof,
+        bytes   calldata settlementData
     ) external override onlyOwner nonReentrant {
-        if (recipient == address(0))               revert InvalidRecipientAddress();
-        if (sourceChainId == 0)                    revert InvalidSourceChainId();
-        if (destinationChainId == 0)               revert InvalidDestinationChainId();
+        if (recipient          == address(0))                revert InvalidRecipientAddress();
+        if (sourceChainId      == 0)                         revert InvalidSourceChainId();
+        if (destinationChainId == 0)                         revert InvalidDestinationChainId();
         if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 
-        // Set the flag before any external interaction so a revert
-        // anywhere downstream rolls back the mark together with the rest of the call.
+        // Common replay guard. Set the flag before any external interaction
+        // so a revert anywhere downstream rolls the mark back with the rest
+        // of the call.
         if (consumedBurnIds[burnId]) revert BurnIdAlreadyConsumed(burnId);
         consumedBurnIds[burnId] = true;
 
-        // Verify referenced fundsIn operations exist and consume them — sequentially,
-        // partially when needed. Each record is either:
-        //   • fully consumed (deleted) if it is smaller than the remaining amount, or
-        //   • partially consumed (decremented) if it covers the remainder, leaving
-        //     a residual liquidity available for future fundsOut calls under the
-        //     same operationId.
-        uint256 remaining = amount;
-        for (uint256 i = 0; i < fundsInIds.length; i++) {
-            uint256 recorded = fundsInRecords[fundsInIds[i]];
-            if (recorded == 0) revert FundsInNotFound(fundsInIds[i]);
-
-            if (recorded > remaining) {
-                fundsInRecords[fundsInIds[i]] = recorded - remaining;
-                remaining = 0;
-                break;
-            }
-
-            // recorded <= remaining — consume the record fully.
-            delete fundsInRecords[fundsInIds[i]];
-            remaining -= recorded;
-
-            if (remaining == 0) break;
-        }
-        if (remaining != 0) revert FundsOutAmountExceedsFundsIn();
-
-        // Verify Bitcoin block header is known to BtcRelay (reverts if unknown).
-        IBtcRelayView(btcRelay).verifyBlockheaderHash(blockHeight, commitmentHash);
-
+        // Quote commission. NATIVE on fundsOut is disallowed — the caller is
+        // the multisig, there is no user to fund a native payment.
         (
             uint256 tokenCommission,
             uint256 nativeCommission,
@@ -215,10 +198,24 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             TOKEN,
             amount
         );
-
-        // NATIVE currency on fundsOut is disallowed: the caller is the multisig,
-        // there is no user to fund native payment. Routes must use TOKEN currency.
         if (nativeCommission != 0) revert NativeCommissionNotAllowedOnFundsOut();
+
+        // Delegate route-specific finality verification + settlement-state
+        // mutation to the configured plugins. The registry runs the verifier
+        // (view-only) first; if it reverts, no settlement-module write happens.
+        IRouteRegistry(routeRegistry).beforeFundsOut(
+            FundsOutContext({
+                token:         TOKEN,
+                recipient:     recipient,
+                amount:        amount,
+                burnId:        burnId,
+                sourceChainId: sourceChainId,
+                destChainId:   destinationChainId,
+                sourceAddress: sourceAddress
+            }),
+            proof,
+            settlementData
+        );
 
         // Forward token commission to the CommissionManager pool.
         if (tokenCommission != 0) {
@@ -234,13 +231,10 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             amount,
             netAmount,
             tokenCommission,
-            operationId,
             burnId,
             sourceChainId,
             destinationChainId,
-            sourceAddress,
-            blockHeight,
-            commitmentHash
+            sourceAddress
         );
     }
 
@@ -260,17 +254,17 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
     /// @dev Shared body for both `fundsIn` overloads.
     function _fundsIn(
-        address from,
-        uint256 amount,
-        uint256 sourceChainId,
-        uint256 destinationChainId,
-        string memory destinationAddress,
-        uint256 operationId
+        address          from,
+        uint256          amount,
+        uint256          sourceChainId,
+        uint256          destinationChainId,
+        string  memory   destinationAddress,
+        uint256          operationId,
+        bytes   calldata settlementData
     ) private {
         if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
-        if (sourceChainId == 0)                    revert InvalidSourceChainId();
+        if (sourceChainId      == 0)               revert InvalidSourceChainId();
         if (destinationChainId == 0)               revert InvalidDestinationChainId();
-        if (fundsInRecords[operationId] != 0)      revert DuplicateOperationId();
 
         (
             uint256 tokenCommission,
@@ -289,8 +283,20 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // Pull the full gross amount from `from` into this contract.
         IERC20(TOKEN).safeTransferFrom(from, address(this), amount);
 
-        // Record the net amount as the bridged liquidity for this operation.
-        fundsInRecords[operationId] = netAmount;
+        // Delegate per-route inbound bookkeeping.
+        IRouteRegistry(routeRegistry).onFundsIn(
+            FundsInContext({
+                token:         TOKEN,
+                sender:        from,
+                grossAmount:   amount,
+                netAmount:     netAmount,
+                operationId:   operationId,
+                sourceChainId: sourceChainId,
+                destChainId:   destinationChainId,
+                destAddress:   destinationAddress
+            }),
+            settlementData
+        );
 
         // Forward token commission, if any, to the CommissionManager pool.
         if (tokenCommission != 0) {

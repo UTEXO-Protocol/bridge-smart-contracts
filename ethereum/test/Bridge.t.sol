@@ -2,19 +2,25 @@
 pragma solidity 0.8.20;
 
 import { Test } from 'forge-std/Test.sol';
-import { Bridge }    from '../src/Bridge.sol';
-import { IBridge }   from '../src/interfaces/IBridge.sol';
-import { BridgeBase } from '../src/BridgeBase.sol';
-import { CommissionManager } from '../src/CommissionManager.sol';
+
+import { Bridge }              from '../src/Bridge.sol';
+import { IBridge }             from '../src/interfaces/IBridge.sol';
+import { BridgeBase }          from '../src/BridgeBase.sol';
+import { CommissionManager }   from '../src/CommissionManager.sol';
+import { RouteRegistry }       from '../src/RouteRegistry.sol';
+import { RGBVerifier }         from '../src/verifiers/RGBVerifier.sol';
+import { RgbSettlementModule } from '../src/settlement/RgbSettlementModule.sol';
 import {
     CommissionConfig,
     CommissionSide,
     CommissionCurrency,
     ICommissionManager
 } from '../src/interfaces/ICommissionManager.sol';
-import { MockERC20 } from './mocks/MockERC20.sol';
-import { MockBtcRelay } from './mocks/MockBtcRelay.sol';
+
+import { MockERC20 }        from './mocks/MockERC20.sol';
+import { MockBtcRelay }     from './mocks/MockBtcRelay.sol';
 import { MockAggregatorV3 } from './mocks/MockAggregatorV3.sol';
+
 import { Ownable }   from '@openzeppelin/contracts/access/Ownable.sol';
 import { Pausable }  from '@openzeppelin/contracts/utils/Pausable.sol';
 
@@ -37,33 +43,31 @@ contract BridgeTest is Test {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 operationId,
         uint256 burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string  sourceAddress,
-        uint256 blockHeight,
-        bytes32 commitmentHash
+        string  sourceAddress
     );
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
+    event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
-    Bridge            bridge;
-    MockERC20         usdt0;
-    MockBtcRelay      btcRelay;
-    CommissionManager cm;
-    MockAggregatorV3  ethUsdFeed;
+    Bridge              bridge;
+    MockERC20           usdt0;
+    MockBtcRelay        btcRelay;
+    CommissionManager   cm;
+    RouteRegistry       routeRegistry;
+    RGBVerifier         rgbVerifier;
+    RgbSettlementModule rgbModule;
+    MockAggregatorV3    ethUsdFeed;
 
     address deployer  = makeAddr('deployer');
     address user      = makeAddr('user');
     address recipient = makeAddr('recipient');
     address multisig  = makeAddr('multisig');
 
-    // Chain identifiers are uint256: real EVM uses block.chainid; non-EVM is
-    // assigned by backend convention (see README).
-    uint256 constant SOURCE_CHAIN_ID = 31337;     // foundry default block.chainid
+    uint256 constant SOURCE_CHAIN_ID = 31337;     // foundry block.chainid
     uint256 constant RGB_CHAIN_ID    = 1_000_001; // backend-assigned for RGB
     string  constant DST_ADDR        = 'rgb:asset1qp0y3mq6h5k8d9f2e4j7n6c3w/utxo1abc123';
-    // For outbound, source is the RGB side, destination is this chain.
     string  constant SRC_ADDR        = 'rgb:sender/utxo1src';
     uint256 constant AMOUNT          = 100e18;
     uint256 constant TX_ID           = 42;
@@ -77,31 +81,53 @@ contract BridgeTest is Test {
     function setUp() public {
         usdt0    = new MockERC20('Mock USDT0', 'USDT0');
         btcRelay = new MockBtcRelay();
-
-        // Register a valid block in the mock relay
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, CONFIRMATIONS);
 
-        // Deploy CommissionManager with deployer as placeholder bridge address.
-        vm.prank(deployer);
-        cm = new CommissionManager(deployer);
+        // DeployAll-style deploy with predicted Bridge address:
+        //   nonce n      → CommissionManager (uses predicted Bridge)
+        //   nonce n+1    → RouteRegistry     (uses predicted Bridge,
+        //                                     deployer = owner)
+        //   nonce n+2    → Bridge            (uses RouteRegistry, CM)
+        //   nonce n+3    → RGBVerifier
+        //   nonce n+4    → RgbSettlementModule
+        // Routes are then registered by deployer before ownership transfer.
+        vm.startPrank(deployer);
+        uint64  currentNonce    = vm.getNonce(deployer);
+        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        vm.prank(deployer);
-        bridge = new Bridge(address(usdt0), address(btcRelay), payable(address(cm)), address(0));
+        cm            = new CommissionManager(predictedBridge);
+        routeRegistry = new RouteRegistry(predictedBridge, deployer);
+        bridge        = new Bridge(
+            address(usdt0),
+            address(routeRegistry),
+            payable(address(cm)),
+            address(0)
+        );
 
-        // Point the CM to the real bridge.
-        vm.prank(deployer);
-        cm.setBridgeAddress(address(bridge));
+        rgbVerifier = new RGBVerifier(address(btcRelay));
+        rgbModule   = new RgbSettlementModule(address(routeRegistry));
 
-        // Wire a Chainlink ETH/USD feed (8 decimals, $2000 / ETH) for NATIVE
-        // commission quoting. Tests that need to exercise stale/zero/unset
-        // branches override or close the feed inline.
+        // Both directions of the RGB route share the same verifier + module.
+        routeRegistry.setRoute(
+            SOURCE_CHAIN_ID, RGB_CHAIN_ID,
+            true, address(rgbVerifier), address(rgbModule)
+        );
+        routeRegistry.setRoute(
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID,
+            true, address(rgbVerifier), address(rgbModule)
+        );
+
+        // Wire a Chainlink ETH/USD feed ($2000 / ETH, 8 decimals, fresh) so
+        // the NATIVE commission path quotes a positive value.
         ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);
-        vm.prank(deployer);
         cm.setEthUsdFeed(address(ethUsdFeed), 1 hours);
 
-        // deployer transfers ownership to multisig (production flow)
-        vm.prank(deployer);
+        // Production-flow ownership transfer of Bridge → multisig. CM and
+        // RouteRegistry stay owned by deployer for this suite so individual
+        // tests can configure commission rules and routes inline. The
+        // governance-driven paths live in MultisigProxy.t.sol / Integration.t.sol.
         bridge.transferOwnership(multisig);
+        vm.stopPrank();
 
         // fund user and approve bridge
         usdt0.mint(user, AMOUNT * 10);
@@ -116,6 +142,14 @@ contract BridgeTest is Test {
     function _singleFundsInId() internal pure returns (uint256[] memory ids) {
         ids = new uint256[](1);
         ids[0] = TX_ID;
+    }
+
+    function _proof() internal pure returns (bytes memory) {
+        return abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
+    }
+
+    function _settlement(uint256[] memory ids) internal pure returns (bytes memory) {
+        return abi.encode(ids);
     }
 
     function _setFundsInTokenRule(uint256 percent) internal {
@@ -178,32 +212,34 @@ contract BridgeTest is Test {
     // Constructor
     // ========================================================================
 
-    function test_constructor_setsTokenOwnerAndBtcRelay() public view {
-        assertEq(bridge.TOKEN(), address(usdt0));
-        assertEq(bridge.owner(), multisig);
-        assertEq(bridge.btcRelay(), address(btcRelay));
-        assertEq(address(bridge.commissionManager()), address(cm));        
+    function test_constructor_setsTokenOwnerAndRouteRegistry() public view {
+        assertEq(bridge.TOKEN(),                       address(usdt0));
+        assertEq(bridge.owner(),                       multisig);
+        assertEq(bridge.routeRegistry(),               address(routeRegistry));
+        assertEq(address(bridge.commissionManager()),  address(cm));
     }
 
     function test_constructor_revertsOnZeroToken() public {
         vm.expectRevert(BridgeBase.InvalidTokenAddress.selector);
-        new Bridge(address(0), address(btcRelay), payable(address(cm)), address(0));
+        new Bridge(address(0), address(routeRegistry), payable(address(cm)), address(0));
     }
 
-    function test_constructor_revertsOnZeroBtcRelay() public {
-        vm.expectRevert(IBridge.InvalidBtcRelayAddress.selector);
+    function test_constructor_revertsOnZeroRouteRegistry() public {
+        vm.expectRevert(IBridge.InvalidRouteRegistryAddress.selector);
         new Bridge(address(usdt0), address(0), payable(address(cm)), address(0));
     }
 
     function test_constructor_revertsOnZeroCommissionManager() public {
         vm.expectRevert(IBridge.InvalidCommissionManagerAddress.selector);
-        new Bridge(address(usdt0), address(btcRelay), payable(address(0)), address(0));
+        new Bridge(address(usdt0), address(routeRegistry), payable(address(0)), address(0));
     }
 
     function test_constructor_storesInitialLZAdapter() public {
         address initialAdapter = makeAddr('initial-adapter');
         vm.prank(deployer);
-        Bridge b = new Bridge(address(usdt0), address(btcRelay), payable(address(cm)), initialAdapter);
+        Bridge b = new Bridge(
+            address(usdt0), address(routeRegistry), payable(address(cm)), initialAdapter
+        );
         assertEq(b.lzAdapter(), initialAdapter, 'lzAdapter set in constructor');
     }
 
@@ -236,6 +272,36 @@ contract BridgeTest is Test {
     }
 
     // ========================================================================
+    // setRouteRegistry (new in PR6)
+    // ========================================================================
+
+    function test_setRouteRegistry_ownerCanRotate() public {
+        // Deploy a NEW registry paired with the same Bridge (the documented
+        // invariant). In production the new registry must already be wired
+        // with this Bridge as its `bridge_` immutable.
+        RouteRegistry newReg = new RouteRegistry(address(bridge), multisig);
+
+        vm.expectEmit(true, true, false, true, address(bridge));
+        emit RouteRegistryUpdated(address(routeRegistry), address(newReg));
+
+        vm.prank(multisig);
+        bridge.setRouteRegistry(address(newReg));
+        assertEq(bridge.routeRegistry(), address(newReg));
+    }
+
+    function test_setRouteRegistry_revertsOnZero() public {
+        vm.prank(multisig);
+        vm.expectRevert(IBridge.InvalidRouteRegistryAddress.selector);
+        bridge.setRouteRegistry(address(0));
+    }
+
+    function test_setRouteRegistry_revertsIfNotOwner() public {
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        bridge.setRouteRegistry(makeAddr('newReg'));
+    }
+
+    // ========================================================================
     // fundsIn — adapter overload (`onlyLZAdapter`)
     // ========================================================================
 
@@ -243,11 +309,10 @@ contract BridgeTest is Test {
         // No adapter set in setUp — caller is `user`.
         vm.prank(user);
         vm.expectRevert(IBridge.NotLZAdapter.selector);
-        bridge.fundsIn(AMOUNT, 1, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, 1, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
     }
 
     function test_fundsInFromAdapter_acceptsCustomSourceChainId() public {
-        // Register a mock adapter and prime it with tokens + approval.
         address mockAdapter = makeAddr('mock-adapter');
         vm.prank(multisig);
         bridge.setLZAdapter(mockAdapter);
@@ -258,13 +323,24 @@ contract BridgeTest is Test {
 
         uint256 customSrc = 137; // pretend Polygon
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        // Register a route for the custom (Polygon, RGB) pair — the adapter
+        // overload simply forwards whatever sourceChainId the composeMsg
+        // carries; both directions need real routes wired in the registry.
+        vm.prank(deployer);
+        routeRegistry.setRoute(
+            customSrc, RGB_CHAIN_ID,
+            true, address(rgbVerifier), address(rgbModule)
+        );
+
+        // Drop the emitter filter so Forge's expectEmit scans past the token's
+        // Transfer event (emitter = usdt0) and matches BridgeFundsIn by topic0.
+        vm.expectEmit(true, false, false, true);
         emit BridgeFundsIn(mockAdapter, TX_ID, AMOUNT, AMOUNT, 0, 0, customSrc, RGB_CHAIN_ID, DST_ADDR);
 
         vm.prank(mockAdapter);
-        bridge.fundsIn(AMOUNT, customSrc, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, customSrc, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
-        assertEq(bridge.fundsInRecords(TX_ID), AMOUNT, 'record stored');
+        assertEq(rgbModule.fundsInRecords(TX_ID), AMOUNT, 'record stored on module');
     }
 
     // ========================================================================
@@ -275,17 +351,17 @@ contract BridgeTest is Test {
         uint256 userBefore = usdt0.balanceOf(user);
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         assertEq(usdt0.balanceOf(address(bridge)), AMOUNT);
         assertEq(usdt0.balanceOf(user),            userBefore - AMOUNT);
     }
 
-    function test_fundsIn_storesRecord() public {
+    function test_fundsIn_storesRecordOnModule() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
-        assertEq(bridge.fundsInRecords(TX_ID), AMOUNT);
+        assertEq(rgbModule.fundsInRecords(TX_ID), AMOUNT);
     }
 
     function test_fundsIn_emitsBothEvents() public {
@@ -295,7 +371,7 @@ contract BridgeTest is Test {
         emit BridgeFundsIn(user, TX_ID, AMOUNT, AMOUNT, 0, 0, SOURCE_CHAIN_ID, RGB_CHAIN_ID, DST_ADDR);
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
     }
 
     function test_fundsIn_anyUserCanCall() public {
@@ -305,7 +381,7 @@ contract BridgeTest is Test {
         usdt0.approve(address(bridge), AMOUNT);
 
         vm.prank(stranger);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         assertEq(usdt0.balanceOf(address(bridge)), AMOUNT);
     }
@@ -317,13 +393,13 @@ contract BridgeTest is Test {
     function test_fundsIn_revertsOnEmptyDestinationAddress() public {
         vm.expectRevert(IBridge.InvalidDestinationAddress.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, '', TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, '', TX_ID, '');
     }
 
     function test_fundsIn_revertsOnEmptyDestinationChain() public {
         vm.expectRevert(IBridge.InvalidDestinationChainId.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, 0, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, 0, DST_ADDR, TX_ID, '');
     }
 
     function test_fundsIn_revertsWhenPaused() public {
@@ -332,16 +408,18 @@ contract BridgeTest is Test {
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
     }
 
     function test_fundsIn_revertsOnDuplicateOperationId() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
-        vm.expectRevert(IBridge.DuplicateOperationId.selector);
+        // Duplicate-operationId guard moved into RgbSettlementModule. The
+        // revert propagates up through routeRegistry → Bridge unchanged.
+        vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
     }
 
     // ========================================================================
@@ -350,29 +428,37 @@ contract BridgeTest is Test {
 
     function test_fundsOut_transfersAndEmits() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         vm.expectEmit(true, false, false, true);
         emit BridgeFundsOut(
-            recipient, AMOUNT, AMOUNT, 0, TX_ID, BURN_ID,
-            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH
+            recipient, AMOUNT, AMOUNT, 0, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
         );
 
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
 
         assertEq(usdt0.balanceOf(recipient),       AMOUNT);
         assertEq(usdt0.balanceOf(address(bridge)), 0);
     }
 
-    function test_fundsOut_consumesFundsInRecord() public {
+    function test_fundsOut_consumesRecord() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
 
-        assertEq(bridge.fundsInRecords(TX_ID), 0);
+        assertEq(rgbModule.fundsInRecords(TX_ID), 0);
     }
 
     function test_fundsOut_multipleFundsInIds() public {
@@ -382,172 +468,140 @@ contract BridgeTest is Test {
         uint256 amount2 = 40e18;
 
         vm.prank(user);
-        bridge.fundsIn(amount1, RGB_CHAIN_ID, DST_ADDR, txId1);
+        bridge.fundsIn(amount1, RGB_CHAIN_ID, DST_ADDR, txId1, '');
         vm.prank(user);
-        bridge.fundsIn(amount2, RGB_CHAIN_ID, DST_ADDR, txId2);
+        bridge.fundsIn(amount2, RGB_CHAIN_ID, DST_ADDR, txId2, '');
 
         uint256[] memory ids = new uint256[](2);
         ids[0] = txId1;
         ids[1] = txId2;
 
         vm.prank(multisig);
-        bridge.fundsOut(recipient, amount1 + amount2, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, ids);
+        bridge.fundsOut(
+            recipient, amount1 + amount2, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(ids)
+        );
 
         assertEq(usdt0.balanceOf(recipient), amount1 + amount2);
-        assertEq(bridge.fundsInRecords(txId1), 0);
-        assertEq(bridge.fundsInRecords(txId2), 0);
-    }
-
-    function test_fundsOut_partialAmount_decrementsRecord() public {
-        // Single fundsIn of 100. fundsOut for 60 should decrement the record to 40
-        // (not delete it), preserving the residual liquidity for future fundsOut.
-        vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
-
-        uint256 partialAmount = 60e18;
-
-        vm.prank(multisig);
-        bridge.fundsOut(recipient, partialAmount, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
-
-        assertEq(usdt0.balanceOf(recipient), partialAmount);
-        assertEq(bridge.fundsInRecords(TX_ID), AMOUNT - partialAmount, 'residual preserved');
-    }
-
-    function test_fundsOut_consumesPartiallyAcrossIds() public {
-        // Two records of 100 each. fundsOut for 150 should fully consume the first
-        // and partially consume the second (leaving 50).
-        uint256 txId1 = 100;
-        uint256 txId2 = 101;
-
-        vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, txId1);
-        vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, txId2);
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = txId1;
-        ids[1] = txId2;
-
-        vm.prank(multisig);
-        bridge.fundsOut(recipient, 150e18, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, ids);
-
-        assertEq(usdt0.balanceOf(recipient), 150e18);
-        assertEq(bridge.fundsInRecords(txId1), 0,    'first id fully consumed');
-        assertEq(bridge.fundsInRecords(txId2), 50e18, 'second id partially consumed');
-    }
-
-    function test_fundsOut_breaksAfterAmountSatisfied() public {
-        // If TEE supplies more ids than needed, the loop must stop after the
-        // amount is satisfied — extra ids are NOT touched.
-        uint256 txId1 = 100;
-        uint256 txId2 = 101;
-
-        vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, txId1);
-        vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, txId2);
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = txId1;
-        ids[1] = txId2;
-
-        // Amount of 50 < first record; second id should remain untouched.
-        vm.prank(multisig);
-        bridge.fundsOut(recipient, 50e18, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, ids);
-
-        assertEq(bridge.fundsInRecords(txId1), 50e18,  'first decremented');
-        assertEq(bridge.fundsInRecords(txId2), AMOUNT, 'second untouched');
+        assertEq(rgbModule.fundsInRecords(txId1), 0);
+        assertEq(rgbModule.fundsInRecords(txId2), 0);
     }
 
     // ========================================================================
-    // fundsOut — BtcRelay verification
+    // fundsOut — verifier reverts
     // ========================================================================
 
     function test_fundsOut_revertsOnUnverifiedBlock() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
-        uint256 unknownHeight = 999_999;
-        bytes32 unknownHash = keccak256('unknown-block');
+        bytes memory badProof = abi.encode(uint256(999_999), keccak256('unknown-block'));
 
+        // RGBVerifier → BtcRelay reverts with the relay's string message.
         vm.expectRevert('verify: block commitment');
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, unknownHeight, unknownHash, _singleFundsInId());
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            badProof, _settlement(_singleFundsInId())
+        );
     }
 
     // ========================================================================
-    // fundsOut — fundsIn verification reverts
+    // fundsOut — settlement-module reverts (delegated to RgbSettlementModule
+    // but surfaced through Bridge)
     // ========================================================================
 
     function test_fundsOut_revertsOnUnknownFundsInId() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         uint256[] memory ids = new uint256[](1);
         ids[0] = 999;
 
-        vm.expectRevert(abi.encodeWithSelector(IBridge.FundsInNotFound.selector, 999));
+        vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, 999));
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, ids);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(ids)
+        );
     }
 
     function test_fundsOut_revertsOnAmountExceedsFundsIn() public {
         uint256 txId1 = 100;
         uint256 txId2 = 101;
         vm.prank(user);
-        bridge.fundsIn(50e18, RGB_CHAIN_ID, DST_ADDR, txId1);
+        bridge.fundsIn(50e18, RGB_CHAIN_ID, DST_ADDR, txId1, '');
         vm.prank(user);
-        bridge.fundsIn(50e18, RGB_CHAIN_ID, DST_ADDR, txId2);
+        bridge.fundsIn(50e18, RGB_CHAIN_ID, DST_ADDR, txId2, '');
 
         uint256[] memory ids = new uint256[](1);
         ids[0] = txId1;
 
-        vm.expectRevert(IBridge.FundsOutAmountExceedsFundsIn.selector);
+        vm.expectRevert(RgbSettlementModule.FundsOutAmountExceedsFundsIn.selector);
         vm.prank(multisig);
-        bridge.fundsOut(recipient, 60e18, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, ids);
+        bridge.fundsOut(
+            recipient, 60e18, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(ids)
+        );
     }
 
     function test_fundsOut_revertsOnReplayedBurnId() public {
-        // Two independent fundsIn deposits give us enough liquidity for two
-        // separate fundsOut calls that share the same burnId.
         uint256 txId1 = 200;
         uint256 txId2 = 201;
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, txId1);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, txId1, '');
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, txId2);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, txId2, '');
 
-        uint256[] memory ids1 = new uint256[](1);
-        ids1[0] = txId1;
-        uint256[] memory ids2 = new uint256[](1);
-        ids2[0] = txId2;
+        uint256[] memory ids1 = new uint256[](1); ids1[0] = txId1;
+        uint256[] memory ids2 = new uint256[](1); ids2[0] = txId2;
 
-        // First fundsOut consumes BURN_ID.
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, ids1);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(ids1)
+        );
         assertTrue(bridge.consumedBurnIds(BURN_ID), 'burnId recorded');
 
-        // Second fundsOut uses fresh fundsIn record but the same burnId — must revert.
+        // Second fundsOut with the same burnId — must revert before any
+        // module mutation, leaving the second record untouched.
         vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, BURN_ID));
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID + 100, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, ids2);
-
-        // Ensure the second call did not consume the underlying fundsIn record.
-        assertEq(bridge.fundsInRecords(txId2), AMOUNT, 'fundsIn record preserved');
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(ids2)
+        );
+        assertEq(rgbModule.fundsInRecords(txId2), AMOUNT, 'second fundsIn record preserved');
     }
 
     function test_fundsOut_revertsOnDoubleSpendsConsumedFundsIn() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
 
+        // Top up the bridge directly (simulates a fresh pool) and try a second
+        // release against the same — now consumed — fundsIn record.
         usdt0.mint(address(bridge), AMOUNT);
 
-        vm.expectRevert(abi.encodeWithSelector(IBridge.FundsInNotFound.selector, TX_ID));
+        vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, TX_ID));
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID + 1, BURN_ID + 1, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID + 1,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
     }
 
     // ========================================================================
@@ -556,29 +610,41 @@ contract BridgeTest is Test {
 
     function test_fundsOut_revertsIfNotOwner() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
     }
 
     function test_fundsOut_revertsOnZeroRecipient() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         vm.expectRevert(BridgeBase.InvalidRecipientAddress.selector);
         vm.prank(multisig);
-        bridge.fundsOut(address(0), AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
+        bridge.fundsOut(
+            address(0), AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
     }
 
     function test_fundsOut_revertsIfAmountExceedsPool() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         vm.expectRevert(BridgeBase.AmountExceedBridgePool.selector);
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT + 1, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
+        bridge.fundsOut(
+            recipient, AMOUNT + 1, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
     }
 
     // ========================================================================
@@ -586,20 +652,19 @@ contract BridgeTest is Test {
     // ========================================================================
 
     function test_fundsIn_tokenCommission_routesToCM() public {
-        // 4% token commission
-        uint256 percent = 400; // 400 / 100 / 100 = 4%
+        uint256 percent = 400; // 4%
         _setFundsInTokenRule(percent);
 
         uint256 expectedCommission = (AMOUNT * percent) / 100 / 100;
         uint256 expectedNet        = AMOUNT - expectedCommission;
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
-        assertEq(usdt0.balanceOf(address(bridge)), expectedNet, 'bridge net');
-        assertEq(usdt0.balanceOf(address(cm)),     expectedCommission, 'cm pool');
-        assertEq(cm.tokenCommissionPool(address(usdt0)), expectedCommission, 'cm recorded');
-        assertEq(bridge.fundsInRecords(TX_ID),     expectedNet, 'record = net');
+        assertEq(usdt0.balanceOf(address(bridge)),         expectedNet,         'bridge net');
+        assertEq(usdt0.balanceOf(address(cm)),             expectedCommission,  'cm pool');
+        assertEq(cm.tokenCommissionPool(address(usdt0)),   expectedCommission,  'cm recorded');
+        assertEq(rgbModule.fundsInRecords(TX_ID),          expectedNet,         'record = net');
     }
 
     // ========================================================================
@@ -607,13 +672,9 @@ contract BridgeTest is Test {
     // ========================================================================
 
     function test_fundsIn_nativeCommission_routesToCM() public {
-        // 1% native-currency commission.
         uint256 percent = 100; // 1%
         _setFundsInNativeRule(percent);
 
-        // ETH/USD feed is configured in setUp ($2000 / ETH, fresh). The exact
-        // native-fee value is asserted via `convertTokenFeeToNative` below, so
-        // the test stays correct under any reasonable feed configuration.
         (uint256 tokenC, uint256 nativeC, uint256 net) =
             cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
         assertEq(tokenC, 0);
@@ -622,15 +683,12 @@ contract BridgeTest is Test {
 
         vm.deal(user, nativeC);
         vm.prank(user);
-        bridge.fundsIn{ value: nativeC }(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn{ value: nativeC }(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
-        // Bridge received full amount in token (no token commission).
         assertEq(usdt0.balanceOf(address(bridge)), AMOUNT);
-        // CM received native commission.
-        assertEq(address(cm).balance, nativeC);
-        assertEq(cm.nativeCommissionPool(), nativeC);
-        // Record tracks net (= full amount for NATIVE).
-        assertEq(bridge.fundsInRecords(TX_ID), AMOUNT);
+        assertEq(address(cm).balance,              nativeC);
+        assertEq(cm.nativeCommissionPool(),        nativeC);
+        assertEq(rgbModule.fundsInRecords(TX_ID),  AMOUNT);
     }
 
     // ========================================================================
@@ -638,9 +696,8 @@ contract BridgeTest is Test {
     // ========================================================================
 
     function test_fundsOut_tokenCommission_routesToCM() public {
-        // Deposit at zero commission first.
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         uint256 percent = 500; // 5%
         _setFundsOutTokenRule(percent);
@@ -649,11 +706,15 @@ contract BridgeTest is Test {
         uint256 expectedNet        = AMOUNT - expectedCommission;
 
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
 
-        assertEq(usdt0.balanceOf(recipient), expectedNet, 'recipient net');
-        assertEq(usdt0.balanceOf(address(cm)), expectedCommission, 'cm pool');
-        assertEq(cm.tokenCommissionPool(address(usdt0)), expectedCommission, 'cm recorded');
+        assertEq(usdt0.balanceOf(recipient),              expectedNet,         'recipient net');
+        assertEq(usdt0.balanceOf(address(cm)),            expectedCommission,  'cm pool');
+        assertEq(cm.tokenCommissionPool(address(usdt0)),  expectedCommission,  'cm recorded');
     }
 
     // ========================================================================
@@ -662,15 +723,17 @@ contract BridgeTest is Test {
 
     function test_fundsOut_nativeCommission_reverts() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         _setFundsOutNativeRule(100);
-        // The ETH/USD feed configured in setUp produces a positive native quote,
-        // so the bridge reaches the `NativeCommissionNotAllowedOnFundsOut` guard.
 
         vm.expectRevert(IBridge.NativeCommissionNotAllowedOnFundsOut.selector);
         vm.prank(multisig);
-        bridge.fundsOut(recipient, AMOUNT, TX_ID, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _singleFundsInId());
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
     }
 
     // ========================================================================
@@ -678,21 +741,18 @@ contract BridgeTest is Test {
     // ========================================================================
 
     function test_fundsIn_revertsOnNativeValueMismatch_zeroRuleButValueSent() public {
-        // No rule; commission is zero. Sending msg.value should revert.
         vm.deal(user, 1 ether);
         vm.expectRevert(IBridge.NativeValueMismatch.selector);
         vm.prank(user);
-        bridge.fundsIn{ value: 1 ether }(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn{ value: 1 ether }(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
     }
 
     function test_fundsIn_revertsOnNativeValueMismatch_nativeRuleButNoValue() public {
         _setFundsInNativeRule(100);
-        // ETH/USD feed configured in setUp → positive native quote, bridge
-        // expects `msg.value > 0` and reverts when the user sends nothing.
 
         vm.expectRevert(IBridge.NativeValueMismatch.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
     }
 
     // ========================================================================
@@ -726,7 +786,7 @@ contract BridgeTest is Test {
 
     function test_getContractBalance() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         assertEq(bridge.getContractBalance(), AMOUNT);
     }
@@ -744,9 +804,9 @@ contract BridgeTest is Test {
         usdt0.mint(user, amount);
 
         vm.prank(user);
-        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, TX_ID);
+        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         assertEq(usdt0.balanceOf(address(bridge)), amount);
-        assertEq(bridge.fundsInRecords(TX_ID), amount);
+        assertEq(rgbModule.fundsInRecords(TX_ID),  amount);
     }
 }

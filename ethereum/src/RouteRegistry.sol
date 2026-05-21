@@ -98,7 +98,7 @@ contract RouteRegistry is IRouteRegistry, Ownable {
         bool    enabled,
         address finalityVerifier,
         address settlementModule
-    ) external onlyOwner {
+    ) external override onlyOwner {
         if (finalityVerifier == address(0)) revert ZeroFinalityVerifier();
         if (settlementModule == address(0)) revert ZeroSettlementModule();
 
