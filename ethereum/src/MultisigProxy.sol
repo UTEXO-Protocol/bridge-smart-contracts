@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import { ECDSA } from '@openzeppelin/contracts/utils/cryptography/ECDSA.sol';
 import { IMultisigProxy } from './interfaces/IMultisigProxy.sol';
+import { IBridge }        from './interfaces/IBridge.sol';
+import { IRouteRegistry } from './interfaces/IRouteRegistry.sol';
 
 contract MultisigProxy is IMultisigProxy {
     using ECDSA for bytes32;
@@ -120,6 +122,14 @@ contract MultisigProxy is IMultisigProxy {
         'ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)'
     );
 
+    // Federation propose — RouteRegistry side
+    bytes32 private constant _PROPOSE_SET_ROUTE_TYPEHASH = keccak256(
+        'ProposeSetRoute(uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH = keccak256(
+        'ProposeUpdateRouteRegistry(address newRouteRegistry,uint256 nonce,uint256 deadline)'
+    );
+
     // Cancel
     bytes32 private constant _CANCEL_PROPOSAL_TYPEHASH = keccak256(
         'CancelProposal(bytes32 proposalId,uint256 nonce,uint256 deadline)'
@@ -173,7 +183,7 @@ contract MultisigProxy is IMultisigProxy {
         // federation governance through `proposeSetTeeAllowedCall`.
         teeAllowedCalls[bridge_][
             bytes4(keccak256(
-                'fundsOut(address,uint256,uint256,uint256,uint256,uint256,string,uint256,bytes32,uint256[])'
+                'fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)'
             ))
         ] = true;
 
@@ -597,6 +607,54 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     // =========================================================================
+    // Federation propose — RouteRegistry side
+    // =========================================================================
+
+    /// @inheritdoc IMultisigProxy
+    function proposeSetRoute(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        bool    enabled,
+        address finalityVerifier,
+        address settlementModule,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_SET_ROUTE_TYPEHASH,
+            sourceChainId, destChainId, enabled, finalityVerifier, settlementModule,
+            nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.SetRoute,
+            abi.encode(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule),
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeUpdateRouteRegistry(
+        address newRouteRegistry,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH, newRouteRegistry, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.UpdateRouteRegistry,
+            abi.encode(newRouteRegistry),
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    // =========================================================================
     // Cancel
     // =========================================================================
 
@@ -821,6 +879,31 @@ contract MultisigProxy is IMultisigProxy {
             address oldAdapter = lzAdapter;
             lzAdapter = newAdapter;
             emit LZAdapterUpdated(oldAdapter, newAdapter);
+
+        } else if (opType == OperationType.SetRoute) {
+            // Forwards to RouteRegistry, looked up dynamically from Bridge to
+            // keep registry pointer as a single source of truth.
+            (
+                uint256 sourceChainId,
+                uint256 destChainId,
+                bool    enabled,
+                address finalityVerifier,
+                address settlementModule
+            ) = abi.decode(opData, (uint256, uint256, bool, address, address));
+
+            address registry = IBridge(bridge).routeRegistry();
+            if (registry == address(0)) revert ZeroTarget();
+            IRouteRegistry(registry).setRoute(
+                sourceChainId, destChainId, enabled, finalityVerifier, settlementModule
+            );
+
+        } else if (opType == OperationType.UpdateRouteRegistry) {
+            // Rotates Bridge's `routeRegistry` immutable-shaped slot. The new
+            // registry MUST be deployed with Bridge's address as its
+            // constructor `bridge_`; otherwise dispatcher calls revert
+            // `NotBridge` and the route plane goes dark.
+            address newRegistry = abi.decode(opData, (address));
+            IBridge(bridge).setRouteRegistry(newRegistry);
 
         } else {
             revert UnknownOperationType();

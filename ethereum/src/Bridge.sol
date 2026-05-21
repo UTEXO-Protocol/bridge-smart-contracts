@@ -43,10 +43,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
-    /// @notice Per-Bridge route directory. Dispatches `onFundsIn` /
-    ///         `beforeFundsOut` to the route-specific verifier + settlement
-    ///         module configured by federation governance.
-    IRouteRegistry public immutable routeRegistry;
+    /// @inheritdoc IBridge
+    /// @dev Mutable so federation can rotate registry deployments via
+    ///      `UpdateRouteRegistry` governance op without redeploying the
+    ///      Bridge.
+    address public override routeRegistry;
 
     /// @inheritdoc IBridge
     address public override lzAdapter;
@@ -88,7 +89,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (routeRegistry_     == address(0)) revert InvalidRouteRegistryAddress();
         if (commissionManager_ == address(0)) revert InvalidCommissionManagerAddress();
 
-        routeRegistry     = IRouteRegistry(routeRegistry_);
+        routeRegistry     = routeRegistry_;
         commissionManager = ICommissionManager(commissionManager_);
         lzAdapter         = lzAdapter_;
     }
@@ -104,6 +105,16 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         address old = lzAdapter;
         lzAdapter = newAdapter;
         emit LZAdapterUpdated(old, newAdapter);
+    }
+
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`; federation gates this on its M-of-N
+    ///      timelock flow via `proposeUpdateRouteRegistry`.
+    function setRouteRegistry(address newRouteRegistry) external override onlyOwner {
+        if (newRouteRegistry == address(0)) revert InvalidRouteRegistryAddress();
+        address old = routeRegistry;
+        routeRegistry = newRouteRegistry;
+        emit RouteRegistryUpdated(old, newRouteRegistry);
     }
 
     // =========================================================================
@@ -192,7 +203,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // Delegate route-specific finality verification + settlement-state
         // mutation to the configured plugins. The registry runs the verifier
         // (view-only) first; if it reverts, no settlement-module write happens.
-        routeRegistry.beforeFundsOut(
+        IRouteRegistry(routeRegistry).beforeFundsOut(
             FundsOutContext({
                 token:         TOKEN,
                 recipient:     recipient,
@@ -273,7 +284,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         IERC20(TOKEN).safeTransferFrom(from, address(this), amount);
 
         // Delegate per-route inbound bookkeeping.
-        routeRegistry.onFundsIn(
+        IRouteRegistry(routeRegistry).onFundsIn(
             FundsInContext({
                 token:         TOKEN,
                 sender:        from,

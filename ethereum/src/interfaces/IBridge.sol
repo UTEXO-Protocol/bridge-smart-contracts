@@ -25,6 +25,12 @@ interface IBridge {
     /// @param newAdapter New trusted adapter (zero disables the adapter overload).
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
 
+    /// @notice Emitted on every successful `setRouteRegistry`.
+    /// @param oldRegistry Previous registry (the constructor-supplied value
+    ///                    before the first rotation).
+    /// @param newRegistry New registry (non-zero by `setRouteRegistry` guard).
+    event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+
     /// @param sender             Address that deposited the tokens (the EOA on the
     ///                           public overload, or the LZ adapter on the
     ///                           adapter-only overload).
@@ -139,9 +145,16 @@ interface IBridge {
     ///         the adapter overload until a non-zero address is set again.
     function setLZAdapter(address newAdapter) external;
 
+    /// @notice Updates the `RouteRegistry` reference Bridge dispatches
+    ///         `onFundsIn` / `beforeFundsOut` through. Owner-only.
+    function setRouteRegistry(address newRouteRegistry) external;
+
     /// @notice Current trusted adapter; `address(0)` means the adapter
     ///         overload is closed.
     function lzAdapter() external view returns (address);
+
+    /// @notice Current `RouteRegistry` Bridge uses for route dispatch.
+    function routeRegistry() external view returns (address);
 
     /// @notice Permanently blocked — ownership cannot be renounced.
     function renounceOwnership() external view;
