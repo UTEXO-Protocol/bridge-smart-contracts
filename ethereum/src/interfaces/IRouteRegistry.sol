@@ -63,6 +63,26 @@ interface IRouteRegistry {
     );
 
     // =========================================================================
+    // Owner-only: route administration
+    // =========================================================================
+
+    /// @notice Adds or updates a route. Owner-only. Both plugin slots MUST be
+    ///         non-zero — explicit `NullVerifier` / `NullSettlementModule`
+    ///         deployments cover routes that deliberately opt out of a layer.
+    /// @param sourceChainId    Source chain id of the route key.
+    /// @param destChainId      Destination chain id of the route key.
+    /// @param enabled          New `enabled` flag.
+    /// @param finalityVerifier Verifier contract for this route.
+    /// @param settlementModule Settlement module contract for this route.
+    function setRoute(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        bool    enabled,
+        address finalityVerifier,
+        address settlementModule
+    ) external;
+
+    // =========================================================================
     // Views
     // =========================================================================
 

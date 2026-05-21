@@ -9,13 +9,10 @@ interface IBridge {
     error InvalidDestinationAddress();
     error InvalidDestinationChainId();
     error InvalidSourceChainId();
-    error InvalidBtcRelayAddress();
+    error InvalidRouteRegistryAddress();
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();
-    error DuplicateOperationId();
     error BurnIdAlreadyConsumed(uint256 burnId);
-    error FundsInNotFound(uint256 operationId);
-    error FundsOutAmountExceedsFundsIn();
     error NativeCommissionNotAllowedOnFundsOut();
     error NativeValueMismatch();
 
@@ -27,6 +24,12 @@ interface IBridge {
     /// @param oldAdapter Previous trusted adapter (zero before first set).
     /// @param newAdapter New trusted adapter (zero disables the adapter overload).
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
+
+    /// @notice Emitted on every successful `setRouteRegistry`.
+    /// @param oldRegistry Previous registry (the constructor-supplied value
+    ///                    before the first rotation).
+    /// @param newRegistry New registry (non-zero by `setRouteRegistry` guard).
+    event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
     /// @param sender             Address that deposited the tokens (the EOA on the
     ///                           public overload, or the LZ adapter on the
@@ -57,26 +60,20 @@ interface IBridge {
     /// @param amount             Gross amount released from the bridge pool (pre-commission).
     /// @param netAmount          Amount actually delivered to `recipient`.
     /// @param tokenCommission    Fee taken in the bridged token (sent to the CommissionManager).
-    /// @param operationId        Backend-assigned operation identifier.
     /// @param burnId             Identifier extracted from the burn consignment on the
     ///                           source side. Stored on-chain to block fundsOut replays.
     /// @param sourceChainId      Source chain id (non-EVM side for RGB→EVM releases).
     /// @param destinationChainId Destination chain id (EVM target receiving the release).
     /// @param sourceAddress      Sender address on the source chain.
-    /// @param blockHeight        Bitcoin block height verified via BtcRelay.
-    /// @param commitmentHash     Bitcoin block commitment hash verified via BtcRelay.
     event BridgeFundsOut(
         address indexed recipient,
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 operationId,
         uint256 burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string  sourceAddress,
-        uint256 blockHeight,
-        bytes32 commitmentHash
+        string  sourceAddress
     );
 
     // =========================================================================
@@ -88,19 +85,20 @@ interface IBridge {
     ///         `block.chainid` — non-spoofable by the caller.
     /// @dev Payable: if the active route uses NATIVE commission currency, `msg.value`
     ///      must equal the quoted native commission; otherwise `msg.value` must be 0.
-    /// @dev Permissionless. Replay protection is enforced via `operationId`
-    ///      (rejected if it already exists in `fundsInRecords`).
+    /// @dev `settlementData` is an opaque per-route blob forwarded into the
+    ///      route's `ISettlementModule.onFundsIn`. Routes whose module does not
+    ///      consume any extra data (e.g. RGB) accept an empty bytes string.
     function fundsIn(
         uint256 amount,
         uint256 destinationChainId,
         string  calldata destinationAddress,
-        uint256 operationId
+        uint256 operationId,
+        bytes   calldata settlementData
     ) external payable;
 
     /// @notice Adapter-only overload. Used by `UtexoLZAdapter.lzCompose` to
     ///         forward a cross-chain deposit while preserving the original
-    ///         source-chain id (carried in `composeMsg` and validated against
-    ///         the adapter's trusted-entrypoint registry on the source side).
+    ///         source-chain id (carried in `composeMsg` from the source side).
     /// @dev Reverts `NotLZAdapter` if `msg.sender` is not the configured
     ///      `lzAdapter`. Until federation sets a non-zero adapter, the
     ///      overload is effectively closed.
@@ -109,36 +107,33 @@ interface IBridge {
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  calldata destinationAddress,
-        uint256 operationId
+        uint256 operationId,
+        bytes   calldata settlementData
     ) external payable;
 
     // =========================================================================
     // External — owner-only (called via MultisigProxy.execute)
     // =========================================================================
 
-    /// @notice Release tokens to a recipient. Verifies the Bitcoin block header
-    ///         is known to BtcRelay and that the referenced fundsIn operations
-    ///         exist on-chain before releasing.
-    ///         Only callable by owner (MultisigProxy via execute()).
-    /// @dev `destinationChainId` is part of the CommissionManager route key and
-    ///      lets the same Bridge serve multi-hop routes.
-    /// @dev `burnId` is the identifier the backend extracts from the burn
-    ///      consignment on the source side. The contract records it on success
-    ///      and rejects any future call referencing the same `burnId`.
-    /// @dev `fundsInIds` are processed sequentially: each referenced record is
-    ///      either fully consumed (deleted) or partially consumed (decremented)
-    ///      until `amount` is fully covered.
+    /// @notice Release tokens to a recipient.
+    ///
+    ///       Only callable by owner (`MultisigProxy` via `execute()`).
+    /// @dev `destinationChainId` is part of the CommissionManager route key
+    ///      and lets the same Bridge serve multi-hop routes.
+    /// @dev `burnId` is the common single-use replay guard enforced by Bridge
+    ///      itself; it MUST be unique across every successful fundsOut call.
+    /// @dev `proof` is opaque per-route data consumed by `IFinalityVerifier`.
+    ///      `settlementData` is opaque per-route data consumed by
+    ///      `ISettlementModule`. Each plugin owns its own encoding.
     function fundsOut(
         address recipient,
         uint256 amount,
-        uint256 operationId,
         uint256 burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  calldata sourceAddress,
-        uint256 blockHeight,
-        bytes32 commitmentHash,
-        uint256[] calldata fundsInIds
+        bytes   calldata proof,
+        bytes   calldata settlementData
     ) external;
 
     // =========================================================================
@@ -146,13 +141,20 @@ interface IBridge {
     // =========================================================================
 
     /// @notice Updates the trusted LayerZero adapter address. Owner-only
-    ///         (MultisigProxy in production). Passing `address(0)` disables the
-    ///         adapter overload until a non-zero address is set again.
+    ///         (MultisigProxy in production). Passing `address(0)` disables
+    ///         the adapter overload until a non-zero address is set again.
     function setLZAdapter(address newAdapter) external;
 
-    /// @notice Current trusted adapter; `address(0)` means the adapter overload
-    ///         is closed.
+    /// @notice Updates the `RouteRegistry` reference Bridge dispatches
+    ///         `onFundsIn` / `beforeFundsOut` through. Owner-only.
+    function setRouteRegistry(address newRouteRegistry) external;
+
+    /// @notice Current trusted adapter; `address(0)` means the adapter
+    ///         overload is closed.
     function lzAdapter() external view returns (address);
+
+    /// @notice Current `RouteRegistry` Bridge uses for route dispatch.
+    function routeRegistry() external view returns (address);
 
     /// @notice Permanently blocked — ownership cannot be renounced.
     function renounceOwnership() external view;
