@@ -255,13 +255,6 @@ contract IntegrationTest is Test {
             )
         );
 
-        // Authorise the new 8-arg fundsOut selector on the TEE allowlist. The
-        // MultisigProxy constructor still seeds the legacy 10-arg selector by
-        // default — PR6 swaps the default; until then the test wires the new
-        // one through the federation governance flow it would use in
-        // production anyway.
-        _authorizeNewFundsOutSelector();
-
         // Sanity: CM now quotes commission for both routes.
         (uint256 tInQuote,, uint256 netIn) =
             cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT);
@@ -490,25 +483,6 @@ contract IntegrationTest is Test {
 
         vm.warp(block.timestamp + TIMELOCK + 1);
         proxy.executeProposal(proposalId, callData);
-    }
-
-    /// @dev Adds `FUNDS_OUT_SELECTOR` to the TEE allowlist via a
-    ///      `proposeSetTeeAllowedCall` proposal. Used in the token-commission
-    ///      e2e test so the proxy accepts the new 8-arg fundsOut signature.
-    function _authorizeNewFundsOutSelector() internal {
-        uint256 nonce    = proxy.proposalNonce();
-        uint256 deadline = block.timestamp + 7 days;
-        bytes32 digest   = MultisigHelper.digestProposeSetTeeAllowedCall(
-            domainSep, address(bridge), FUNDS_OUT_SELECTOR, true, nonce, deadline
-        );
-        bytes[] memory sigs = _signFed2of3(digest);
-
-        bytes32 proposalId = proxy.proposeSetTeeAllowedCall(
-            address(bridge), FUNDS_OUT_SELECTOR, true,
-            nonce, deadline, 3, sigs
-        );
-        vm.warp(block.timestamp + TIMELOCK + 1);
-        proxy.executeProposal(proposalId, abi.encode(address(bridge), FUNDS_OUT_SELECTOR, true));
     }
 
     function _signEnclave2of3(bytes32 digest) internal view returns (bytes[] memory sigs) {
