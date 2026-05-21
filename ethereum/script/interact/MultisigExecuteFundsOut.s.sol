@@ -3,67 +3,81 @@ pragma solidity 0.8.20;
 
 import { Script, console2 } from 'forge-std/Script.sol';
 import { MultisigProxy } from '../../src/MultisigProxy.sol';
-import { MultisigHelper } from '../../test/helpers/MultisigHelper.sol';
+import { MultisigHelper } from '../../test/mocks/MultisigHelper.sol';
 
 /// @title MultisigExecuteFundsOut
-/// @notice Signs a Bridge.fundsOut() call locally with enclave private keys from env
-///         and submits it via MultisigProxy.execute(). For manual end-to-end testing
-///         before the backend is wired up.
+/// @notice Signs a Bridge.fundsOut() call locally with enclave private keys
+///         and submits it via MultisigProxy.execute(). For manual end-to-end
+///         testing before the backend is wired up.
+///
+/// @dev RGB-route specific: `proof` and `settlementData` are packed for the
+///      Atomiq BtcRelay + RgbSettlementModule plugins. Other routes will
+///      need different blob layouts.
 ///
 /// Env:
-///   PRIVATE_KEY             — tx submitter (anyone)
-///   PROXY_ADDRESS           — MultisigProxy address
-///   RECIPIENT               — destination address
-///   AMOUNT (wei)            — gross amount to release (before commission)
-///   OPERATION_ID            — backend-assigned operation id
-///   BURN_ID                 — burn consignment id (single-use replay guard)
-///   SOURCE_CHAIN            — source chain string
-///   DEST_CHAIN              — destination chain string (used for commission routing)
-///   SOURCE_ADDRESS          — source address string
-///   BLOCK_HEIGHT            — Bitcoin block height (verified by BtcRelay)
-///   COMMITMENT_HASH         — Bitcoin block commitment hash (verified by BtcRelay)
-///   FUNDS_IN_IDS            — comma-separated fundsIn transaction IDs to reference
-///   ENCLAVE_PKS             — comma-separated hex private keys (ordered by signer index)
-///   ENCLAVE_BITMAP          — bitmap of participating signers (hex or decimal)
-///   DEADLINE_OFFSET         — seconds from now (e.g. 3600)
+///   PRIVATE_KEY              — tx submitter (anyone)
+///   PROXY_ADDRESS            — MultisigProxy address
+///   RECIPIENT                — release recipient on this chain
+///   AMOUNT (wei)             — gross amount to release (pre-commission)
+///   BURN_ID                  — burn consignment id (single-use replay guard)
+///   SOURCE_CHAIN_ID (uint)   — source chain id (RGB-side for inbound releases)
+///   DESTINATION_CHAIN_ID     — destination chain id (this chain)
+///   SOURCE_ADDRESS (string)  — source-side sender address
+///   BLOCK_HEIGHT             — Bitcoin block height (consumed by RGBVerifier)
+///   COMMITMENT_HASH (bytes32)— Bitcoin block commitment hash
+///   FUNDS_IN_IDS             — comma-separated fundsIn op ids referenced by
+///                              RgbSettlementModule
+///   ENCLAVE_PKS              — comma-separated hex private keys (ordered by
+///                              signer index)
+///   ENCLAVE_BITMAP           — bitmap of participating signers (hex/decimal)
+///   DEADLINE_OFFSET          — seconds from now (e.g. 3600)
 contract MultisigExecuteFundsOut is Script {
-    // 10-arg fundsOut signature (adds destChain + burnId).
+    /// @dev 8-arg fundsOut selector — must match the TEE allowlist entry
+    ///      seeded by `MultisigProxy`'s constructor.
     bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+        'fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)'
     ));
 
     struct Params {
         address recipient;
         uint256 amount;
-        uint256 operationId;
         uint256 burnId;
-        string  srcChain;
-        string  dstChain;
-        string  srcAddr;
-        uint256 blockHeight;
-        bytes32 commitmentHash;
-        uint256[] fundsInIds;
+        uint256 sourceChainId;
+        uint256 destChainId;
+        string  sourceAddress;
+        bytes   proof;
+        bytes   settlementData;
     }
 
     function _loadParams() internal view returns (Params memory p) {
-        p.recipient      = vm.envAddress('RECIPIENT');
-        p.amount         = vm.envUint('AMOUNT');
-        p.operationId    = vm.envUint('OPERATION_ID');
-        p.burnId         = vm.envUint('BURN_ID');
-        p.srcChain       = vm.envString('SOURCE_CHAIN');
-        p.dstChain       = vm.envString('DEST_CHAIN');
-        p.srcAddr        = vm.envString('SOURCE_ADDRESS');
-        p.blockHeight    = vm.envUint('BLOCK_HEIGHT');
-        p.commitmentHash = vm.envBytes32('COMMITMENT_HASH');
-        p.fundsInIds     = vm.envUint('FUNDS_IN_IDS', ',');
+        p.recipient     = vm.envAddress('RECIPIENT');
+        p.amount        = vm.envUint('AMOUNT');
+        p.burnId        = vm.envUint('BURN_ID');
+        p.sourceChainId = vm.envUint('SOURCE_CHAIN_ID');
+        p.destChainId   = vm.envUint('DESTINATION_CHAIN_ID');
+        p.sourceAddress = vm.envString('SOURCE_ADDRESS');
+
+        // proof = abi.encode(blockHeight, commitmentHash) — RGBVerifier layout.
+        p.proof = abi.encode(
+            vm.envUint('BLOCK_HEIGHT'),
+            vm.envBytes32('COMMITMENT_HASH')
+        );
+
+        // settlementData = abi.encode(uint256[] fundsInIds) — RgbSettlementModule layout.
+        p.settlementData = abi.encode(vm.envUint('FUNDS_IN_IDS', ','));
     }
 
     function _buildCallData(Params memory p) internal pure returns (bytes memory) {
         return abi.encodeWithSelector(
             FUNDS_OUT_SELECTOR,
-            p.recipient, p.amount, p.operationId, p.burnId,
-            p.srcChain, p.dstChain, p.srcAddr,
-            p.blockHeight, p.commitmentHash, p.fundsInIds
+            p.recipient,
+            p.amount,
+            p.burnId,
+            p.sourceChainId,
+            p.destChainId,
+            p.sourceAddress,
+            p.proof,
+            p.settlementData
         );
     }
 

@@ -10,19 +10,31 @@ import {
     CommissionSide,
     ICommissionManager
 } from '../src/interfaces/ICommissionManager.sol';
-import { MockERC20 } from './helpers/MockERC20.sol';
+import { MockERC20 } from './mocks/MockERC20.sol';
+import { MockAggregatorV3 } from './mocks/MockAggregatorV3.sol';
 
 contract CommissionManagerTest is Test {
     CommissionManager internal cm;
     MockERC20 internal token;
+    MockAggregatorV3 internal ethUsdFeed;
 
     address internal constant BRIDGE = address(0xB01);
     address internal owner = makeAddr('owner');
     address internal user = makeAddr('user');
     address internal recipient = makeAddr('recipient');
 
-    string internal constant SRC = 'eth';
-    string internal constant DST = 'rgb';
+    /// @dev Chain identifiers are uint256: EVM uses native block.chainid;
+    ///      non-EVM endpoints use ids reserved above the EVM range by
+    ///      backend convention (see README).
+    uint256 internal constant SRC_CHAIN_ID = 1;          // Ethereum mainnet
+    uint256 internal constant DST_CHAIN_ID = 1_000_001;  // RGB (backend-assigned)
+
+    // Chainlink feed defaults. ETH/USD on Arbitrum reports with 8 decimals;
+    // heartbeat 86400 s in production — tests use 1 hour to keep stale-path
+    // assertions snappy.
+    uint8   internal constant FEED_DECIMALS = 8;
+    int256  internal constant DEFAULT_ETH_USD = 2_000e8; // $2000 / ETH
+    uint256 internal constant HEARTBEAT = 1 hours;
 
     event BridgeAddressUpdated(address indexed newBridge);
     event GlobalDefaultsUpdated(
@@ -31,13 +43,26 @@ contract CommissionManagerTest is Test {
         CommissionSide side,
         CommissionCurrency currency
     );
+    event EthUsdFeedUpdated(address indexed feed, uint256 heartbeat);
 
     function setUp() public {
+        // Anvil starts at timestamp 1; warp past the heartbeat so staleness
+        // tests can subtract `HEARTBEAT` from `block.timestamp` without
+        // underflowing.
+        vm.warp(HEARTBEAT * 10);
+
         vm.prank(owner);
         cm = new CommissionManager(BRIDGE);
         token = new MockERC20('Test', 'TST');
         vm.prank(owner);
         cm.setGlobalDefaults(0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        // Deploy a default ETH/USD feed and wire it in. Tests that need to
+        // exercise the "feed unset" branch redeploy CM without calling
+        // `setEthUsdFeed` (see test_convertTokenFeeToNative_revertsIfFeedUnset).
+        ethUsdFeed = new MockAggregatorV3(FEED_DECIMALS, DEFAULT_ETH_USD, block.timestamp);
+        vm.prank(owner);
+        cm.setEthUsdFeed(address(ethUsdFeed), HEARTBEAT);
     }
 
     // --- Constructor ---
@@ -65,15 +90,63 @@ contract CommissionManagerTest is Test {
         assertEq(cm.calculateStableFee(10000, 400, 100), 400);
     }
 
-    function test_convertTokenToNative() public view {
-        uint256 native = cm.convertTokenToNative(1e18, 2e9, 18);
-        assertEq(native, 2e9);
+    function test_convertTokenFeeToNative_happyPath_18dec() public view {
+        // 1 token (18 dec, $1 stable) @ $2000/ETH → 1/2000 ETH = 5e14 wei
+        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14);
+    }
+
+    function test_convertTokenFeeToNative_happyPath_6dec() public view {
+        // 100 USDT0 (6 dec, $1 stable) @ $2000/ETH → 100/2000 = 0.05 ETH = 5e16 wei
+        assertEq(cm.convertTokenFeeToNative(100e6, 6), 5e16);
+    }
+
+    function test_convertTokenFeeToNative_returnsZeroForZeroFee() public view {
+        // Short-circuit before reading the feed.
+        assertEq(cm.convertTokenFeeToNative(0, 18), 0);
+    }
+
+    function test_convertTokenFeeToNative_revertsIfFeedUnset() public {
+        // Fresh CM with no feed configured.
+        vm.prank(owner);
+        CommissionManager freshCm = new CommissionManager(BRIDGE);
+        vm.expectRevert(ICommissionManager.EthUsdFeedNotSet.selector);
+        freshCm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_revertsIfPriceZero() public {
+        ethUsdFeed.setAnswer(0);
+        vm.expectRevert(ICommissionManager.InvalidPrice.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_revertsIfPriceNegative() public {
+        ethUsdFeed.setAnswer(-1);
+        vm.expectRevert(ICommissionManager.InvalidPrice.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_revertsIfStale() public {
+        // updatedAt = now - heartbeat - 1 → stale by one second.
+        ethUsdFeed.setUpdatedAt(block.timestamp - HEARTBEAT - 1);
+        vm.expectRevert(ICommissionManager.StalePrice.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_freshAtExactHeartbeatEdge() public {
+        // updatedAt = now - heartbeat → still fresh (boundary is strict `>`).
+        ethUsdFeed.setUpdatedAt(block.timestamp - HEARTBEAT);
+        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14);
+    }
+
+    function test_convertTokenFeeToNative_revertsIfTokenDecimalsTooLarge() public {
+        vm.expectRevert(ICommissionManager.TokenDecimalsTooLarge.selector);
+        cm.convertTokenFeeToNative(1, 19);
     }
 
     function test_buildRouteKey_matchesEncodeHash() public view {
         address t = address(token);
-        bytes32 expected = keccak256(abi.encode(SRC, DST, t));
-        assertEq(cm.buildRouteKey(SRC, DST, t), expected);
+        bytes32 expected = keccak256(abi.encode(SRC_CHAIN_ID, DST_CHAIN_ID, t));
+        assertEq(cm.buildRouteKey(SRC_CHAIN_ID, DST_CHAIN_ID, t), expected);
     }
 
     // --- Global defaults ---
@@ -171,7 +244,7 @@ contract CommissionManagerTest is Test {
         address t = address(token);
         uint256 amount = 100_000;
         (uint256 tok, uint256 nat, uint256 net) =
-            cm.calculateFundsInCommission(SRC, DST, t, amount);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, amount);
         assertEq(tok, 4000); // 4% of 100_000
         assertEq(nat, 0);
         assertEq(net, amount - 4000);
@@ -181,13 +254,13 @@ contract CommissionManagerTest is Test {
         address t = address(token);
         uint256 amount = 100_000;
         (uint256 tok, uint256 nat, uint256 net) =
-            cm.calculateFundsInCommission(SRC, DST, t, amount);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, amount);
         assertEq(tok, 0);
         assertEq(nat, 0);
         assertEq(net, amount);
     }
 
-    function test_calculateFundsInCommission_zeroStablePercent_native_skipsRateCheck() public {
+    function test_calculateFundsInCommission_zeroStablePercent_native_skipsFeedCheck() public {
         vm.prank(owner);
         cm.setGlobalDefaults(
             0,
@@ -195,11 +268,13 @@ contract CommissionManagerTest is Test {
             CommissionSide.FUNDS_IN,
             CommissionCurrency.NATIVE
         );
+        // Make the feed unhealthy: if the contract still hit it the call would
+        // revert. A zero stable percent must short-circuit before the read.
+        ethUsdFeed.setAnswer(0);
         address t = address(token);
-        // Deliberately no setMockTokenToNativeRate: nonzero fee would revert.
         uint256 amount = 1000 ether;
         (uint256 tok, uint256 nat, uint256 net) =
-            cm.calculateFundsInCommission(SRC, DST, t, amount);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, amount);
         assertEq(tok, 0);
         assertEq(nat, 0);
         assertEq(net, amount);
@@ -215,13 +290,13 @@ contract CommissionManagerTest is Test {
         );
         address t = address(token);
         uint256 amount = 100_000 ether;
-        uint256 rate = 2000 gwei; // wei per 1 wei of token with 18 decimals — illustrative
-        vm.prank(owner);
-        cm.setMockTokenToNativeRateForToken(t, rate);
         (uint256 tok, uint256 nat, uint256 net) =
-            cm.calculateFundsInCommission(SRC, DST, t, amount);
-        uint256 stableFee = 4000 ether; // 4% of 100_000 ether
-        uint256 expectedNat = cm.convertTokenToNative(stableFee, rate, 18);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, amount);
+        // 4% of 100_000 tokens = 4000 tokens stable fee. Delegate the math to
+        // the contract — that way the test stays correct if the formula
+        // changes (e.g. different feed decimals).
+        uint256 expectedNat = cm.convertTokenFeeToNative(4000 ether, 18);
+        assertGt(expectedNat, 0, 'sanity: positive native fee');
         assertEq(tok, 0);
         assertEq(nat, expectedNat);
         assertEq(net, amount);
@@ -237,13 +312,18 @@ contract CommissionManagerTest is Test {
         );
         address t = address(token);
         (uint256 tok, uint256 nat, uint256 net) =
-            cm.calculateFundsInCommission(SRC, DST, t, 50_000);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 50_000);
         assertEq(tok, 0);
         assertEq(nat, 0);
         assertEq(net, 50_000);
     }
 
-    function test_calculateFundsInCommission_native_revertsWhenRateUnset() public {
+    function test_calculateFundsInCommission_native_revertsWhenFeedUnset() public {
+        // Close the NATIVE path explicitly and confirm the calculator surfaces
+        // the underlying `EthUsdFeedNotSet` revert (rather than producing a
+        // silent zero quote).
+        vm.prank(owner);
+        cm.setEthUsdFeed(address(0), 0);
         vm.prank(owner);
         cm.setGlobalDefaults(
             400,
@@ -252,17 +332,64 @@ contract CommissionManagerTest is Test {
             CommissionCurrency.NATIVE
         );
         address t = address(token);
-        vm.expectRevert(ICommissionManager.MockTokenToNativeRateNotSet.selector);
-        cm.calculateFundsInCommission(SRC, DST, t, 1000);
+        vm.expectRevert(ICommissionManager.EthUsdFeedNotSet.selector);
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 1000);
     }
 
-    function test_resolvedMockTokenToNativeRate_fallsBackToGlobalMock() public {
+    function test_calculateFundsInCommission_native_revertsWhenPriceStale() public {
         vm.prank(owner);
-        cm.setMockTokenToNativeRate(123e9);
-        assertEq(cm.resolvedMockTokenToNativeRate(address(token)), 123e9);
+        cm.setGlobalDefaults(
+            400,
+            100,
+            CommissionSide.FUNDS_IN,
+            CommissionCurrency.NATIVE
+        );
+        ethUsdFeed.setUpdatedAt(block.timestamp - HEARTBEAT - 1);
+        vm.expectRevert(ICommissionManager.StalePrice.selector);
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1000);
+    }
+
+    // --- setEthUsdFeed admin --------------------------------------------------
+
+    function test_setEthUsdFeed_setsStateAndEmits() public {
+        MockAggregatorV3 newFeed =
+            new MockAggregatorV3(FEED_DECIMALS, 3_000e8, block.timestamp);
+
+        vm.expectEmit(true, false, false, true, address(cm));
+        emit EthUsdFeedUpdated(address(newFeed), 30 minutes);
+
         vm.prank(owner);
-        cm.setMockTokenToNativeRateForToken(address(token), 999e9);
-        assertEq(cm.resolvedMockTokenToNativeRate(address(token)), 999e9);
+        cm.setEthUsdFeed(address(newFeed), 30 minutes);
+
+        assertEq(cm.ethUsdFeed(), address(newFeed));
+        assertEq(cm.ethUsdHeartbeat(), 30 minutes);
+    }
+
+    function test_setEthUsdFeed_zeroAddressClosesPath() public {
+        vm.expectEmit(true, false, false, true, address(cm));
+        emit EthUsdFeedUpdated(address(0), 0);
+
+        vm.prank(owner);
+        cm.setEthUsdFeed(address(0), 12345); // heartbeat is ignored when closing
+
+        assertEq(cm.ethUsdFeed(), address(0));
+        assertEq(cm.ethUsdHeartbeat(), 0);
+    }
+
+    function test_setEthUsdFeed_revertsOnZeroHeartbeat() public {
+        MockAggregatorV3 newFeed =
+            new MockAggregatorV3(FEED_DECIMALS, 1e8, block.timestamp);
+        vm.expectRevert(ICommissionManager.InvalidHeartbeat.selector);
+        vm.prank(owner);
+        cm.setEthUsdFeed(address(newFeed), 0);
+    }
+
+    function test_setEthUsdFeed_revertsIfNotOwner() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user)
+        );
+        vm.prank(user);
+        cm.setEthUsdFeed(address(0x1234), 3600);
     }
 
     function test_calculateFundsOutCommission_token() public {
@@ -276,7 +403,7 @@ contract CommissionManagerTest is Test {
         address t = address(token);
         uint256 amount = 80_000;
         (uint256 tok, uint256 nat, uint256 net) =
-            cm.calculateFundsOutCommission(SRC, DST, t, amount);
+            cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, amount);
         assertEq(tok, 3200);
         assertEq(nat, 0);
         assertEq(net, amount - 3200);
@@ -285,7 +412,7 @@ contract CommissionManagerTest is Test {
     function test_calculateFundsOutCommission_skipsWhenSideIsFundsIn() public view {
         address t = address(token);
         (uint256 tok, uint256 nat, uint256 net) =
-            cm.calculateFundsOutCommission(SRC, DST, t, 40_000);
+            cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 40_000);
         assertEq(tok, 0);
         assertEq(nat, 0);
         assertEq(net, 40_000);
@@ -303,14 +430,14 @@ contract CommissionManagerTest is Test {
             isSet: true
         });
         vm.prank(owner);
-        cm.setCommissionRule(SRC, DST, t, cfg);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
 
         (uint256 tok,, uint256 net) =
-            cm.calculateFundsInCommission(SRC, DST, t, 50_000);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 50_000);
         assertEq(tok, 5000); // 10%
         assertEq(net, 45_000);
 
-        CommissionConfig memory stored = cm.getCommissionRule(SRC, DST, t);
+        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t);
         assertTrue(stored.isSet);
         assertEq(stored.stablePercent, 1000);
     }
@@ -327,14 +454,14 @@ contract CommissionManagerTest is Test {
             isSet: true
         });
         vm.prank(owner);
-        cm.setCommissionRule(SRC, DST, t, cfg);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
         vm.prank(owner);
-        cm.clearCommissionRule(SRC, DST, t);
+        cm.clearCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t);
 
-        CommissionConfig memory stored = cm.getCommissionRule(SRC, DST, t);
+        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t);
         assertFalse(stored.isSet);
 
-        (uint256 tok,,) = cm.calculateFundsInCommission(SRC, DST, t, 50_000);
+        (uint256 tok,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 50_000);
         assertEq(tok, 2000); // back to global 4%
     }
 
@@ -349,7 +476,7 @@ contract CommissionManagerTest is Test {
         });
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.StablePercentTooHigh.selector);
-        cm.setCommissionRule(SRC, DST, t, cfg);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
     }
 
     // --- Bridge address ---

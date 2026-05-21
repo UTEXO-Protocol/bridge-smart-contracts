@@ -74,6 +74,22 @@ library MultisigHelper {
         'ProposeUpdateCommissionManager(address newCommissionManager,uint256 nonce,uint256 deadline)'
     );
 
+    bytes32 internal constant PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH = keccak256(
+        'ProposeAdminExecuteAdapter(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
+    );
+
+    bytes32 internal constant PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH = keccak256(
+        'ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)'
+    );
+
+    bytes32 internal constant PROPOSE_SET_ROUTE_TYPEHASH = keccak256(
+        'ProposeSetRoute(uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)'
+    );
+
+    bytes32 internal constant PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH = keccak256(
+        'ProposeUpdateRouteRegistry(address newRouteRegistry,uint256 nonce,uint256 deadline)'
+    );
+
     /// @dev Builds the EIP-712 domain separator the same way MultisigProxy does.
     function domainSeparator(address verifyingContract, uint256 chainId) internal pure returns (bytes32) {
         return keccak256(abi.encode(
@@ -261,6 +277,57 @@ library MultisigHelper {
     ) internal pure returns (bytes32) {
         return toTypedDataHash(domainSep, keccak256(abi.encode(
             PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH, newCm, nonce, deadline
+        )));
+    }
+
+    function digestProposeAdminExecuteAdapter(
+        bytes32 domainSep,
+        bytes4 selector,
+        bytes memory callData,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(
+            PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, selector, keccak256(callData), nonce, deadline
+        )));
+    }
+
+    function digestProposeUpdateLZAdapter(
+        bytes32 domainSep,
+        address newLZAdapter,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(
+            PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH, newLZAdapter, nonce, deadline
+        )));
+    }
+
+    function digestProposeSetRoute(
+        bytes32 domainSep,
+        uint256 sourceChainId,
+        uint256 destChainId,
+        bool    enabled,
+        address finalityVerifier,
+        address settlementModule,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(
+            PROPOSE_SET_ROUTE_TYPEHASH,
+            sourceChainId, destChainId, enabled, finalityVerifier, settlementModule,
+            nonce, deadline
+        )));
+    }
+
+    function digestProposeUpdateRouteRegistry(
+        bytes32 domainSep,
+        address newRouteRegistry,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(
+            PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH, newRouteRegistry, nonce, deadline
         )));
     }
 

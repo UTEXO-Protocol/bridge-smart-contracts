@@ -7,6 +7,9 @@ import { Bridge } from '../src/Bridge.sol';
 import { CommissionManager } from '../src/CommissionManager.sol';
 import { MultisigProxy } from '../src/MultisigProxy.sol';
 import { IMultisigProxy } from '../src/interfaces/IMultisigProxy.sol';
+import { RouteRegistry } from '../src/RouteRegistry.sol';
+import { RGBVerifier } from '../src/verifiers/RGBVerifier.sol';
+import { RgbSettlementModule } from '../src/settlement/RgbSettlementModule.sol';
 import {
     CommissionConfig,
     CommissionSide,
@@ -14,16 +17,21 @@ import {
     ICommissionManager
 } from '../src/interfaces/ICommissionManager.sol';
 
-import { MockERC20 }     from './helpers/MockERC20.sol';
-import { MockBtcRelay }  from './helpers/MockBtcRelay.sol';
-import { MultisigHelper } from './helpers/MultisigHelper.sol';
+import { MockERC20 }        from './mocks/MockERC20.sol';
+import { MockBtcRelay }     from './mocks/MockBtcRelay.sol';
+import { MockAggregatorV3 } from './mocks/MockAggregatorV3.sol';
+import { MultisigHelper }   from './mocks/MultisigHelper.sol';
 
 /// @title IntegrationTest
 /// @notice End-to-end lifecycle:
-///           deploy (DeployAll-style via predicted Bridge address)
+///           deploy (DeployAll-style via predicted Bridge address) +
+///             RouteRegistry + RGBVerifier + RgbSettlementModule wired in
 ///           → federation configures commission routes on CM
-///           → user fundsIn (TOKEN commission on the source side)
-///           → TEE signs + multisig executes fundsOut (TOKEN commission on the outbound side)
+///           → user fundsIn (TOKEN commission on the source side; the RGB
+///             settlement module records `operationId → netAmount`)
+///           → TEE signs + multisig executes fundsOut (TOKEN commission on
+///             the outbound side; the verifier checks the BtcRelay header,
+///             the settlement module consumes the referenced fundsInIds)
 ///           → federation withdraws accumulated commissions from CM
 ///         Verifies token accounting across every step and event emission for
 ///         the fundsOut → commission → withdrawal trail.
@@ -50,19 +58,23 @@ contract IntegrationTest is Test {
     // System
     // =========================================================================
 
-    MockERC20         token;
-    MockBtcRelay      btcRelay;
-    CommissionManager cm;
-    Bridge            bridge;
-    MultisigProxy     proxy;
-    bytes32           domainSep;
+    MockERC20           token;
+    MockBtcRelay        btcRelay;
+    MockAggregatorV3    ethUsdFeed;
+    CommissionManager   cm;
+    RouteRegistry       routeRegistry;
+    RGBVerifier         rgbVerifier;
+    RgbSettlementModule rgbModule;
+    Bridge              bridge;
+    MultisigProxy       proxy;
+    bytes32             domainSep;
 
     // =========================================================================
     // Constants
     // =========================================================================
 
-    string  constant SOURCE_CHAIN = 'arbitrum'; // this chain
-    string  constant RGB_CHAIN    = 'rgb';
+    uint256 constant SOURCE_CHAIN_ID = 31337;     // foundry default block.chainid
+    uint256 constant RGB_CHAIN_ID    = 1_000_001; // backend-assigned for RGB
 
     uint256 constant USER_DEPOSIT = 100 ether; // 100 tokens gross
     // FUNDS_IN route: 2% token commission (stablePercent = 200, multiplier = 100 → 200/100/100 = 2%).
@@ -72,9 +84,8 @@ contract IntegrationTest is Test {
     uint256 constant FUNDS_OUT_PERCENT = 100;
     uint8   constant FUNDS_OUT_MULT    = 100;
 
-    uint256 constant TX_ID_IN   = 42;
-    uint256 constant TX_ID_OUT  = 43;
-    uint256 constant BURN_ID    = 9_001;
+    uint256 constant TX_ID_IN  = 42;
+    uint256 constant BURN_ID   = 9_001;
 
     uint256 constant BLOCK_HEIGHT      = 850_000;
     bytes32 constant COMMITMENT_HASH   = keccak256('integration-btc-block');
@@ -82,8 +93,19 @@ contract IntegrationTest is Test {
 
     uint256 constant TIMELOCK = 1 hours;
 
+    /// @dev New 8-arg fundsOut selector:
+    ///        fundsOut(
+    ///          address recipient,
+    ///          uint256 amount,
+    ///          uint256 burnId,
+    ///          uint256 sourceChainId,
+    ///          uint256 destinationChainId,
+    ///          string  sourceAddress,
+    ///          bytes   proof,
+    ///          bytes   settlementData
+    ///        )
     bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+        'fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)'
     ));
 
     // =========================================================================
@@ -95,19 +117,16 @@ contract IntegrationTest is Test {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 operationId,
         uint256 burnId,
-        string  sourceChain,
-        string  destChain,
-        string  sourceAddress,
-        uint256 blockHeight,
-        bytes32 commitmentHash
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string  sourceAddress
     );
 
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
 
     // =========================================================================
-    // Setup — DeployAll-style
+    // Setup
     // =========================================================================
 
     function setUp() public {
@@ -118,13 +137,46 @@ contract IntegrationTest is Test {
         btcRelay = new MockBtcRelay();
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, BTC_CONFIRMATIONS);
 
-        // --- DeployAll-style deployment: predict Bridge address from deployer nonce.
+        // DeployAll-style deployment. Deployer tx order:
+        //   nonce n      → CommissionManager (uses predicted Bridge)
+        //   nonce n+1    → RouteRegistry     (uses predicted Bridge;
+        //                                     deployer stays owner so the
+        //                                     test can register routes
+        //                                     before MultisigProxy exists)
+        //   nonce n+2    → Bridge            (uses RouteRegistry, CM)
+        //   nonce n+3    → RGBVerifier       (wraps BtcRelay)
+        //   nonce n+4    → RgbSettlementModule (paired with RouteRegistry)
+        //   nonce n+5    → MultisigProxy
+        // Both CM and RouteRegistry need to know Bridge's address up front;
+        // they share the same `currentNonce + 2` prediction.
         vm.startPrank(deployer);
-        uint64 currentNonce = vm.getNonce(deployer);
-        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 1);
 
-        cm     = new CommissionManager(predictedBridge);
-        bridge = new Bridge(address(token), address(btcRelay), payable(address(cm)), SOURCE_CHAIN);
+        uint64  currentNonce    = vm.getNonce(deployer);
+        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
+
+        cm            = new CommissionManager(predictedBridge);
+        routeRegistry = new RouteRegistry(predictedBridge, deployer);
+        bridge        = new Bridge(
+            address(token),
+            address(routeRegistry),
+            payable(address(cm)),
+            address(0)
+        );
+
+        rgbVerifier = new RGBVerifier(address(btcRelay));
+        rgbModule   = new RgbSettlementModule(address(routeRegistry));
+
+        // Register both directions of the RGB route, using the same verifier
+        // and settlement module. Inbound (SOURCE → RGB) never calls verify;
+        // outbound (RGB → SOURCE) runs the BtcRelay check.
+        routeRegistry.setRoute(
+            SOURCE_CHAIN_ID, RGB_CHAIN_ID,
+            true, address(rgbVerifier), address(rgbModule)
+        );
+        routeRegistry.setRoute(
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID,
+            true, address(rgbVerifier), address(rgbModule)
+        );
 
         address[] memory enc = new address[](3);
         enc[0] = encA1; enc[1] = encA2; enc[2] = encA3;
@@ -144,14 +196,19 @@ contract IntegrationTest is Test {
         bridge.transferOwnership(address(proxy));
         vm.stopPrank();
 
-        // Invariants from deployment
-        assertEq(address(bridge),          predictedBridge,   'bridge prediction');
-        assertEq(cm.bridgeAddress(),       address(bridge),   'CM.bridgeAddress');
-        assertEq(address(bridge.commissionManager()), address(cm), 'bridge.commissionManager');
-        assertEq(bridge.owner(),           address(proxy),    'bridge owner');
-        assertEq(cm.owner(),               address(proxy),    'cm owner');
-        assertEq(proxy.bridge(),           address(bridge),   'proxy.bridge');
-        assertEq(proxy.commissionManager(),address(cm),       'proxy.commissionManager');
+        // Invariants from deployment.
+        assertEq(address(bridge),                       predictedBridge,        'bridge prediction');
+        assertEq(cm.bridgeAddress(),                    address(bridge),        'CM.bridgeAddress');
+        assertEq(address(bridge.commissionManager()),   address(cm),            'bridge.commissionManager');
+        assertEq(address(bridge.routeRegistry()),       address(routeRegistry), 'bridge.routeRegistry');
+        assertEq(routeRegistry.bridge(),                address(bridge),        'routeRegistry.bridge');
+        assertEq(rgbModule.routeRegistry(),             address(routeRegistry), 'rgbModule.routeRegistry');
+        assertEq(rgbVerifier.btcRelay(),                address(btcRelay),      'rgbVerifier.btcRelay');
+        assertEq(bridge.owner(),                        address(proxy),         'bridge owner');
+        assertEq(cm.owner(),                            address(proxy),         'cm owner');
+        assertEq(routeRegistry.owner(),                 deployer,               'registry owner (deployer)');
+        assertEq(proxy.bridge(),                        address(bridge),        'proxy.bridge');
+        assertEq(proxy.commissionManager(),             address(cm),            'proxy.commissionManager');
 
         domainSep = proxy.DOMAIN_SEPARATOR();
 
@@ -173,7 +230,7 @@ contract IntegrationTest is Test {
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
                 ICommissionManager.setCommissionRule.selector,
-                SOURCE_CHAIN, RGB_CHAIN, address(token),
+                SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_IN_PERCENT,
                     multiplier:    FUNDS_IN_MULT,
@@ -187,7 +244,7 @@ contract IntegrationTest is Test {
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
                 ICommissionManager.setCommissionRule.selector,
-                RGB_CHAIN, SOURCE_CHAIN, address(token),
+                RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_OUT_PERCENT,
                     multiplier:    FUNDS_OUT_MULT,
@@ -200,51 +257,56 @@ contract IntegrationTest is Test {
 
         // Sanity: CM now quotes commission for both routes.
         (uint256 tInQuote,, uint256 netIn) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN, RGB_CHAIN, address(token), USER_DEPOSIT);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT);
         assertEq(tInQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, 'quote in');
         assertEq(netIn,    USER_DEPOSIT - tInQuote, 'net in');
 
         // -------------------------------------------------------------------------
-        // 2. User fundsIn — TOKEN commission routed to CM.
+        // 2. User fundsIn — TOKEN commission routed to CM; the RGB settlement
+        //    module records the inbound deposit.
         // -------------------------------------------------------------------------
         uint256 userBefore = token.balanceOf(user);
 
         vm.prank(user);
         bridge.fundsIn(
             USER_DEPOSIT,
-            RGB_CHAIN,
+            RGB_CHAIN_ID,
             'rgb:asset1qp0y3mq/utxo1abc',
-            TX_ID_IN
+            TX_ID_IN,
+            ''   // settlementData ignored by RgbSettlementModule on inbound
         );
 
         uint256 tokenCommissionIn = tInQuote;
         uint256 netBridgedIn      = netIn;
 
-        assertEq(token.balanceOf(user),           userBefore - USER_DEPOSIT, 'user debited gross');
-        assertEq(token.balanceOf(address(bridge)), netBridgedIn,             'bridge keeps net');
-        assertEq(token.balanceOf(address(cm)),    tokenCommissionIn,         'cm got commission');
-        assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn,  'cm pool mirrors balance');
-        assertEq(bridge.fundsInRecords(TX_ID_IN), netBridgedIn,              'record stores net');
+        assertEq(token.balanceOf(user),                  userBefore - USER_DEPOSIT, 'user debited gross');
+        assertEq(token.balanceOf(address(bridge)),       netBridgedIn,              'bridge keeps net');
+        assertEq(token.balanceOf(address(cm)),           tokenCommissionIn,         'cm got commission');
+        assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn,         'cm pool mirrors balance');
+        assertEq(rgbModule.fundsInRecords(TX_ID_IN),     netBridgedIn,              'record stores net');
 
         // -------------------------------------------------------------------------
-        // 3. TEE-signed fundsOut — releases `netBridgedIn` from the pool; 1%
-        //    outbound commission to CM, remaining net to recipient.
+        // 3. TEE-signed fundsOut — RGBVerifier checks the BtcRelay header, the
+        //    settlement module consumes the recorded deposit, Bridge releases
+        //    `netBridgedIn` from the pool. 1% outbound commission to CM, the
+        //    rest to recipient.
         // -------------------------------------------------------------------------
         uint256[] memory fundsInIds = new uint256[](1);
         fundsInIds[0] = TX_ID_IN;
+
+        bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
+        bytes memory settlementData = abi.encode(fundsInIds);
 
         bytes memory callData = abi.encodeWithSelector(
             FUNDS_OUT_SELECTOR,
             recipient,
             netBridgedIn,          // amount = full bridged pool from this deposit
-            TX_ID_OUT,
             BURN_ID,
-            RGB_CHAIN,
-            SOURCE_CHAIN,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
             'rgb:sender/utxo1src',
-            BLOCK_HEIGHT,
-            COMMITMENT_HASH,
-            fundsInIds
+            proof,
+            settlementData
         );
 
         uint256 outNonce    = proxy.getNonce(FUNDS_OUT_SELECTOR);
@@ -263,22 +325,20 @@ contract IntegrationTest is Test {
             netBridgedIn,
             netOut,
             tokenCommissionOut,
-            TX_ID_OUT,
             BURN_ID,
-            RGB_CHAIN,
-            SOURCE_CHAIN,
-            'rgb:sender/utxo1src',
-            BLOCK_HEIGHT,
-            COMMITMENT_HASH
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            'rgb:sender/utxo1src'
         );
 
         proxy.execute(callData, outNonce, outDeadline, 3, teeSigs);
 
-        assertEq(token.balanceOf(address(bridge)), 0,                       'bridge drained');
-        assertEq(token.balanceOf(recipient),       netOut,                  'recipient got net');
-        assertEq(token.balanceOf(address(cm)),     tokenCommissionIn + tokenCommissionOut, 'cm accrued both fees');
+        assertEq(token.balanceOf(address(bridge)),       0,                                      'bridge drained');
+        assertEq(token.balanceOf(recipient),             netOut,                                 'recipient got net');
+        assertEq(token.balanceOf(address(cm)),           tokenCommissionIn + tokenCommissionOut, 'cm accrued both fees');
         assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn + tokenCommissionOut, 'cm pool mirrors');
-        assertEq(bridge.fundsInRecords(TX_ID_IN),  0,                       'fundsIn record consumed');
+        assertEq(rgbModule.fundsInRecords(TX_ID_IN),     0,                                      'fundsIn record consumed');
+        assertTrue(bridge.consumedBurnIds(BURN_ID),                                              'burnId recorded');
 
         // -------------------------------------------------------------------------
         // 4. Federation withdraws ERC-20 commission from CM to commissionReceiver.
@@ -310,11 +370,11 @@ contract IntegrationTest is Test {
         // 5. Final invariants: bridge empty, CM empty, recipient holds netOut,
         //    commissionReceiver holds the full aggregated commission.
         // -------------------------------------------------------------------------
-        assertEq(token.balanceOf(address(bridge)),         0,                   'bridge still empty');
-        assertEq(token.balanceOf(address(cm)),             0,                   'cm drained');
-        assertEq(cm.tokenCommissionPool(address(token)),   0,                   'cm pool drained');
-        assertEq(token.balanceOf(recipient),               netOut,              'recipient unchanged');
-        assertEq(token.balanceOf(commissionReceiver),      totalCommission,     'commissionReceiver paid');
+        assertEq(token.balanceOf(address(bridge)),         0,                'bridge still empty');
+        assertEq(token.balanceOf(address(cm)),             0,                'cm drained');
+        assertEq(cm.tokenCommissionPool(address(token)),   0,                'cm pool drained');
+        assertEq(token.balanceOf(recipient),               netOut,           'recipient unchanged');
+        assertEq(token.balanceOf(commissionReceiver),      totalCommission,  'commissionReceiver paid');
         // Token conservation: user-deducted == everything distributed.
         assertEq(
             token.balanceOf(recipient) + token.balanceOf(commissionReceiver),
@@ -329,19 +389,20 @@ contract IntegrationTest is Test {
 
     function test_endToEnd_nativeCommission_inboundAndWithdraw() public {
         // Configure a NATIVE FUNDS_IN route (2% on token amount, paid in wei).
-        // Set a mock rate: 1 token unit = 1 wei (rate = 10**tokenDecimals per 10**tokenDecimals units
-        // would be 1:1; MockERC20 is 18 decimals, so `convertTokenToNative` returns tokenFee * rate / 1e18).
-        // We set rate = 1e18 so nativeCommission == tokenFee (simple for the assertion).
+        // Wire up a Chainlink ETH/USD feed ($2000 / ETH, 8 decimals, fresh)
+        // via federation governance — the same path production will use.
+        ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
-                ICommissionManager.setMockTokenToNativeRate.selector,
-                uint256(1e18)
+                ICommissionManager.setEthUsdFeed.selector,
+                address(ethUsdFeed),
+                uint256(1 days)
             )
         );
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
                 ICommissionManager.setCommissionRule.selector,
-                SOURCE_CHAIN, RGB_CHAIN, address(token),
+                SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_IN_PERCENT,
                     multiplier:    FUNDS_IN_MULT,
@@ -353,25 +414,28 @@ contract IntegrationTest is Test {
         );
 
         (, uint256 nativeQuote, uint256 netQuote) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN, RGB_CHAIN, address(token), USER_DEPOSIT);
-        assertEq(netQuote,    USER_DEPOSIT,                                        'NATIVE: full amount bridges');
-        assertEq(nativeQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, 'native quote matches 1:1 rate');
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT);
+        assertEq(netQuote, USER_DEPOSIT, 'NATIVE: full amount bridges');
+        // 2% of USER_DEPOSIT in token units, converted to wei via the feed.
+        uint256 stableFee = USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT;
+        assertEq(nativeQuote, cm.convertTokenFeeToNative(stableFee, 18), 'native quote matches feed');
 
         vm.deal(user, nativeQuote);
 
         vm.prank(user);
         bridge.fundsIn{ value: nativeQuote }(
             USER_DEPOSIT,
-            RGB_CHAIN,
+            RGB_CHAIN_ID,
             'rgb:asset1qp0y3mq/utxo1abc',
-            TX_ID_IN
+            TX_ID_IN,
+            ''
         );
 
-        assertEq(token.balanceOf(address(bridge)), USER_DEPOSIT,         'bridge got full token amount');
-        assertEq(token.balanceOf(address(cm)),     0,                    'cm no token commission');
-        assertEq(address(cm).balance,              nativeQuote,          'cm got native commission');
-        assertEq(cm.nativeCommissionPool(),        nativeQuote,          'cm native pool');
-        assertEq(bridge.fundsInRecords(TX_ID_IN),  USER_DEPOSIT,         'record stores full amount');
+        assertEq(token.balanceOf(address(bridge)),    USER_DEPOSIT, 'bridge got full token amount');
+        assertEq(token.balanceOf(address(cm)),        0,            'cm no token commission');
+        assertEq(address(cm).balance,                 nativeQuote,  'cm got native commission');
+        assertEq(cm.nativeCommissionPool(),           nativeQuote,  'cm native pool');
+        assertEq(rgbModule.fundsInRecords(TX_ID_IN),  USER_DEPOSIT, 'record stores full amount');
 
         // Federation withdraws native commission.
         uint256 wdNonce    = proxy.proposalNonce();
@@ -390,17 +454,17 @@ contract IntegrationTest is Test {
         uint256 receiverBefore = commissionReceiver.balance;
         proxy.executeProposal(proposalId, abi.encode(nativeQuote));
 
-        assertEq(address(cm).balance,                         0,             'cm native drained');
-        assertEq(cm.nativeCommissionPool(),                   0,             'cm pool drained');
-        assertEq(commissionReceiver.balance - receiverBefore, nativeQuote,   'receiver paid in native');
+        assertEq(address(cm).balance,                         0,           'cm native drained');
+        assertEq(cm.nativeCommissionPool(),                   0,           'cm pool drained');
+        assertEq(commissionReceiver.balance - receiverBefore, nativeQuote, 'receiver paid in native');
     }
 
     // =========================================================================
     // Helpers
     // =========================================================================
 
-    /// @dev Proposes `callData` as an AdminExecuteCommissionManager op, waits out
-    ///      the timelock, and executes. Used by tests to configure the CM.
+    /// @dev Proposes `callData` as an AdminExecuteCommissionManager op, waits
+    ///      out the timelock, and executes. Used by tests to configure the CM.
     function _proposeAndExecuteCmAdminCall(bytes memory callData) internal {
         uint256 nonce    = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 7 days;

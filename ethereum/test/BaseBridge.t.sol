@@ -4,7 +4,7 @@ pragma solidity 0.8.20;
 import { Test } from 'forge-std/Test.sol';
 import { BaseBridge } from '../src/BaseBridge.sol';
 import { BridgeBase } from '../src/BridgeBase.sol';
-import { MockERC20 } from './helpers/MockERC20.sol';
+import { MockERC20 } from './mocks/MockERC20.sol';
 import { Ownable }   from '@openzeppelin/contracts/access/Ownable.sol';
 import { Pausable }  from '@openzeppelin/contracts/utils/Pausable.sol';
 

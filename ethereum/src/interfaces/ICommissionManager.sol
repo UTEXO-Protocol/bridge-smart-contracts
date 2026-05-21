@@ -4,6 +4,12 @@ pragma solidity 0.8.20;
 /**
  * @title ICommissionManager types & interface
  * @notice Shared enums and struct for {CommissionManager}; see `ICommissionManager` for the external API.
+ *
+ *         Chain identifiers — both `sourceChainId` and `destChainId` — are uint256
+ *         values. EVM chains use their native `block.chainid`. Non-EVM
+ *         destinations (RGB, Bitcoin, …) are assigned numeric ids by the Utexo
+ *         backend in a namespace reserved above the EVM range (see project
+ *         README for the conventions).
  */
 
 /// @notice Which bridge operation a route fee is tied to.
@@ -40,7 +46,6 @@ interface ICommissionManager {
     error InvalidRecipient();
     error StablePercentTooHigh();
     error MultiplierZero();
-    error MockTokenToNativeRateNotSet();
     error TokenDecimalsUnavailable();
     error BalanceBelowRecordedPool();
     error NothingReceived();
@@ -49,6 +54,14 @@ interface ICommissionManager {
     error NativeTransferFailed();
     error NoBalance();
     error RenounceOwnershipBlocked();
+
+    // --- Chainlink-related ---
+    error InvalidEthUsdFeed();
+    error EthUsdFeedNotSet();
+    error InvalidPrice();
+    error StalePrice();
+    error TokenDecimalsTooLarge();
+    error InvalidHeartbeat();
 
     // ============ Events ============
 
@@ -62,23 +75,22 @@ interface ICommissionManager {
     );
 
     event CommissionRuleUpdated(
-        string sourceChain,
-        string destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address indexed token,
         CommissionConfig config
     );
 
     event CommissionRuleCleared(
-        string sourceChain,
-        string destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address indexed token
     );
 
     event TokenCommissionReceived(address indexed token, uint256 amount);
     event NativeCommissionReceived(uint256 amount);
 
-    event MockTokenToNativeRateUpdated(uint256 rate);
-    event MockTokenToNativeRateForTokenUpdated(address indexed token, uint256 rate);
+    event EthUsdFeedUpdated(address indexed feed, uint256 heartbeat);
 
     event TokenCommissionWithdrawn(
         address indexed token,
@@ -103,15 +115,15 @@ interface ICommissionManager {
 
     function nativeCommissionPool() external view returns (uint256);
 
-    function mockTokenToNativeRate() external view returns (uint256);
+    function ethUsdFeed() external view returns (address);
 
-    function mockTokenToNativeRateForToken(address token) external view returns (uint256);
+    function ethUsdHeartbeat() external view returns (uint256);
 
     // ============ Core calculations ============
 
     function calculateFundsInCommission(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token,
         uint256 amount
     )
@@ -120,8 +132,8 @@ interface ICommissionManager {
         returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount);
 
     function calculateFundsOutCommission(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token,
         uint256 amount
     )
@@ -135,13 +147,15 @@ interface ICommissionManager {
         uint256 multiplier
     ) external pure returns (uint256);
 
-    function convertTokenToNative(
+    /// @notice Convert a USD-denominated token fee (stablecoin, 1 token ≈ $1) to
+    ///         native wei using the configured ETH/USD Chainlink feed. Reverts
+    ///         `EthUsdFeedNotSet` when the feed is unconfigured, `InvalidPrice`
+    ///         on non-positive answers, and `StalePrice` when `updatedAt` is
+    ///         older than the configured heartbeat.
+    function convertTokenFeeToNative(
         uint256 tokenFee,
-        uint256 rateWeiPerTokenUnit,
         uint256 tokenDecimals
-    ) external pure returns (uint256 nativeFee);
-
-    function resolvedMockTokenToNativeRate(address token) external view returns (uint256);
+    ) external view returns (uint256 nativeFee);
 
     // ============ Admin / config ============
 
@@ -152,20 +166,24 @@ interface ICommissionManager {
         CommissionCurrency currency
     ) external;
 
-    function setMockTokenToNativeRate(uint256 rate) external;
-
-    function setMockTokenToNativeRateForToken(address token, uint256 rate) external;
+    /// @notice Configure (or rotate) the ETH/USD Chainlink price feed used for
+    ///         NATIVE-currency commission quotes. `heartbeat` is the maximum
+    ///         allowed staleness in seconds before `calculate*Commission` reverts
+    ///         (Chainlink ETH/USD on Arbitrum heartbeats at 86400 s; a sensible
+    ///         setting is ~90000 with a safety buffer). Pass `address(0)` to
+    ///         disable NATIVE quoting until a new feed is set.
+    function setEthUsdFeed(address feed, uint256 heartbeat) external;
 
     function setCommissionRule(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token,
         CommissionConfig calldata config
     ) external;
 
     function clearCommissionRule(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token
     ) external;
 
@@ -182,14 +200,14 @@ interface ICommissionManager {
         );
 
     function getCommissionRule(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token
     ) external view returns (CommissionConfig memory);
 
     function buildRouteKey(
-        string calldata sourceChain,
-        string calldata destChain,
+        uint256 sourceChainId,
+        uint256 destChainId,
         address token
     ) external pure returns (bytes32);
 

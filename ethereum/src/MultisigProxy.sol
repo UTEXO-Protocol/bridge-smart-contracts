@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import { ECDSA } from '@openzeppelin/contracts/utils/cryptography/ECDSA.sol';
 import { IMultisigProxy } from './interfaces/IMultisigProxy.sol';
+import { IBridge }        from './interfaces/IBridge.sol';
+import { IRouteRegistry } from './interfaces/IRouteRegistry.sol';
 
 contract MultisigProxy is IMultisigProxy {
     using ECDSA for bytes32;
@@ -13,6 +15,11 @@ contract MultisigProxy is IMultisigProxy {
 
     address public bridge;
     address public commissionManager;
+
+    /// @notice Routing target for `AdminExecuteAdapter` proposals. Settable via
+    ///         `UpdateLZAdapter` after the adapter is deployed; `address(0)`
+    ///         until then (closes adapter-execute by default).
+    address public lzAdapter;
 
     address[] private _enclaveSigners;
     uint256 public enclaveThreshold;
@@ -50,6 +57,11 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @notice Hard upper bound on `executeBatch` size to keep gas use bounded.
     uint256 public constant MAX_BATCH_SIZE = 3;
+
+    /// @notice Length of a Solidity function selector (`bytes4`) in bytes. Used
+    ///         to guard `callData` against payloads too short to even carry a
+    ///         selector before it is sliced via `calldataload`.
+    uint256 public constant SELECTOR_LENGTH = 4;
 
     bytes32 public immutable DOMAIN_SEPARATOR;
 
@@ -100,6 +112,22 @@ contract MultisigProxy is IMultisigProxy {
     );
     bytes32 private constant _PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH = keccak256(
         'ProposeUpdateCommissionManager(address newCommissionManager,uint256 nonce,uint256 deadline)'
+    );
+
+    // Federation propose — LZAdapter side
+    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH = keccak256(
+        'ProposeAdminExecuteAdapter(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH = keccak256(
+        'ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)'
+    );
+
+    // Federation propose — RouteRegistry side
+    bytes32 private constant _PROPOSE_SET_ROUTE_TYPEHASH = keccak256(
+        'ProposeSetRoute(uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH = keccak256(
+        'ProposeUpdateRouteRegistry(address newRouteRegistry,uint256 nonce,uint256 deadline)'
     );
 
     // Cancel
@@ -155,7 +183,7 @@ contract MultisigProxy is IMultisigProxy {
         // federation governance through `proposeSetTeeAllowedCall`.
         teeAllowedCalls[bridge_][
             bytes4(keccak256(
-                'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+                'fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)'
             ))
         ] = true;
 
@@ -181,7 +209,7 @@ contract MultisigProxy is IMultisigProxy {
         bytes[] calldata enclaveSigs
     ) external {
         if (block.timestamp > deadline) revert Expired();
-        if (callData.length < 4) revert CallDataTooShort();
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
@@ -221,7 +249,7 @@ contract MultisigProxy is IMultisigProxy {
         bytes4[] memory selectors = new bytes4[](n);
         uint256 totalValue;
         for (uint256 i = 0; i < n; i++) {
-            if (callDatas[i].length < 4) revert CallDataTooShort();
+            if (callDatas[i].length < SELECTOR_LENGTH) revert CallDataTooShort();
 
             bytes calldata cd = callDatas[i];
             bytes4 sel;
@@ -311,7 +339,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        if (callData.length < 4) revert CallDataTooShort();
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
@@ -457,7 +485,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        if (callData.length < 4) revert CallDataTooShort();
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
@@ -527,6 +555,101 @@ contract MultisigProxy is IMultisigProxy {
         return _propose(
             OperationType.UpdateCommissionManager,
             abi.encode(newCommissionManager),
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    // =========================================================================
+    // Federation propose (Phase 1) — LZAdapter side
+    // =========================================================================
+
+    /// @inheritdoc IMultisigProxy
+    function proposeAdminExecuteAdapter(
+        bytes calldata callData,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
+
+        bytes4 selector;
+        assembly { selector := calldataload(callData.offset) }
+
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, selector, keccak256(callData), nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.AdminExecuteAdapter,
+            callData,
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeUpdateLZAdapter(
+        address newLZAdapter,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH, newLZAdapter, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.UpdateLZAdapter,
+            abi.encode(newLZAdapter),
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    // =========================================================================
+    // Federation propose — RouteRegistry side
+    // =========================================================================
+
+    /// @inheritdoc IMultisigProxy
+    function proposeSetRoute(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        bool    enabled,
+        address finalityVerifier,
+        address settlementModule,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_SET_ROUTE_TYPEHASH,
+            sourceChainId, destChainId, enabled, finalityVerifier, settlementModule,
+            nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.SetRoute,
+            abi.encode(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule),
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeUpdateRouteRegistry(
+        address newRouteRegistry,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH, newRouteRegistry, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.UpdateRouteRegistry,
+            abi.encode(newRouteRegistry),
             nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
@@ -743,6 +866,44 @@ contract MultisigProxy is IMultisigProxy {
             address old = commissionManager;
             commissionManager = newCm;
             emit CommissionManagerUpdated(old, newCm);
+
+        } else if (opType == OperationType.AdminExecuteAdapter) {
+            // opData = raw LZAdapter callData. The adapter must be wired in
+            // first via UpdateLZAdapter; a zero target closes the path.
+            if (lzAdapter == address(0)) revert ZeroTarget();
+            (bool ok, bytes memory ret) = lzAdapter.call(opData);
+            _propagateRevert(ok, ret);
+
+        } else if (opType == OperationType.UpdateLZAdapter) {
+            address newAdapter = abi.decode(opData, (address));
+            address oldAdapter = lzAdapter;
+            lzAdapter = newAdapter;
+            emit LZAdapterUpdated(oldAdapter, newAdapter);
+
+        } else if (opType == OperationType.SetRoute) {
+            // Forwards to RouteRegistry, looked up dynamically from Bridge to
+            // keep registry pointer as a single source of truth.
+            (
+                uint256 sourceChainId,
+                uint256 destChainId,
+                bool    enabled,
+                address finalityVerifier,
+                address settlementModule
+            ) = abi.decode(opData, (uint256, uint256, bool, address, address));
+
+            address registry = IBridge(bridge).routeRegistry();
+            if (registry == address(0)) revert ZeroTarget();
+            IRouteRegistry(registry).setRoute(
+                sourceChainId, destChainId, enabled, finalityVerifier, settlementModule
+            );
+
+        } else if (opType == OperationType.UpdateRouteRegistry) {
+            // Rotates Bridge's `routeRegistry` immutable-shaped slot. The new
+            // registry MUST be deployed with Bridge's address as its
+            // constructor `bridge_`; otherwise dispatcher calls revert
+            // `NotBridge` and the route plane goes dark.
+            address newRegistry = abi.decode(opData, (address));
+            IBridge(bridge).setRouteRegistry(newRegistry);
 
         } else {
             revert UnknownOperationType();

@@ -74,17 +74,21 @@ interface IMultisigProxy {
     // =========================================================================
 
     enum OperationType {
-        AdminExecute,                    // 0 — generic call into Bridge
+        AdminExecute,                    // 0  — generic call into Bridge
         UpdateEnclaveSigners,            // 1
         UpdateFederationSigners,         // 2
         UpdateBridge,                    // 3
         SetCommissionRecipient,          // 4
-        SetTeeAllowedCall,               // 5 — (target, selector, allowed) entry in TEE allowlist
+        SetTeeAllowedCall,               // 5  — (target, selector, allowed) entry in TEE allowlist
         SetTimelockDuration,             // 6
-        AdminExecuteCommissionManager,   // 7 — generic call into CommissionManager
-        WithdrawTokenCommissionCM,       // 8 — CM.withdrawTokenCommission -> commissionRecipient
-        WithdrawNativeCommissionCM,      // 9 — CM.withdrawNativeCommission -> commissionRecipient
-        UpdateCommissionManager          // 10 — migrate to a new CommissionManager address
+        AdminExecuteCommissionManager,   // 7  — generic call into CommissionManager
+        WithdrawTokenCommissionCM,       // 8  — CM.withdrawTokenCommission -> commissionRecipient
+        WithdrawNativeCommissionCM,      // 9  — CM.withdrawNativeCommission -> commissionRecipient
+        UpdateCommissionManager,         // 10 — migrate to a new CommissionManager address
+        AdminExecuteAdapter,             // 11 — generic call into LZAdapter (setTrustedEntrypoint, refundStuckFunds, …)
+        UpdateLZAdapter,                 // 12 — rotate the routing target for AdminExecuteAdapter
+        SetRoute,                        // 13 — RouteRegistry.setRoute(src, dst, enabled, verifier, module)
+        UpdateRouteRegistry              // 14 — Bridge.setRouteRegistry(newRouteRegistry)
     }
 
     enum ProposalStatus { None, Pending, Executed, Cancelled }
@@ -126,6 +130,7 @@ interface IMultisigProxy {
     event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
+    event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
     event CommissionRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
     event TeeAllowedCallUpdated(address indexed target, bytes4 indexed selector, bool allowed);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
@@ -307,6 +312,67 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
+    // --- LZAdapter-targeted operations ---
+
+    /// @notice Propose an arbitrary call into the LZAdapter (routes through the
+    ///         stored `lzAdapter` address). Federation typically uses this for
+    ///         `setTrustedEntrypoint`, `refundStuckFunds`, and any other
+    ///         `onlyMultisigProxy`-gated adapter admin.
+    /// @dev opData = raw ABI-encoded LZAdapter callData (selector + args).
+    function proposeAdminExecuteAdapter(
+        bytes calldata callData,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    /// @notice Propose rotating the LZAdapter routing target stored on this proxy.
+    /// @dev opData = abi.encode(address newLZAdapter). `address(0)` is allowed
+    ///      and closes adapter-execute until set again.
+    function proposeUpdateLZAdapter(
+        address newLZAdapter,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    /// @notice Propose registering or updating a route in the Bridge's
+    ///         RouteRegistry.
+    /// @dev opData = abi.encode(uint256 sourceChainId, uint256 destChainId,
+    ///      bool enabled, address finalityVerifier, address settlementModule).
+    ///      The proxy forwards the call to
+    ///      `IRouteRegistry(bridge.routeRegistry()).setRoute(...)`.
+    ///      Both plugin addresses MUST be non-zero — registry rejects
+    ///      `address(0)`; routes that need no proof/settlement use the
+    ///      explicit `NullVerifier` / `NullSettlementModule` deployments.
+    function proposeSetRoute(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        bool    enabled,
+        address finalityVerifier,
+        address settlementModule,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    /// @notice Propose rotating the RouteRegistry pointer on Bridge.
+    /// @dev opData = abi.encode(address newRouteRegistry). The new registry
+    ///      MUST be deployed with this Bridge's address as its `bridge_`
+    ///      immutable — otherwise dispatcher calls from Bridge revert
+    ///      `NotBridge` and inbound/outbound traffic on every route
+    ///      simultaneously breaks.
+    function proposeUpdateRouteRegistry(
+        address newRouteRegistry,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
     // =========================================================================
     // Cancel & Execute
     // =========================================================================
@@ -339,6 +405,7 @@ interface IMultisigProxy {
     function getNonce(bytes4 selector) external view returns (uint256);
     function bridge() external view returns (address);
     function commissionManager() external view returns (address);
+    function lzAdapter() external view returns (address);
     function getEnclaveSigners() external view returns (address[] memory);
     function enclaveThreshold() external view returns (uint256);
     function getFederationSigners() external view returns (address[] memory);

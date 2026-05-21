@@ -2,24 +2,31 @@
 pragma solidity 0.8.20;
 
 import { Test } from 'forge-std/Test.sol';
-import { MultisigProxy } from '../src/MultisigProxy.sol';
+
+import { MultisigProxy }  from '../src/MultisigProxy.sol';
 import { IMultisigProxy } from '../src/interfaces/IMultisigProxy.sol';
-import { Bridge }    from '../src/Bridge.sol';
-import { CommissionManager } from '../src/CommissionManager.sol';
+import { Bridge }              from '../src/Bridge.sol';
+import { CommissionManager }   from '../src/CommissionManager.sol';
+import { RouteRegistry }       from '../src/RouteRegistry.sol';
+import { IRouteRegistry }      from '../src/interfaces/IRouteRegistry.sol';
+import { RGBVerifier }         from '../src/verifiers/RGBVerifier.sol';
+import { RgbSettlementModule } from '../src/settlement/RgbSettlementModule.sol';
+import { RouteConfig }         from '../src/interfaces/RouteTypes.sol';
 import {
     CommissionConfig,
     CommissionSide,
     CommissionCurrency,
     ICommissionManager
 } from '../src/interfaces/ICommissionManager.sol';
-import { MockERC20 } from './helpers/MockERC20.sol';
-import { MockBtcRelay } from './helpers/MockBtcRelay.sol';
-import { MultisigHelper } from './helpers/MultisigHelper.sol';
+
+import { MockERC20 }       from './mocks/MockERC20.sol';
+import { MockBtcRelay }    from './mocks/MockBtcRelay.sol';
+import { MultisigHelper }  from './mocks/MultisigHelper.sol';
 
 contract MultisigProxyTest is Test {
     using MultisigHelper for bytes32;
 
-    // Re-declared events
+    // ---- Re-declared events ------------------------------------------------
     event Executed(bytes4 indexed selector, uint256 nonce, uint256 enclaveBitmap);
     event EmergencyPaused(uint256 nonce, uint256 fedBitmap);
     event EmergencyUnpaused(uint256 nonce, uint256 fedBitmap);
@@ -40,12 +47,24 @@ contract MultisigProxyTest is Test {
     event TeeAllowedCallUpdated(address indexed target, bytes4 indexed selector, bool allowed);
     event TimelockDurationUpdated(uint256 newDuration);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
+    event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
+    event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+    event RouteSet(
+        uint256 indexed sourceChainId,
+        uint256 indexed destChainId,
+        bool            enabled,
+        address         finalityVerifier,
+        address         settlementModule
+    );
 
-    MultisigProxy     proxy;
-    Bridge            bridge;
-    CommissionManager cm;
-    MockERC20         token;
-    MockBtcRelay      btcRelay;
+    MultisigProxy       proxy;
+    Bridge              bridge;
+    CommissionManager   cm;
+    RouteRegistry       routeRegistry;
+    RGBVerifier         rgbVerifier;
+    RgbSettlementModule rgbModule;
+    MockERC20           token;
+    MockBtcRelay        btcRelay;
 
     // Enclave signers (3-of-N with threshold 2)
     uint256 encPk1 = 0xE1;
@@ -72,24 +91,26 @@ contract MultisigProxyTest is Test {
 
     bytes32 domainSep;
 
-    // Canonical constants for Bridge calls
-    string  constant SOURCE_CHAIN = 'arbitrum';
-    string  constant DST_CHAIN    = 'rgb';
-    string  constant DST_ADDR     = 'rgb:asset/utxo1abc';
-    string  constant SRC_CHAIN    = 'rgb';
-    string  constant DST_CHAIN_OUT = 'arbitrum';
-    string  constant SRC_ADDR     = 'rgb:sender/utxo1src';
-    uint256 constant AMOUNT    = 100e18;
-    uint256 constant TX_ID     = 42;
-    uint256 constant BURN_ID   = 9_001;
+    // Chain identifiers + canonical fundsOut args
+    uint256 constant SOURCE_CHAIN_ID = 31337;     // foundry block.chainid
+    uint256 constant RGB_CHAIN_ID    = 1_000_001; // backend-assigned for RGB
+    string  constant DST_ADDR        = 'rgb:asset/utxo1abc';
+    string  constant SRC_ADDR        = 'rgb:sender/utxo1src';
+    uint256 constant AMOUNT  = 100e18;
+    uint256 constant TX_ID   = 42;
+    uint256 constant BURN_ID = 9_001;
 
     // BtcRelay test data
-    uint256 constant BLOCK_HEIGHT    = 850_000;
-    bytes32 constant COMMITMENT_HASH = keccak256('test-btc-block-commitment');
+    uint256 constant BLOCK_HEIGHT      = 850_000;
+    bytes32 constant COMMITMENT_HASH   = keccak256('test-btc-block-commitment');
     uint256 constant BTC_CONFIRMATIONS = 6;
 
+    /// @dev 8-arg fundsOut selector:
+    ///        fundsOut(address recipient, uint256 amount, uint256 burnId,
+    ///                 uint256 sourceChainId, uint256 destinationChainId,
+    ///                 string sourceAddress, bytes proof, bytes settlementData)
     bytes4  constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,uint256,string,string,string,uint256,bytes32,uint256[])'
+        'fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)'
     ));
 
     function setUp() public {
@@ -100,23 +121,51 @@ contract MultisigProxyTest is Test {
         fedA2 = vm.addr(fedPk2);
         fedA3 = vm.addr(fedPk3);
 
-        token = new MockERC20('Mock USDT0', 'USDT0');
+        token    = new MockERC20('Mock USDT0', 'USDT0');
         btcRelay = new MockBtcRelay();
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, BTC_CONFIRMATIONS);
 
-        // Deploy CommissionManager with deployer as temp bridge.
-        vm.prank(deployer);
-        cm = new CommissionManager(deployer);
+        // DeployAll-style with predicted Bridge address. Deployer tx order:
+        //   nonce n      → CommissionManager (uses predicted Bridge)
+        //   nonce n+1    → RouteRegistry     (uses predicted Bridge; deployer
+        //                                     stays owner for initial route
+        //                                     registration, then transfers to
+        //                                     proxy)
+        //   nonce n+2    → Bridge            (uses RouteRegistry, CM)
+        //   nonce n+3    → RGBVerifier
+        //   nonce n+4    → RgbSettlementModule
+        //   nonce n+5    → MultisigProxy
+        vm.startPrank(deployer);
 
-        vm.prank(deployer);
-        bridge = new Bridge(address(token), address(btcRelay), payable(address(cm)), SOURCE_CHAIN);
+        uint64  currentNonce    = vm.getNonce(deployer);
+        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        vm.prank(deployer);
-        cm.setBridgeAddress(address(bridge));
+        cm            = new CommissionManager(predictedBridge);
+        routeRegistry = new RouteRegistry(predictedBridge, deployer);
+        bridge        = new Bridge(
+            address(token),
+            address(routeRegistry),
+            payable(address(cm)),
+            address(0)
+        );
+
+        rgbVerifier = new RGBVerifier(address(btcRelay));
+        rgbModule   = new RgbSettlementModule(address(routeRegistry));
+
+        // Register both directions of the RGB route while deployer still owns
+        // the registry. Inbound (SOURCE → RGB) never calls verify; outbound
+        // (RGB → SOURCE) runs the BtcRelay check.
+        routeRegistry.setRoute(
+            SOURCE_CHAIN_ID, RGB_CHAIN_ID,
+            true, address(rgbVerifier), address(rgbModule)
+        );
+        routeRegistry.setRoute(
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID,
+            true, address(rgbVerifier), address(rgbModule)
+        );
 
         address[] memory enc = new address[](3);
         enc[0] = encA1; enc[1] = encA2; enc[2] = encA3;
-
         address[] memory fed = new address[](3);
         fed[0] = fedA1; fed[1] = fedA2; fed[2] = fedA3;
 
@@ -129,20 +178,20 @@ contract MultisigProxyTest is Test {
             TIMELOCK
         );
 
-        // Transfer ownership of Bridge and CM to proxy (production flow)
-        vm.prank(deployer);
+        // Production-flow ownership transfer.
         bridge.transferOwnership(address(proxy));
-        vm.prank(deployer);
         cm.transferOwnership(address(proxy));
+        routeRegistry.transferOwnership(address(proxy));
+        vm.stopPrank();
 
         domainSep = proxy.DOMAIN_SEPARATOR();
 
-        // Fund user, lock tokens into the bridge so fundsOut has a pool
+        // Fund user, lock tokens into the bridge so fundsOut has a pool.
         token.mint(user, AMOUNT * 10);
         vm.prank(user);
         token.approve(address(bridge), type(uint256).max);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT * 5, DST_CHAIN, DST_ADDR, TX_ID);
+        bridge.fundsIn(AMOUNT * 5, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
     }
 
     // ========================================================================
@@ -169,9 +218,12 @@ contract MultisigProxyTest is Test {
     }
 
     function _fundsOutCalldata() internal view returns (bytes memory) {
+        bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
+        bytes memory settlementData = abi.encode(_fundsInIds());
         return abi.encodeWithSelector(
             FUNDS_OUT_SELECTOR,
-            recipient, AMOUNT, TX_ID, BURN_ID, SRC_CHAIN, DST_CHAIN_OUT, SRC_ADDR, BLOCK_HEIGHT, COMMITMENT_HASH, _fundsInIds()
+            recipient, AMOUNT, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            proof, settlementData
         );
     }
 
@@ -187,6 +239,7 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.commissionRecipient(), commissionReceiver);
         assertEq(proxy.timelockDuration(), TIMELOCK);
         assertEq(proxy.proposalNonce(), 0);
+        // Default TEE allowlist uses the new 8-arg fundsOut selector.
         assertTrue(proxy.teeAllowedCalls(address(bridge), FUNDS_OUT_SELECTOR));
 
         address[] memory enc = proxy.getEnclaveSigners();
@@ -377,7 +430,6 @@ contract MultisigProxyTest is Test {
     }
 
     function test_executeBatch_revertsOnDisallowedTargetSelector() public {
-        // Disallowed target/selector pair: proxy.pause() (no allowlist entry).
         address[] memory targets   = new address[](1);
         bytes[]   memory callDatas = new bytes[](1);
         uint256[] memory values    = new uint256[](1);
@@ -401,7 +453,7 @@ contract MultisigProxyTest is Test {
 
     function test_executeBatch_revertsOnValueMismatch() public {
         (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
-        values[0] = 1 ether; // sum != msg.value (we pass 0)
+        values[0] = 1 ether;
 
         uint256 nonce    = proxy.batchNonce();
         uint256 deadline = block.timestamp + 1 hours;
@@ -761,7 +813,7 @@ contract MultisigProxyTest is Test {
         // Seed commission by setting a fundsIn TOKEN rule and doing a deposit.
         vm.prank(address(proxy));
         cm.setCommissionRule(
-            SOURCE_CHAIN, DST_CHAIN, address(token),
+            SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token),
             CommissionConfig({
                 stablePercent: 400, // 4%
                 multiplier: 100,
@@ -773,7 +825,7 @@ contract MultisigProxyTest is Test {
 
         uint256 depositAmount = 100e18;
         vm.prank(user);
-        bridge.fundsIn(depositAmount, DST_CHAIN, DST_ADDR, TX_ID + 1);
+        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, TX_ID + 1, '');
 
         uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
         assertEq(cm.tokenCommissionPool(address(token)), expectedCommission);
@@ -905,6 +957,330 @@ contract MultisigProxyTest is Test {
 
         vm.expectRevert(IMultisigProxy.IndexOutOfRange.selector);
         proxy.verifyEnclaveSignature(digest, sig, 99);
+    }
+
+    // ========================================================================
+    // Propose + Execute — UpdateLZAdapter
+    // ========================================================================
+
+    function _proposeUpdateLZAdapter(address newAdapter) internal returns (bytes32 id) {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeUpdateLZAdapter(domainSep, newAdapter, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+        id = proxy.proposeUpdateLZAdapter(newAdapter, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_lzAdapter_defaultsToZero() public view {
+        assertEq(proxy.lzAdapter(), address(0));
+    }
+
+    function test_proposeUpdateLZAdapter_executeSetsAdapter() public {
+        address newAdapter = makeAddr('lzAdapter');
+        bytes32 id = _proposeUpdateLZAdapter(newAdapter);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        vm.expectEmit(true, true, false, false);
+        emit LZAdapterUpdated(address(0), newAdapter);
+
+        proxy.executeProposal(id, abi.encode(newAdapter));
+        assertEq(proxy.lzAdapter(), newAdapter);
+    }
+
+    function test_proposeUpdateLZAdapter_canRotateToZero() public {
+        address newAdapter = makeAddr('lzAdapter');
+        bytes32 id = _proposeUpdateLZAdapter(newAdapter);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, abi.encode(newAdapter));
+        assertEq(proxy.lzAdapter(), newAdapter);
+
+        bytes32 id2 = _proposeUpdateLZAdapter(address(0));
+        vm.warp(block.timestamp + 2 * TIMELOCK + 2);
+
+        proxy.executeProposal(id2, abi.encode(address(0)));
+        assertEq(proxy.lzAdapter(), address(0));
+    }
+
+    function test_proposeUpdateLZAdapter_revertsOnDataMismatch() public {
+        address newAdapter = makeAddr('lzAdapter');
+        bytes32 id = _proposeUpdateLZAdapter(newAdapter);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.DataMismatch.selector);
+        proxy.executeProposal(id, abi.encode(makeAddr('different')));
+    }
+
+    function test_proposeUpdateLZAdapter_canBeCancelled() public {
+        address newAdapter = makeAddr('lzAdapter');
+        bytes32 id = _proposeUpdateLZAdapter(newAdapter);
+
+        uint256 cNonce = proxy.proposalNonce();
+        uint256 cDeadline = block.timestamp + 1 hours;
+        bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cNonce, cDeadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory cSigs = MultisigHelper.signAll(vm, cDigest, pks);
+
+        vm.expectEmit(true, false, false, false);
+        emit ProposalCancelled(id);
+        proxy.cancelProposal(id, cNonce, cDeadline, bitmap, cSigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.NotPending.selector);
+        proxy.executeProposal(id, abi.encode(newAdapter));
+        assertEq(proxy.lzAdapter(), address(0));
+    }
+
+    // ========================================================================
+    // Propose + Execute — AdminExecuteAdapter
+    // ========================================================================
+
+    function test_proposeAdminExecuteAdapter_revertsIfAdapterUnset() public {
+        bytes memory callData = abi.encodeWithSignature('mint(address,uint256)', user, 1e18);
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteAdapter(
+            domainSep, bytes4(callData), callData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.ZeroTarget.selector);
+        proxy.executeProposal(id, callData);
+    }
+
+    function test_proposeAdminExecuteAdapter_executesCallOnAdapter() public {
+        MockERC20 adapter = new MockERC20('LZ Stub', 'LZS');
+        bytes32 idSet = _proposeUpdateLZAdapter(address(adapter));
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(idSet, abi.encode(address(adapter)));
+        assertEq(proxy.lzAdapter(), address(adapter));
+
+        bytes memory callData = abi.encodeWithSignature('mint(address,uint256)', recipient, 1e18);
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteAdapter(
+            domainSep, bytes4(callData), callData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, callData);
+
+        assertEq(adapter.balanceOf(recipient), 1e18);
+    }
+
+    function test_proposeAdminExecuteAdapter_revertsOnEmptyCallData() public {
+        bytes memory callData = '';
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = new bytes[](pks.length);
+        for (uint256 i = 0; i < pks.length; i++) sigs[i] = new bytes(65);
+
+        vm.expectRevert(IMultisigProxy.CallDataTooShort.selector);
+        proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_proposeAdminExecuteAdapter_propagatesAdapterRevert() public {
+        MockERC20 adapter = new MockERC20('LZ Stub', 'LZS');
+        bytes32 idSet = _proposeUpdateLZAdapter(address(adapter));
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(idSet, abi.encode(address(adapter)));
+
+        bytes memory callData = abi.encodeWithSignature('nonExistent()');
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteAdapter(
+            domainSep, bytes4(callData), callData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert();
+        proxy.executeProposal(id, callData);
+    }
+
+    // ========================================================================
+    // Propose + Execute — SetRoute
+    // ========================================================================
+
+    function _proposeSetRoute(
+        uint256 srcId,
+        uint256 dstId,
+        bool    enabled,
+        address verifier,
+        address module
+    ) internal returns (bytes32 id) {
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest   = MultisigHelper.digestProposeSetRoute(
+            domainSep, srcId, dstId, enabled, verifier, module, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+        id = proxy.proposeSetRoute(
+            srcId, dstId, enabled, verifier, module,
+            nonce, deadline, bitmap, sigs
+        );
+    }
+
+    function test_proposeSetRoute_addsBrandNewRoute() public {
+        // Register a fresh (1234, 5678) route via governance.
+        uint256 newSrc = 1234;
+        uint256 newDst = 5678;
+        bytes32 id = _proposeSetRoute(
+            newSrc, newDst, true, address(rgbVerifier), address(rgbModule)
+        );
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        vm.expectEmit(true, true, false, true, address(routeRegistry));
+        emit RouteSet(newSrc, newDst, true, address(rgbVerifier), address(rgbModule));
+
+        proxy.executeProposal(
+            id,
+            abi.encode(newSrc, newDst, true, address(rgbVerifier), address(rgbModule))
+        );
+
+        RouteConfig memory cfg = routeRegistry.getRoute(newSrc, newDst);
+        assertTrue(cfg.enabled);
+        assertEq(cfg.finalityVerifier, address(rgbVerifier));
+        assertEq(cfg.settlementModule, address(rgbModule));
+    }
+
+    function test_proposeSetRoute_updatesExistingRoute() public {
+        // Re-point the existing RGB→SOURCE route at a brand new module
+        // (verifier stays). Validates governance can rotate plugins in place.
+        RgbSettlementModule newModule = new RgbSettlementModule(address(routeRegistry));
+
+        bytes32 id = _proposeSetRoute(
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, true,
+            address(rgbVerifier), address(newModule)
+        );
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(
+            id,
+            abi.encode(RGB_CHAIN_ID, SOURCE_CHAIN_ID, true,
+                      address(rgbVerifier), address(newModule))
+        );
+
+        RouteConfig memory cfg = routeRegistry.getRoute(RGB_CHAIN_ID, SOURCE_CHAIN_ID);
+        assertEq(cfg.settlementModule, address(newModule), 'module rotated');
+        assertEq(cfg.finalityVerifier, address(rgbVerifier), 'verifier unchanged');
+    }
+
+    function test_proposeSetRoute_canPauseRoute() public {
+        // Existing RGB→SOURCE route is enabled. Flip enabled = false in place.
+        bytes32 id = _proposeSetRoute(
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, false,
+            address(rgbVerifier), address(rgbModule)
+        );
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(
+            id,
+            abi.encode(RGB_CHAIN_ID, SOURCE_CHAIN_ID, false,
+                      address(rgbVerifier), address(rgbModule))
+        );
+
+        RouteConfig memory cfg = routeRegistry.getRoute(RGB_CHAIN_ID, SOURCE_CHAIN_ID);
+        assertFalse(cfg.enabled, 'route paused');
+        assertEq(cfg.finalityVerifier, address(rgbVerifier), 'verifier kept');
+        assertEq(cfg.settlementModule, address(rgbModule),   'module kept');
+    }
+
+    function test_proposeSetRoute_revertsOnZeroVerifier() public {
+        bytes32 id = _proposeSetRoute(
+            1234, 5678, true, address(0), address(rgbModule)
+        );
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        // Registry guard: ZeroFinalityVerifier propagates up through proxy.
+        vm.expectRevert(IRouteRegistry.ZeroFinalityVerifier.selector);
+        proxy.executeProposal(
+            id,
+            abi.encode(uint256(1234), uint256(5678), true, address(0), address(rgbModule))
+        );
+    }
+
+    function test_proposeSetRoute_revertsOnDataMismatch() public {
+        bytes32 id = _proposeSetRoute(
+            1234, 5678, true, address(rgbVerifier), address(rgbModule)
+        );
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.DataMismatch.selector);
+        // Wrong destChainId in opData.
+        proxy.executeProposal(
+            id,
+            abi.encode(uint256(1234), uint256(9999), true, address(rgbVerifier), address(rgbModule))
+        );
+    }
+
+    // ========================================================================
+    // Propose + Execute — UpdateRouteRegistry
+    // ========================================================================
+
+    function _proposeUpdateRouteRegistry(address newRegistry) internal returns (bytes32 id) {
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest   = MultisigHelper.digestProposeUpdateRouteRegistry(
+            domainSep, newRegistry, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+        id = proxy.proposeUpdateRouteRegistry(newRegistry, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_proposeUpdateRouteRegistry_rotatesBridgePointer() public {
+        // Deploy a NEW registry, owned by proxy, paired with the same Bridge.
+        // In production the new registry's `bridge_` immutable MUST match the
+        // live Bridge — otherwise dispatcher calls revert NotBridge.
+        RouteRegistry newRegistry = new RouteRegistry(address(bridge), address(proxy));
+
+        bytes32 id = _proposeUpdateRouteRegistry(address(newRegistry));
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        vm.expectEmit(true, true, false, false, address(bridge));
+        emit RouteRegistryUpdated(address(routeRegistry), address(newRegistry));
+
+        proxy.executeProposal(id, abi.encode(address(newRegistry)));
+        assertEq(bridge.routeRegistry(), address(newRegistry));
+    }
+
+    function test_proposeUpdateRouteRegistry_revertsOnZero() public {
+        // Bridge.setRouteRegistry rejects zero — the revert propagates up
+        // through `IBridge(bridge).setRouteRegistry(...)` in `_executeByType`.
+        bytes32 id = _proposeUpdateRouteRegistry(address(0));
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(); // Bridge.InvalidRouteRegistryAddress (custom)
+        proxy.executeProposal(id, abi.encode(address(0)));
+    }
+
+    function test_proposeUpdateRouteRegistry_revertsOnDataMismatch() public {
+        address bogus = makeAddr('bogus');
+        bytes32 id = _proposeUpdateRouteRegistry(bogus);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.DataMismatch.selector);
+        proxy.executeProposal(id, abi.encode(makeAddr('different')));
     }
 
     function test_domainSeparator_matchesHelper() public view {
