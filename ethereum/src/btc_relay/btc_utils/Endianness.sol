@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 library Endianness {
     function reverseUint32(uint32 input) internal pure returns (uint32) {

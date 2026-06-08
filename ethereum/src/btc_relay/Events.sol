@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 library Events {
     event StoreHeader(bytes32 indexed commitHash, bytes32 indexed blockHash);

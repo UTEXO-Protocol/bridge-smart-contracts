@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.35;
 
 /// @title IMultisigProxy
 /// @notice Two-level ECDSA multisig proxy that owns the Bridge and the CommissionManager.
