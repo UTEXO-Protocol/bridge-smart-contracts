@@ -1057,13 +1057,19 @@ contract MultisigProxyTest is Test {
     function test_proposeAdminExecuteAdapter_executesCallOnAdapter() public {
         MockERC20 adapter = new MockERC20('LZ Stub', 'LZS');
         bytes32 idSet = _proposeUpdateLZAdapter(address(adapter));
-        vm.warp(block.timestamp + TIMELOCK + 1);
+        // Read block.timestamp once and derive every warp target from it. Re-reading
+        // block.timestamp after a vm.warp within the same function is unreliable under
+        // via_ir: the optimizer treats TIMESTAMP as tx-invariant and may reuse a
+        // pre-warp read, so a second `block.timestamp + ...` warp can collapse onto a
+        // stale value and leave the timelock unexpired.
+        uint256 firstExec = block.timestamp + TIMELOCK + 1;
+        vm.warp(firstExec);
         proxy.executeProposal(idSet, abi.encode(address(adapter)));
         assertEq(proxy.lzAdapter(), address(adapter));
 
         bytes memory callData = abi.encodeWithSignature('mint(address,uint256)', recipient, 1e18);
         uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = block.timestamp + 1 days;
+        uint256 deadline = firstExec + 1 days;
 
         bytes32 digest = MultisigHelper.digestProposeAdminExecuteAdapter(
             domainSep, bytes4(callData), callData, nonce, deadline
@@ -1073,7 +1079,7 @@ contract MultisigProxyTest is Test {
 
         bytes32 id = proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
 
-        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.warp(firstExec + TIMELOCK + 1);
         proxy.executeProposal(id, callData);
 
         assertEq(adapter.balanceOf(recipient), 1e18);
