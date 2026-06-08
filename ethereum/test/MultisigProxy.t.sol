@@ -23,6 +23,41 @@ import { MockERC20 }       from './mocks/MockERC20.sol';
 import { MockBtcRelay }    from './mocks/MockBtcRelay.sol';
 import { MultisigHelper }  from './mocks/MultisigHelper.sol';
 
+contract MockOutboundLZAdapter {
+    MockERC20 public immutable token;
+    address   public immutable oft;
+    address   public immutable multisigProxy;
+    uint256   public immutable nativeFee;
+
+    event SendOut(bytes32 indexed guid, uint32 dstEid, bytes32 recipient, uint256 amountLD);
+
+    constructor(address token_, address oft_, address multisigProxy_, uint256 nativeFee_) {
+        token = MockERC20(token_);
+        oft = oft_;
+        multisigProxy = multisigProxy_;
+        nativeFee = nativeFee_;
+    }
+
+    function sendOut(
+        uint32 dstEid,
+        bytes32 recipient,
+        uint256 amount,
+        uint256 minAmountLD,
+        bytes calldata /* extraOptions */
+    ) external payable {
+        require(msg.sender == multisigProxy, 'only proxy');
+        require(msg.value == nativeFee, 'native fee');
+        require(amount != 0, 'zero amount');
+        require(recipient != bytes32(0), 'zero recipient');
+        require(minAmountLD <= amount, 'min too high');
+
+        token.transfer(oft, amount);
+        (bool ok, ) = oft.call{ value: msg.value }('');
+        require(ok, 'oft fee');
+        emit SendOut(keccak256(abi.encode('mock-send-out', dstEid, recipient, amount)), dstEid, recipient, amount);
+    }
+}
+
 contract MultisigProxyTest is Test {
     using MultisigHelper for bytes32;
 
@@ -49,6 +84,18 @@ contract MultisigProxyTest is Test {
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+    event BatchExecuted(uint256 indexed nonce, uint256 enclaveBitmap, address[] targets, bytes4[] selectors);
+    event SendOut(bytes32 indexed guid, uint32 dstEid, bytes32 recipient, uint256 amountLD);
+    event BridgeFundsOut(
+        address indexed recipient,
+        uint256 amount,
+        uint256 netAmount,
+        uint256 tokenCommission,
+        uint256 burnId,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string  sourceAddress
+    );
     event RouteSet(
         uint256 indexed sourceChainId,
         uint256 indexed destChainId,
@@ -99,6 +146,9 @@ contract MultisigProxyTest is Test {
     uint256 constant AMOUNT  = 100e18;
     uint256 constant TX_ID   = 42;
     uint256 constant BURN_ID = 9_001;
+    uint256 constant LZ_NATIVE_FEE = 0.01 ether;
+    uint32  constant DST_EID = 30110;
+    bytes32 constant LZ_RECIPIENT = bytes32(uint256(uint160(0xBEEF)));
 
     // BtcRelay test data
     uint256 constant BLOCK_HEIGHT      = 850_000;
@@ -225,6 +275,30 @@ contract MultisigProxyTest is Test {
             recipient, AMOUNT, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             proof, settlementData
         );
+    }
+
+    function _fundsOutCalldata(address payoutRecipient, uint256 amount, uint256 burnId) internal pure returns (bytes memory) {
+        bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
+        bytes memory settlementData = abi.encode(_fundsInIds());
+        return abi.encodeWithSelector(
+            FUNDS_OUT_SELECTOR,
+            payoutRecipient, amount, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            proof, settlementData
+        );
+    }
+
+    function _allowTeeCall(address target, bytes4 selector) internal {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeSetTeeAllowedCall(
+            domainSep, target, selector, true, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeSetTeeAllowedCall(target, selector, true, nonce, deadline, bitmap, sigs);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, abi.encode(target, selector, true));
     }
 
     // ========================================================================
@@ -1285,5 +1359,215 @@ contract MultisigProxyTest is Test {
 
     function test_domainSeparator_matchesHelper() public view {
         assertEq(proxy.DOMAIN_SEPARATOR(), MultisigHelper.domainSeparator(address(proxy), block.chainid));
+    }
+
+    // ========================================================================
+    // TEE execute — full-flow state snapshots
+    // ========================================================================
+
+    function test_execute_fundsOut_snapshot_tokenCommission_success() public {
+        uint256 percent = 500; // 5%
+        vm.prank(address(proxy));
+        cm.setCommissionRule(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            CommissionConfig({
+                stablePercent: percent,
+                multiplier: 100,
+                side: CommissionSide.FUNDS_OUT,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
+        assertGt(tokenCommission, 0, 'token fee quoted');
+        assertEq(nativeCommission, 0, 'native fee is zero');
+        assertEq(netAmount, AMOUNT - tokenCommission, 'net recipient amount');
+
+        // Prepare signed TEE execution and snapshot proxy + Bridge accounting.
+        bytes memory callData = _fundsOutCalldata();
+        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        uint256 bridgeBefore    = token.balanceOf(address(bridge));
+        uint256 recipientBefore = token.balanceOf(recipient);
+        uint256 cmBefore        = token.balanceOf(address(cm));
+        uint256 cmPoolBefore    = cm.tokenCommissionPool(address(token));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 recordBefore    = rgbModule.fundsInRecords(TX_ID);
+
+        assertEq(bridgeBefore,     AMOUNT * 5, 'pre bridge pool');
+        assertEq(recipientBefore,  0,          'pre recipient token');
+        assertEq(cmBefore,         0,          'pre cm token');
+        assertEq(cmPoolBefore,     0,          'pre cm pool');
+        assertEq(nativePoolBefore, 0,          'pre native pool');
+        assertEq(recordBefore,     AMOUNT * 5, 'pre record');
+        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+
+        vm.expectEmit(true, false, false, true);
+        emit BridgeFundsOut(
+            recipient,
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            BURN_ID,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR
+        );
+        vm.expectEmit(true, false, false, true);
+        emit Executed(FUNDS_OUT_SELECTOR, nonce, bitmap);
+
+        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+
+        assertEq(proxy.getNonce(FUNDS_OUT_SELECTOR), nonce + 1, 'nonce incremented');
+        assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
+        assertEq(token.balanceOf(address(bridge)), bridgeBefore - AMOUNT,        'bridge gross debit');
+        assertEq(token.balanceOf(recipient),       recipientBefore + netAmount, 'recipient net delta');
+        assertEq(token.balanceOf(address(cm)),     cmBefore + tokenCommission,  'cm fee delta');
+        assertEq(
+            cm.tokenCommissionPool(address(token)),
+            cmPoolBefore + tokenCommission,
+            'cm pool delta'
+        );
+        assertEq(cm.nativeCommissionPool(),        nativePoolBefore,             'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore - AMOUNT,        'record consumed');
+
+        // The signed Bridge gross debit splits into recipient net payout and CM token commission.
+        assertEq(
+            (token.balanceOf(recipient) - recipientBefore) +
+            (token.balanceOf(address(cm)) - cmBefore),
+            AMOUNT,
+            'gross fundsOut conserved'
+        );
+    }
+
+    // Batch coverage for Bridge fundsOut followed by an outbound adapter send.
+    // Real UtexoLZAdapter + OFT coverage belongs in a cross-repo integration test.
+    function test_executeBatch_bridgeFundsOutThenAdapterSendOut_snapshot() public {
+        uint256 percent = 500; // 5%
+        vm.prank(address(proxy));
+        cm.setCommissionRule(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            CommissionConfig({
+                stablePercent: percent,
+                multiplier: 100,
+                side: CommissionSide.FUNDS_OUT,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
+        assertGt(tokenCommission, 0, 'token fee quoted');
+        assertEq(nativeCommission, 0, 'native fee is zero');
+        assertEq(netAmount, AMOUNT - tokenCommission, 'net adapter amount');
+
+        address mockOft = makeAddr('mockOft');
+        MockOutboundLZAdapter adapter =
+            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
+        bytes4 sendOutSelector = MockOutboundLZAdapter.sendOut.selector;
+        _allowTeeCall(address(adapter), sendOutSelector);
+        assertTrue(proxy.teeAllowedCalls(address(adapter), sendOutSelector), 'adapter sendOut allowed');
+
+        bytes memory bridgeCallData = _fundsOutCalldata(address(adapter), AMOUNT, BURN_ID);
+        bytes memory extraOptions = hex'0003010011010000000000000000000000000000ea60';
+        bytes memory adapterCallData = abi.encodeWithSelector(
+            sendOutSelector,
+            DST_EID,
+            LZ_RECIPIENT,
+            netAmount,
+            netAmount,
+            extraOptions
+        );
+
+        address[] memory targets = new address[](2);
+        bytes[] memory callDatas = new bytes[](2);
+        uint256[] memory values = new uint256[](2);
+        targets[0] = address(bridge);
+        targets[1] = address(adapter);
+        callDatas[0] = bridgeCallData;
+        callDatas[1] = adapterCallData;
+        values[0] = 0;
+        values[1] = LZ_NATIVE_FEE;
+
+        uint256 nonce = proxy.batchNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
+            domainSep, targets, callDatas, values, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        uint256 bridgeBefore    = token.balanceOf(address(bridge));
+        uint256 adapterBefore   = token.balanceOf(address(adapter));
+        uint256 oftBefore       = token.balanceOf(mockOft);
+        uint256 cmBefore        = token.balanceOf(address(cm));
+        uint256 cmPoolBefore    = cm.tokenCommissionPool(address(token));
+        uint256 recordBefore    = rgbModule.fundsInRecords(TX_ID);
+        uint256 proxyEthBefore  = address(proxy).balance;
+        uint256 adapterEthBefore = address(adapter).balance;
+        uint256 oftEthBefore    = mockOft.balance;
+
+        assertEq(bridgeBefore,   AMOUNT * 5, 'pre bridge pool');
+        assertEq(adapterBefore,  0,          'pre adapter token');
+        assertEq(oftBefore,      0,          'pre oft token');
+        assertEq(cmBefore,       0,          'pre cm token');
+        assertEq(cmPoolBefore,   0,          'pre cm pool');
+        assertEq(recordBefore,   AMOUNT * 5, 'pre record');
+        assertEq(adapterEthBefore, 0,        'pre adapter native');
+        assertEq(oftEthBefore,     0,        'pre oft native');
+        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+
+        bytes4[] memory selectors = new bytes4[](2);
+        selectors[0] = FUNDS_OUT_SELECTOR;
+        selectors[1] = sendOutSelector;
+        bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
+
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsOut(
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            BURN_ID,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR
+        );
+        vm.expectEmit(true, false, false, true, address(adapter));
+        emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
+        vm.expectEmit(true, false, false, true, address(proxy));
+        emit BatchExecuted(nonce, bitmap, targets, selectors);
+
+        vm.deal(address(this), LZ_NATIVE_FEE);
+        proxy.executeBatch{ value: LZ_NATIVE_FEE }(targets, callDatas, values, nonce, deadline, bitmap, sigs);
+
+        assertEq(proxy.batchNonce(), nonce + 1, 'batch nonce incremented');
+        assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
+        assertEq(token.balanceOf(address(bridge)),  bridgeBefore - AMOUNT,          'bridge gross debit');
+        assertEq(token.balanceOf(address(cm)),      cmBefore + tokenCommission,     'cm fee delta');
+        assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore + tokenCommission, 'cm pool delta');
+        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore - AMOUNT,          'record consumed');
+        assertEq(token.balanceOf(address(adapter)), adapterBefore,                  'adapter no residue');
+        assertEq(token.balanceOf(mockOft),          oftBefore + netAmount,          'oft receives net');
+        assertEq(address(proxy).balance,            proxyEthBefore,                 'proxy native no residue');
+        assertEq(address(adapter).balance,           adapterEthBefore,               'adapter native no residue');
+        assertEq(mockOft.balance,                    oftEthBefore + LZ_NATIVE_FEE,   'oft receives native fee');
+        assertEq(
+            (token.balanceOf(mockOft) - oftBefore) +
+            (token.balanceOf(address(cm)) - cmBefore),
+            AMOUNT,
+            'gross batch payout conserved'
+        );
     }
 }

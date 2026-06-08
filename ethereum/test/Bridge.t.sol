@@ -809,4 +809,220 @@ contract BridgeTest is Test {
         assertEq(usdt0.balanceOf(address(bridge)), amount);
         assertEq(rgbModule.fundsInRecords(TX_ID),  amount);
     }
+
+    // ========================================================================
+    // fundsIn — full-flow state snapshots
+    // ========================================================================
+
+    function test_fundsIn_tokenCommission_fullFlowStateSnapshot() public {
+        uint256 percent = 400; // 4%
+        _setFundsInTokenRule(percent);
+
+        (uint256 tokenCommission,, uint256 netAmount) =
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+
+        // Snapshot every balance/pool/record this TOKEN-commission flow should touch.
+        uint256 userBefore       = usdt0.balanceOf(user);
+        uint256 bridgeBefore     = usdt0.balanceOf(address(bridge));
+        uint256 cmBefore         = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore     = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 userEthBefore    = user.balance;
+        uint256 bridgeEthBefore  = address(bridge).balance;
+        uint256 cmEthBefore      = address(cm).balance;
+        uint256 recordBefore     = rgbModule.fundsInRecords(TX_ID);
+
+        assertEq(bridgeBefore,     0, 'pre bridge token');
+        assertEq(cmBefore,         0, 'pre cm token');
+        assertEq(cmPoolBefore,     0, 'pre cm pool');
+        assertEq(nativePoolBefore, 0, 'pre native pool');
+        assertEq(recordBefore,     0, 'pre record');
+
+        vm.expectEmit(true, false, false, true);
+        emit FundsIn(user, TX_ID, netAmount);
+        vm.expectEmit(true, false, false, true);
+        emit BridgeFundsIn(
+            user,
+            TX_ID,
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            0,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR
+        );
+
+        // Execute the real direct fundsIn path: user → Bridge → RouteRegistry → RGB module → CM.
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        assertEq(usdt0.balanceOf(user),            userBefore - AMOUNT,      'user gross spent');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + netAmount, 'bridge net delta');
+        assertEq(usdt0.balanceOf(address(cm)),     cmBefore + tokenCommission, 'cm fee delta');
+        assertEq(
+            cm.tokenCommissionPool(address(usdt0)),
+            cmPoolBefore + tokenCommission,
+            'cm pool delta'
+        );
+        assertEq(cm.nativeCommissionPool(),       nativePoolBefore, 'native pool unchanged');
+        assertEq(user.balance,                    userEthBefore,    'user native unchanged');
+        assertEq(address(bridge).balance,         bridgeEthBefore,  'bridge native unchanged');
+        assertEq(address(cm).balance,             cmEthBefore,      'cm native unchanged');
+        assertEq(rgbModule.fundsInRecords(TX_ID), recordBefore + netAmount, 'record delta = net');
+
+        // Gross USDT0 is conserved between Bridge liquidity and CM commission custody.
+        assertEq(
+            (usdt0.balanceOf(address(bridge)) - bridgeBefore) +
+            (usdt0.balanceOf(address(cm)) - cmBefore),
+            AMOUNT,
+            'gross token conserved'
+        );
+    }
+
+    function test_fundsIn_nativeCommission_fullFlowStateSnapshot() public {
+        uint256 percent = 100; // 1%
+        _setFundsInNativeRule(percent);
+
+        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+        assertEq(tokenCommission, 0, 'token fee is zero');
+        assertGt(nativeCommission, 0, 'native fee quoted');
+        assertEq(netAmount, AMOUNT, 'net token amount');
+
+        vm.deal(user, nativeCommission);
+
+        // Snapshot token/native balances, pools, and RGB record touched by native-fee fundsIn.
+        uint256 userTokenBefore   = usdt0.balanceOf(user);
+        uint256 bridgeTokenBefore = usdt0.balanceOf(address(bridge));
+        uint256 cmTokenBefore     = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore      = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore  = cm.nativeCommissionPool();
+        uint256 userEthBefore     = user.balance;
+        uint256 bridgeEthBefore   = address(bridge).balance;
+        uint256 cmEthBefore       = address(cm).balance;
+        uint256 recordBefore      = rgbModule.fundsInRecords(TX_ID);
+
+        assertEq(bridgeTokenBefore, 0, 'pre bridge token');
+        assertEq(cmTokenBefore,     0, 'pre cm token');
+        assertEq(cmPoolBefore,      0, 'pre token pool');
+        assertEq(nativePoolBefore,  0, 'pre native pool');
+        assertEq(recordBefore,      0, 'pre record');
+
+        vm.expectEmit(true, false, false, true);
+        emit FundsIn(user, TX_ID, netAmount);
+        vm.expectEmit(true, false, false, true);
+        emit BridgeFundsIn(
+            user,
+            TX_ID,
+            AMOUNT,
+            netAmount,
+            0,
+            nativeCommission,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR
+        );
+
+        // Execute exact-value native commission path; token principal stays whole.
+        vm.prank(user);
+        bridge.fundsIn{ value: nativeCommission }(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        assertEq(usdt0.balanceOf(user),            userTokenBefore - AMOUNT,       'user token gross spent');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeTokenBefore + netAmount,  'bridge token delta');
+        assertEq(usdt0.balanceOf(address(cm)),     cmTokenBefore,                  'cm token unchanged');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore,             'token pool unchanged');
+        assertEq(cm.nativeCommissionPool(),        nativePoolBefore + nativeCommission, 'native pool delta');
+        assertEq(user.balance,                     userEthBefore - nativeCommission,    'user native paid');
+        assertEq(address(bridge).balance,          bridgeEthBefore,                      'bridge native unchanged');
+        assertEq(address(cm).balance,              cmEthBefore + nativeCommission,       'cm native delta');
+        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore + netAmount,             'record delta = net');
+
+        // Native fee is conserved in CM custody while the full USDT0 principal stays in Bridge.
+        assertEq(usdt0.balanceOf(address(bridge)) - bridgeTokenBefore, AMOUNT,           'gross token in bridge');
+        assertEq(address(cm).balance - cmEthBefore, nativeCommission,                    'native fee conserved');
+    }
+
+    // ========================================================================
+    // fundsOut — full-flow state snapshots
+    // ========================================================================
+
+    function test_fundsOut_snapshot_tokenCommission_partialConsume() public {
+        uint256 releaseAmount = 60e18;
+        uint256 percent = 500; // 5%
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+        _setFundsOutTokenRule(percent);
+
+        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(usdt0), releaseAmount);
+        assertGt(tokenCommission, 0, 'token fee quoted');
+        assertEq(nativeCommission, 0, 'native fee is zero');
+        assertEq(netAmount, releaseAmount - tokenCommission, 'net recipient amount');
+
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = TX_ID;
+
+        // Snapshot the Bridge fundsOut state after a larger RGB record exists.
+        uint256 bridgeBefore    = usdt0.balanceOf(address(bridge));
+        uint256 recipientBefore = usdt0.balanceOf(recipient);
+        uint256 cmBefore        = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore    = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 recordBefore    = rgbModule.fundsInRecords(TX_ID);
+
+        assertEq(bridgeBefore,     AMOUNT, 'pre bridge pool');
+        assertEq(recipientBefore,  0,      'pre recipient token');
+        assertEq(cmBefore,         0,      'pre cm token');
+        assertEq(cmPoolBefore,     0,      'pre cm pool');
+        assertEq(nativePoolBefore, 0,      'pre native pool');
+        assertEq(recordBefore,     AMOUNT, 'pre record');
+        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+
+        vm.expectEmit(true, false, false, true);
+        emit BridgeFundsOut(
+            recipient,
+            releaseAmount,
+            netAmount,
+            tokenCommission,
+            BURN_ID,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR
+        );
+
+        // Release only part of the RGB record; the module should preserve the residual.
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient,
+            releaseAmount,
+            BURN_ID,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            _proof(),
+            _settlement(ids)
+        );
+
+        assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore - releaseAmount, 'bridge gross debit');
+        assertEq(usdt0.balanceOf(recipient),       recipientBefore + netAmount,  'recipient net delta');
+        assertEq(usdt0.balanceOf(address(cm)),     cmBefore + tokenCommission,   'cm fee delta');
+        assertEq(
+            cm.tokenCommissionPool(address(usdt0)),
+            cmPoolBefore + tokenCommission,
+            'cm pool delta'
+        );
+        assertEq(cm.nativeCommissionPool(),        nativePoolBefore,             'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore - releaseAmount, 'record residual');
+
+        // The gross Bridge debit splits into recipient net payout and CM token commission.
+        assertEq(
+            (usdt0.balanceOf(recipient) - recipientBefore) +
+            (usdt0.balanceOf(address(cm)) - cmBefore),
+            releaseAmount,
+            'gross fundsOut conserved'
+        );
+    }
 }
