@@ -143,6 +143,14 @@ contract MultisigProxy is IMultisigProxy {
         'EmergencyUnpause(uint256 nonce,uint256 deadline)'
     );
 
+    // Federation propose — planned inflow-only pause (timelocked)
+    bytes32 private constant _PROPOSE_PAUSE_INFLOW_TYPEHASH = keccak256(
+        'ProposePauseInflow(uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _PROPOSE_UNPAUSE_INFLOW_TYPEHASH = keccak256(
+        'ProposeUnpauseInflow(uint256 nonce,uint256 deadline)'
+    );
+
     // =========================================================================
     // Constructor
     // =========================================================================
@@ -298,7 +306,10 @@ contract MultisigProxy is IMultisigProxy {
 
         proposalNonce++;
 
-        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('pause()'));
+        // Emergency freeze of BOTH inflow and outflow — no timelock, federation
+        // signatures only. Also halts the enclave/TEE release path (it routes
+        // through Bridge.fundsOut, now gated by whenOutflowNotPaused).
+        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('emergencyPauseAll()'));
         _propagateRevert(ok, ret);
 
         emit EmergencyPaused(nonce, fedBitmap);
@@ -321,7 +332,8 @@ contract MultisigProxy is IMultisigProxy {
 
         proposalNonce++;
 
-        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('unpause()'));
+        // Lift the emergency freeze on BOTH inflow and outflow.
+        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('emergencyUnpauseAll()'));
         _propagateRevert(ok, ret);
 
         emit EmergencyUnpaused(nonce, fedBitmap);
@@ -654,6 +666,48 @@ contract MultisigProxy is IMultisigProxy {
         );
     }
 
+    /// @inheritdoc IMultisigProxy
+    /// @dev Planned inflow-only pause: freezes deposits while leaving
+    ///      withdrawals open (e.g. to migrate liquidity during an upgrade).
+    ///      Runs through the timelocked propose -> execute path, so the
+    ///      federation has an observation window. The emergency, no-timelock
+    ///      freeze of BOTH paths is `emergencyPause` instead. Carries no payload.
+    function proposePauseInflow(
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_PAUSE_INFLOW_TYPEHASH, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.PauseInflow,
+            '',
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    /// @dev Resumes the inflow path, reversing `proposePauseInflow`. Timelocked.
+    function proposeUnpauseInflow(
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_UNPAUSE_INFLOW_TYPEHASH, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.UnpauseInflow,
+            '',
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
     // =========================================================================
     // Cancel
     // =========================================================================
@@ -904,6 +958,15 @@ contract MultisigProxy is IMultisigProxy {
             // `NotBridge` and the route plane goes dark.
             address newRegistry = abi.decode(opData, (address));
             IBridge(bridge).setRouteRegistry(newRegistry);
+
+        } else if (opType == OperationType.PauseInflow) {
+            // Planned inflow-only freeze (no payload). Withdrawals stay open.
+            (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('pauseInflow()'));
+            _propagateRevert(ok, ret);
+
+        } else if (opType == OperationType.UnpauseInflow) {
+            (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('unpauseInflow()'));
+            _propagateRevert(ok, ret);
 
         } else {
             revert UnknownOperationType();

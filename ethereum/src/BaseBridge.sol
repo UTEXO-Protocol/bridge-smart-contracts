@@ -68,7 +68,7 @@ contract BaseBridge is BridgeBase {
         uint256 amount,
         uint256 operationId,
         string  calldata sourceAddress
-    ) external onlyOwner {
+    ) external onlyOwner whenOutflowNotPaused {
         if (recipient == address(0)) revert InvalidRecipientAddress();
         if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 

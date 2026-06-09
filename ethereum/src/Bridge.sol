@@ -174,7 +174,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         string  calldata sourceAddress,
         bytes   calldata proof,
         bytes   calldata settlementData
-    ) external override onlyOwner nonReentrant {
+    ) external override onlyOwner nonReentrant whenOutflowNotPaused {
         if (recipient          == address(0))                revert InvalidRecipientAddress();
         if (sourceChainId      == 0)                         revert InvalidSourceChainId();
         if (destinationChainId == 0)                         revert InvalidDestinationChainId();
