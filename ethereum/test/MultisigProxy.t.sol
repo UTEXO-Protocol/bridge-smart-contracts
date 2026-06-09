@@ -6,6 +6,8 @@ import { Test } from 'forge-std/Test.sol';
 import { MultisigProxy }  from '../src/MultisigProxy.sol';
 import { IMultisigProxy } from '../src/interfaces/IMultisigProxy.sol';
 import { Bridge }              from '../src/Bridge.sol';
+import { BridgeBase }          from '../src/BridgeBase.sol';
+import { Pausable }            from '@openzeppelin/contracts/utils/Pausable.sol';
 import { CommissionManager }   from '../src/CommissionManager.sol';
 import { RouteRegistry }       from '../src/RouteRegistry.sol';
 import { IRouteRegistry }      from '../src/interfaces/IRouteRegistry.sol';
@@ -355,7 +357,7 @@ contract MultisigProxyTest is Test {
     }
 
     function test_execute_revertsOnDisallowedSelector() public {
-        bytes memory callData = abi.encodeWithSignature('pause()');
+        bytes memory callData = abi.encodeWithSignature('pauseInflow()');
         uint256 nonce = 0;
         uint256 deadline = block.timestamp + 1 hours;
 
@@ -434,7 +436,7 @@ contract MultisigProxyTest is Test {
         bytes[]   memory callDatas = new bytes[](1);
         uint256[] memory values    = new uint256[](1);
         targets[0]   = makeAddr('random-target');
-        callDatas[0] = abi.encodeWithSignature('pause()');
+        callDatas[0] = abi.encodeWithSignature('pauseInflow()');
 
         uint256 nonce    = proxy.batchNonce();
         uint256 deadline = block.timestamp + 1 hours;
@@ -627,6 +629,79 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
+    // R-W-05 — two-tier pause (integration via MultisigProxy)
+    // ========================================================================
+
+    /// @dev After R-W-05, the no-timelock emergency pause freezes the OUTFLOW
+    ///      path too — including the enclave/TEE release, which routes through
+    ///      Bridge.fundsOut. A signed fundsOut executed straight after
+    ///      emergencyPause must revert OutflowEnforcedPause, and inbound deposits
+    ///      must be frozen as well.
+    function test_emergencyPause_freezesEnclaveFundsOut() public {
+        // Federation triggers the emergency freeze (both paths).
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest   = MultisigHelper.digestEmergencyPause(domainSep, nonce, deadline);
+        (uint256[] memory fpks, uint256 fbitmap) = _fedSigSet2of3();
+        proxy.emergencyPause(nonce, deadline, fbitmap, MultisigHelper.signAll(vm, digest, fpks));
+
+        assertTrue(bridge.paused(),        'inflow frozen');
+        assertTrue(bridge.outflowPaused(), 'outflow frozen');
+
+        // Inbound deposits are frozen.
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID + 1, '');
+
+        // Enclave-signed release is frozen too — the revert propagates from
+        // Bridge.fundsOut through proxy.execute.
+        bytes memory callData = _fundsOutCalldata();
+        uint256 encNonce      = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        bytes32 encDigest     = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, encNonce, deadline);
+        (uint256[] memory epks, uint256 ebitmap) = _encSigSet2of3();
+        bytes[] memory esigs   = MultisigHelper.signAll(vm, encDigest, epks);
+
+        vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
+        proxy.execute(callData, encNonce, deadline, ebitmap, esigs);
+    }
+
+    /// @dev The planned inflow-only pause runs through the timelocked
+    ///      propose -> execute path and blocks deposits while leaving the
+    ///      enclave release path open (liquidity migration scenario).
+    function test_proposePauseInflow_blocksFundsInButAllowsFundsOut() public {
+        uint256 t = block.timestamp; // read once; derive all timing from it (via_ir-safe)
+
+        // Propose the inflow-only pause (federation signed).
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = t + 1 days;
+        bytes32 digest   = MultisigHelper.digestProposePauseInflow(domainSep, nonce, deadline);
+        (uint256[] memory fpks, uint256 fbitmap) = _fedSigSet2of3();
+        bytes32 id = proxy.proposePauseInflow(nonce, deadline, fbitmap, MultisigHelper.signAll(vm, digest, fpks));
+
+        // Execute it after the timelock (no payload).
+        vm.warp(t + TIMELOCK + 1);
+        proxy.executeProposal(id, '');
+
+        assertTrue(bridge.paused(),         'inflow frozen');
+        assertFalse(bridge.outflowPaused(), 'outflow stays open');
+
+        // Deposits are frozen...
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID + 1, '');
+
+        // ...but the enclave release still executes.
+        bytes memory callData = _fundsOutCalldata();
+        uint256 encNonce      = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        bytes32 encDigest     = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, encNonce, t + 1 days);
+        (uint256[] memory epks, uint256 ebitmap) = _encSigSet2of3();
+        bytes[] memory esigs   = MultisigHelper.signAll(vm, encDigest, epks);
+
+        proxy.execute(callData, encNonce, t + 1 days, ebitmap, esigs);
+        assertEq(token.balanceOf(recipient), AMOUNT, 'withdrawal succeeded while inflow paused');
+    }
+
+    // ========================================================================
     // Propose + Execute — UpdateBridge
     // ========================================================================
 
@@ -763,7 +838,7 @@ contract MultisigProxyTest is Test {
     // ========================================================================
 
     function test_proposeAdminExecute_canCallBridge() public {
-        bytes memory callData = abi.encodeWithSignature('pause()');
+        bytes memory callData = abi.encodeWithSignature('pauseInflow()');
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
 
