@@ -20,6 +20,7 @@ import {
 import { MockERC20 }        from './mocks/MockERC20.sol';
 import { MockBtcRelay }     from './mocks/MockBtcRelay.sol';
 import { MockAggregatorV3 } from './mocks/MockAggregatorV3.sol';
+import { MockSettlementModule } from './mocks/MockSettlementModule.sol';
 
 import { Ownable }   from '@openzeppelin/contracts/access/Ownable.sol';
 import { Pausable }  from '@openzeppelin/contracts/utils/Pausable.sol';
@@ -1024,5 +1025,199 @@ contract BridgeTest is Test {
             releaseAmount,
             'gross fundsOut conserved'
         );
+    }
+
+    // ========================================================================
+    // fundsIn — rollback snapshots
+    // ========================================================================
+
+    function test_fundsIn_routeModuleRevertRollsBackTokenPullAndEvents() public {
+        MockSettlementModule revertingModule = new MockSettlementModule();
+        revertingModule.setShouldRevertOnFundsIn(true);
+
+        // Route is intentionally rewired to a module that reverts after Bridge
+        // has already pulled tokens and before commission forwarding can run.
+        vm.prank(deployer);
+        routeRegistry.setRoute(
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            true,
+            address(rgbVerifier),
+            address(revertingModule)
+        );
+
+        uint256 userBefore       = usdt0.balanceOf(user);
+        uint256 bridgeBefore     = usdt0.balanceOf(address(bridge));
+        uint256 cmBefore         = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore     = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 recordBefore     = rgbModule.fundsInRecords(TX_ID);
+
+        assertEq(bridgeBefore, 0, 'pre bridge token');
+        assertEq(cmBefore,     0, 'pre cm token');
+        assertEq(cmPoolBefore, 0, 'pre cm pool');
+        assertEq(recordBefore, 0, 'pre rgb record');
+        assertEq(revertingModule.onFundsInCount(), 0, 'pre module calls');
+
+        // Bridge emits FundsIn/BridgeFundsIn only after route dispatch, so this
+        // module revert prevents successful Bridge events from persisting.
+        vm.expectRevert(MockSettlementModule.MockModuleForcedRevert.selector);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        assertEq(usdt0.balanceOf(user),            userBefore,       'user token unchanged');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore,     'bridge token unchanged');
+        assertEq(usdt0.balanceOf(address(cm)),     cmBefore,         'cm token unchanged');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, 'cm pool unchanged');
+        assertEq(cm.nativeCommissionPool(),        nativePoolBefore, 'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore,     'rgb record unchanged');
+        assertEq(revertingModule.onFundsInCount(), 0,                'module state unchanged');
+    }
+
+    function test_fundsIn_commissionForwardingRevertRollsBackSettlementRecord() public {
+        uint256 percent = 400; // 4%
+        _setFundsInTokenRule(percent);
+
+        (uint256 tokenCommission,, uint256 netAmount) =
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+        assertGt(tokenCommission, 0, 'token fee quoted');
+        assertLt(netAmount, AMOUNT, 'net below gross');
+
+        // Misconfigure only the CM bridge guard so the route/RGB write happens
+        // before commission forwarding fails in receiveTokenCommission().
+        vm.prank(deployer);
+        cm.setBridgeAddress(makeAddr('wrong-bridge'));
+
+        uint256 userBefore       = usdt0.balanceOf(user);
+        uint256 bridgeBefore     = usdt0.balanceOf(address(bridge));
+        uint256 cmBefore         = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore     = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 recordBefore     = rgbModule.fundsInRecords(TX_ID);
+
+        assertEq(bridgeBefore, 0, 'pre bridge token');
+        assertEq(cmBefore,     0, 'pre cm token');
+        assertEq(cmPoolBefore, 0, 'pre cm pool');
+        assertEq(recordBefore, 0, 'pre rgb record');
+
+        // FundsIn/BridgeFundsIn emit after commission forwarding, so this
+        // late revert prevents successful Bridge events from persisting.
+        vm.expectRevert(ICommissionManager.OnlyBridge.selector);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        assertEq(usdt0.balanceOf(user),            userBefore,       'user token unchanged');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore,     'bridge token unchanged');
+        assertEq(usdt0.balanceOf(address(cm)),     cmBefore,         'cm token unchanged');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, 'cm pool unchanged');
+        assertEq(cm.nativeCommissionPool(),        nativePoolBefore, 'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore,     'rgb record unchanged');
+    }
+
+    // ========================================================================
+    // fundsOut — rollback snapshots
+    // ========================================================================
+
+    function test_fundsOut_verifierRevertRollsBackBurnIdAndRecords() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        bytes memory badProof = abi.encode(uint256(999_999), keccak256('unknown-block'));
+
+        uint256 bridgeBefore     = usdt0.balanceOf(address(bridge));
+        uint256 recipientBefore  = usdt0.balanceOf(recipient);
+        uint256 cmBefore         = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore     = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 recordBefore     = rgbModule.fundsInRecords(TX_ID);
+
+        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+        assertEq(bridgeBefore, AMOUNT, 'pre bridge pool');
+        assertEq(recipientBefore, 0, 'pre recipient token');
+        assertEq(cmBefore, 0, 'pre cm token');
+        assertEq(cmPoolBefore, 0, 'pre cm pool');
+        assertEq(nativePoolBefore, 0, 'pre native pool');
+        assertEq(recordBefore, AMOUNT, 'pre rgb record');
+
+        // fundsOut marks the burn id before verifier dispatch. This verifier
+        // failure rolls that mark back and short-circuits before RGB records
+        // can be consumed.
+        vm.expectRevert('verify: block commitment');
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient,
+            AMOUNT,
+            BURN_ID,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            badProof,
+            _settlement(_singleFundsInId())
+        );
+
+        assertFalse(bridge.consumedBurnIds(BURN_ID), 'burn id unchanged');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, 'bridge token unchanged');
+        assertEq(usdt0.balanceOf(recipient),       recipientBefore, 'recipient token unchanged');
+        assertEq(usdt0.balanceOf(address(cm)),     cmBefore, 'cm token unchanged');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, 'cm pool unchanged');
+        assertEq(cm.nativeCommissionPool(),        nativePoolBefore, 'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore, 'rgb record unchanged');
+    }
+
+    function test_fundsOut_settlementRevertRollsBackBurnIdAndRecords() public {
+        uint256 txId1 = 100;
+        uint256 txId2 = 101;
+        uint256 amount1 = 50e18;
+        uint256 amount2 = 50e18;
+        uint256 releaseAmount = 60e18;
+
+        vm.prank(user);
+        bridge.fundsIn(amount1, RGB_CHAIN_ID, DST_ADDR, txId1, '');
+        vm.prank(user);
+        bridge.fundsIn(amount2, RGB_CHAIN_ID, DST_ADDR, txId2, '');
+
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = txId1;
+
+        uint256 bridgeBefore     = usdt0.balanceOf(address(bridge));
+        uint256 recipientBefore  = usdt0.balanceOf(recipient);
+        uint256 cmBefore         = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore     = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 record1Before    = rgbModule.fundsInRecords(txId1);
+        uint256 record2Before    = rgbModule.fundsInRecords(txId2);
+
+        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+        assertEq(bridgeBefore, amount1 + amount2, 'pre bridge pool');
+        assertEq(recipientBefore, 0, 'pre recipient token');
+        assertEq(cmBefore, 0, 'pre cm token');
+        assertEq(cmPoolBefore, 0, 'pre cm pool');
+        assertEq(nativePoolBefore, 0, 'pre native pool');
+        assertEq(record1Before, amount1, 'pre record 1');
+        assertEq(record2Before, amount2, 'pre record 2');
+
+        // The first record is deleted before the module discovers the release
+        // is underfunded; the revert must restore that consumed record too.
+        vm.expectRevert(RgbSettlementModule.FundsOutAmountExceedsFundsIn.selector);
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient,
+            releaseAmount,
+            BURN_ID,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            _proof(),
+            _settlement(ids)
+        );
+
+        assertFalse(bridge.consumedBurnIds(BURN_ID), 'burn id unchanged');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, 'bridge token unchanged');
+        assertEq(usdt0.balanceOf(recipient),       recipientBefore, 'recipient token unchanged');
+        assertEq(usdt0.balanceOf(address(cm)),     cmBefore, 'cm token unchanged');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, 'cm pool unchanged');
+        assertEq(cm.nativeCommissionPool(),        nativePoolBefore, 'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(txId1),  record1Before, 'record 1 rolled back');
+        assertEq(rgbModule.fundsInRecords(txId2),  record2Before, 'record 2 unchanged');
     }
 }
