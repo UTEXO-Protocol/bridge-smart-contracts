@@ -89,7 +89,8 @@ contract MultisigProxyTest is Test {
     address recipient          = makeAddr('recipient');
     address commissionReceiver = makeAddr('commissionReceiver');
 
-    uint256 constant TIMELOCK = 1 hours;
+    uint256 constant TIMELOCK     = 1 hours;
+    uint256 constant MIN_TIMELOCK = 1 hours; // floor passed to the proxy constructor in tests
 
     bytes32 domainSep;
 
@@ -177,7 +178,8 @@ contract MultisigProxyTest is Test {
             enc, 2,
             fed, 2,
             commissionReceiver,
-            TIMELOCK
+            TIMELOCK,
+            MIN_TIMELOCK
         );
 
         // Production-flow ownership transfer.
@@ -256,56 +258,87 @@ contract MultisigProxyTest is Test {
         address[] memory enc = new address[](1); enc[0] = encA1;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.ZeroBridge.selector);
-        new MultisigProxy(address(0), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(0), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnZeroCommissionManager() public {
         address[] memory enc = new address[](1); enc[0] = encA1;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.ZeroCommissionManager.selector);
-        new MultisigProxy(address(bridge), address(0), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(bridge), address(0), enc, 1, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnNoEnclaveSigners() public {
         address[] memory enc = new address[](0);
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.NoSigners.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnBadEnclaveThreshold() public {
         address[] memory enc = new address[](2); enc[0] = encA1; enc[1] = encA2;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 3, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 3, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnZeroCommission() public {
         address[] memory enc = new address[](1); enc[0] = encA1;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.ZeroCommissionRecipient.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, address(0), TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, address(0), TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnTimelockTooLong() public {
         address[] memory enc = new address[](1); enc[0] = encA1;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.TimelockTooLong.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, 30 days);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, 30 days, MIN_TIMELOCK);
+    }
+
+    // ---- R-W-11: MIN_TIMELOCK floor (post-fix) ----
+
+    /// @dev UT-FIX-13: deploying with a timelock below the requested floor reverts.
+    function test_constructor_revertsOnTimelockBelowMinTimelock() public {
+        address[] memory enc = new address[](1); enc[0] = encA1;
+        address[] memory fed = new address[](1); fed[0] = fedA1;
+        // timelock (1h) is below the requested floor (2h) -> TimelockTooShort
+        vm.expectRevert(IMultisigProxy.TimelockTooShort.selector);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, 1 hours, 2 hours);
+    }
+
+    /// @dev A zero floor is rejected — it would defeat the purpose of the fix.
+    function test_constructor_revertsOnZeroMinTimelock() public {
+        address[] memory enc = new address[](1); enc[0] = encA1;
+        address[] memory fed = new address[](1); fed[0] = fedA1;
+        vm.expectRevert(IMultisigProxy.InvalidMinTimelock.selector);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK, 0);
+    }
+
+    /// @dev A floor at/above the upper bound leaves no valid range — rejected.
+    function test_constructor_revertsOnMinTimelockTooLong() public {
+        address[] memory enc = new address[](1); enc[0] = encA1;
+        address[] memory fed = new address[](1); fed[0] = fedA1;
+        vm.expectRevert(IMultisigProxy.InvalidMinTimelock.selector);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK, 30 days);
+    }
+
+    function test_minTimelock_returnsConfiguredFloor() public view {
+        assertEq(proxy.MIN_TIMELOCK(), MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnDuplicateSigner() public {
         address[] memory enc = new address[](2); enc[0] = encA1; enc[1] = encA1;
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.DuplicateSigner.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnZeroAddressSigner() public {
         address[] memory enc = new address[](1); enc[0] = address(0);
         address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.ZeroAddressSigner.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
     }
 
     // ========================================================================
@@ -830,6 +863,41 @@ contract MultisigProxyTest is Test {
         emit TimelockDurationUpdated(newDuration);
         proxy.executeProposal(id, abi.encode(newDuration));
 
+        assertEq(proxy.timelockDuration(), newDuration);
+    }
+
+    /// @dev UT-FIX-13: a SetTimelockDuration proposal below the immutable
+    ///      MIN_TIMELOCK floor is rejected at execution; the floor holds.
+    function test_proposeSetTimelockDuration_revertsBelowMinTimelock_afterFix() public {
+        uint256 t           = block.timestamp;
+        uint256 newDuration = MIN_TIMELOCK - 1; // just under the floor
+        uint256 nonce       = proxy.proposalNonce();
+        uint256 deadline    = t + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(domainSep, newDuration, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 id = proxy.proposeSetTimelockDuration(newDuration, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks));
+
+        vm.warp(t + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.TimelockTooShort.selector);
+        proxy.executeProposal(id, abi.encode(newDuration));
+
+        assertEq(proxy.timelockDuration(), TIMELOCK, 'timelock unchanged');
+    }
+
+    /// @dev A value exactly at MIN_TIMELOCK is still accepted (boundary).
+    function test_proposeSetTimelockDuration_acceptsAtMinTimelock_afterFix() public {
+        uint256 t           = block.timestamp;
+        uint256 newDuration = MIN_TIMELOCK; // exactly the floor
+        uint256 nonce       = proxy.proposalNonce();
+        uint256 deadline    = t + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(domainSep, newDuration, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 id = proxy.proposeSetTimelockDuration(newDuration, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks));
+
+        vm.warp(t + TIMELOCK + 1);
+        proxy.executeProposal(id, abi.encode(newDuration));
         assertEq(proxy.timelockDuration(), newDuration);
     }
 
