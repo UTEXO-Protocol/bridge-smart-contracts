@@ -292,6 +292,11 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
     ) external onlyOwner {
         if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (multiplier == 0) revert MultiplierZero();
+        // NATIVE on FUNDS_OUT is unrepresentable: a release has no payer for a
+        // native fee
+        if (currency == CommissionCurrency.NATIVE && side == CommissionSide.FUNDS_OUT) {
+            revert NativeCommissionNotAllowedOnFundsOut();
+        }
 
         globalStablePercent = stablePercent;
         globalMultiplier = multiplier;
@@ -338,6 +343,11 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
         // Validate config
         if (config.stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (config.multiplier == 0) revert MultiplierZero();
+        // NATIVE on FUNDS_OUT is unrepresentable: a release has no payer for a
+        // native fee
+        if (config.currency == CommissionCurrency.NATIVE && config.side == CommissionSide.FUNDS_OUT) {
+            revert NativeCommissionNotAllowedOnFundsOut();
+        }
 
         // Build route key
         bytes32 key = buildRouteKey(sourceChainId, destChainId, token);
