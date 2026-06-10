@@ -43,6 +43,8 @@ interface IMultisigProxy {
     error InvalidThreshold();
     error ZeroCommissionRecipient();
     error TimelockTooLong();
+    error TimelockTooShort();
+    error InvalidMinTimelock();
     error Expired();
     error CallDataTooShort();
     error CallNotAllowed(address target, bytes4 selector);
@@ -439,5 +441,6 @@ interface IMultisigProxy {
     function DOMAIN_SEPARATOR() external view returns (bytes32);
     function proposalNonce() external view returns (uint256);
     function timelockDuration() external view returns (uint256);
+    function MIN_TIMELOCK() external view returns (uint256);
     function getProposal(bytes32 proposalId) external view returns (Proposal memory);
 }
