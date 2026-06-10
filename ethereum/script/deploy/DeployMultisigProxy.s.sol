@@ -34,6 +34,7 @@ contract DeployMultisigProxy is Script {
         uint256 fedThr             = vm.envUint('FEDERATION_THRESHOLD');
         address commission         = vm.envAddress('COMMISSION_RECIPIENT');
         uint256 timelock           = vm.envUint('TIMELOCK_DURATION');
+        uint256 minTimelock        = vm.envUint('MIN_TIMELOCK');
 
         vm.startBroadcast(pk);
         proxy = new MultisigProxy(
@@ -42,7 +43,8 @@ contract DeployMultisigProxy is Script {
             enc, encThr,
             fed, fedThr,
             commission,
-            timelock
+            timelock,
+            minTimelock
         );
         vm.stopBroadcast();
 

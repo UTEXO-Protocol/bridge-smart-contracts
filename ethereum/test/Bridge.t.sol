@@ -718,22 +718,14 @@ contract BridgeTest is Test {
     }
 
     // ========================================================================
-    // Commission — fundsOut NATIVE reverts
+    // Commission — NATIVE + FUNDS_OUT rejected at config time (R-W-04)
     // ========================================================================
 
-    function test_fundsOut_nativeCommission_reverts() public {
-        vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
-
-        _setFundsOutNativeRule(100);
-
-        vm.expectRevert(IBridge.NativeCommissionNotAllowedOnFundsOut.selector);
-        vm.prank(multisig);
-        bridge.fundsOut(
-            recipient, AMOUNT, BURN_ID,
-            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            _proof(), _settlement(_singleFundsInId())
-        );
+    /// @dev Post R-W-04 the invalid (NATIVE, FUNDS_OUT) shape is rejected by the
+    ///      CommissionManager setter, so it can never reach (and brick) fundsOut.
+    function test_setCommissionRule_nativeFundsOut_reverts() public {
+        vm.expectRevert(ICommissionManager.NativeCommissionNotAllowedOnFundsOut.selector);
+        _setFundsOutNativeRule(100); // setCommissionRule(... NATIVE, FUNDS_OUT ...)
     }
 
     // ========================================================================

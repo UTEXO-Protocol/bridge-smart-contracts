@@ -186,11 +186,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (consumedBurnIds[burnId]) revert BurnIdAlreadyConsumed(burnId);
         consumedBurnIds[burnId] = true;
 
-        // Quote commission. NATIVE on fundsOut is disallowed — the caller is
-        // the multisig, there is no user to fund a native payment.
+        // Quote commission. NATIVE on fundsOut is unrepresentable: the
+        // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
+        // so `nativeCommission` is always 0 on this path. The
+        // value is ignored here.
         (
             uint256 tokenCommission,
-            uint256 nativeCommission,
+            ,
             uint256 netAmount
         ) = commissionManager.calculateFundsOutCommission(
             sourceChainId,
@@ -198,7 +200,6 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             TOKEN,
             amount
         );
-        if (nativeCommission != 0) revert NativeCommissionNotAllowedOnFundsOut();
 
         // Delegate route-specific finality verification + settlement-state
         // mutation to the configured plugins. The registry runs the verifier

@@ -161,25 +161,28 @@ contract CommissionManagerTest is Test {
     }
 
     function test_setGlobalDefaults_updatesAndEmits() public {
+        // FUNDS_IN + NATIVE is a valid shape (the user funds the native fee on
+        // deposit). NATIVE + FUNDS_OUT is rejected by the setter (R-W-04) and is
+        // covered by a dedicated revert test.
         vm.expectEmit(true, true, true, true);
         emit GlobalDefaultsUpdated(
             200,
             100,
-            CommissionSide.FUNDS_OUT,
+            CommissionSide.FUNDS_IN,
             CommissionCurrency.NATIVE
         );
         vm.prank(owner);
         cm.setGlobalDefaults(
             200,
             100,
-            CommissionSide.FUNDS_OUT,
+            CommissionSide.FUNDS_IN,
             CommissionCurrency.NATIVE
         );
         (uint256 sp, uint8 m, CommissionSide side, CommissionCurrency cur) =
             cm.getGlobalDefaults();
         assertEq(sp, 200);
         assertEq(m, 100);
-        assertEq(uint8(side), uint8(CommissionSide.FUNDS_OUT));
+        assertEq(uint8(side), uint8(CommissionSide.FUNDS_IN));
         assertEq(uint8(cur), uint8(CommissionCurrency.NATIVE));
     }
 
@@ -234,6 +237,32 @@ contract CommissionManagerTest is Test {
             CommissionSide.FUNDS_IN,
             CommissionCurrency.TOKEN
         );
+    }
+
+    /// @dev UT-FIX-07: setGlobalDefaults rejects the NATIVE + FUNDS_OUT shape.
+    function test_setGlobalDefaults_revertsNativeFundsOut() public {
+        vm.prank(owner);
+        vm.expectRevert(ICommissionManager.NativeCommissionNotAllowedOnFundsOut.selector);
+        cm.setGlobalDefaults(
+            100,
+            100,
+            CommissionSide.FUNDS_OUT,
+            CommissionCurrency.NATIVE
+        );
+    }
+
+    /// @dev FUNDS_IN + NATIVE stays valid — the user funds the native fee on deposit.
+    function test_setGlobalDefaults_acceptsNativeFundsIn() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(
+            100,
+            100,
+            CommissionSide.FUNDS_IN,
+            CommissionCurrency.NATIVE
+        );
+        (, , CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
+        assertEq(uint8(side), uint8(CommissionSide.FUNDS_IN));
+        assertEq(uint8(cur),  uint8(CommissionCurrency.NATIVE));
     }
 
     // --- Commission calculations (globals) ---
@@ -477,6 +506,39 @@ contract CommissionManagerTest is Test {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.StablePercentTooHigh.selector);
         cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
+    }
+
+    /// @dev UT-FIX-07: setCommissionRule rejects the NATIVE + FUNDS_OUT shape.
+    function test_setCommissionRule_revertsNativeFundsOut() public {
+        address t = address(token);
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 100,
+            multiplier: 100,
+            side: CommissionSide.FUNDS_OUT,
+            currency: CommissionCurrency.NATIVE,
+            isSet: true
+        });
+        vm.prank(owner);
+        vm.expectRevert(ICommissionManager.NativeCommissionNotAllowedOnFundsOut.selector);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
+    }
+
+    /// @dev FUNDS_OUT + TOKEN stays valid (the fee is deducted from the release).
+    function test_setCommissionRule_acceptsFundsOutToken() public {
+        address t = address(token);
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 100,
+            multiplier: 100,
+            side: CommissionSide.FUNDS_OUT,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
+
+        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t);
+        assertEq(uint8(stored.side),     uint8(CommissionSide.FUNDS_OUT));
+        assertEq(uint8(stored.currency), uint8(CommissionCurrency.TOKEN));
     }
 
     // --- Bridge address ---

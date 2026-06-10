@@ -13,7 +13,6 @@ interface IBridge {
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();
     error BurnIdAlreadyConsumed(uint256 burnId);
-    error NativeCommissionNotAllowedOnFundsOut();
     error NativeValueMismatch();
 
     // =========================================================================
