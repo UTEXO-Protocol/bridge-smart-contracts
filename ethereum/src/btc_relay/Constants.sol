@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 //Interval (in blocks) of the difficulty adjustment
 uint256 constant DIFFICULTY_ADJUSTMENT_INTERVAL = 2016;

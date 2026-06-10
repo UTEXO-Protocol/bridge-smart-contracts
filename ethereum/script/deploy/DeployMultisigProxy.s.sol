@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 import { Script, console2 } from 'forge-std/Script.sol';
 import { MultisigProxy } from '../../src/MultisigProxy.sol';

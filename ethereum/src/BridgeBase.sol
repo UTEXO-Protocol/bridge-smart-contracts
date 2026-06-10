@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 import { Ownable } from '@openzeppelin/contracts/access/Ownable.sol';
 import { SafeERC20, IERC20 } from '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
@@ -23,6 +23,15 @@ abstract contract BridgeBase is Ownable, Pausable {
     /// @notice The only accepted ERC-20 token. Immutable after deploy.
     address public immutable TOKEN;
 
+    /// @notice Outflow (withdrawal) freeze flag, independent of the inflow
+    ///         freeze. Inflow reuses OpenZeppelin `Pausable._paused` (gated by
+    ///         `whenNotPaused` on `fundsIn`); this second flag gates `fundsOut`
+    ///         via `whenOutflowNotPaused`. Two independent flags are required so
+    ///         that a planned inflow-only pause (deposits frozen, withdrawals
+    ///         still open for liquidity migration) and an emergency pause (both
+    ///         frozen) can be expressed separately.
+    bool private _outflowPaused;
+
     // =========================================================================
     // Events
     // =========================================================================
@@ -37,6 +46,14 @@ abstract contract BridgeBase is Ownable, Pausable {
         uint256 amount
     );
 
+    /// @notice Emitted when the outflow (withdrawal) path is frozen.
+    /// @dev The inflow path reuses OpenZeppelin `Pausable`, which emits its own
+    ///      `Paused` / `Unpaused` events.
+    event OutflowPaused(address account);
+
+    /// @notice Emitted when the outflow (withdrawal) path is unfrozen.
+    event OutflowUnpaused(address account);
+
     // =========================================================================
     // Errors
     // =========================================================================
@@ -45,6 +62,22 @@ abstract contract BridgeBase is Ownable, Pausable {
     error InvalidRecipientAddress();
     error AmountExceedBridgePool();
     error RenounceOwnershipBlocked();
+
+    /// @notice Thrown by `whenOutflowNotPaused` when the outflow path is frozen.
+    error OutflowEnforcedPause();
+
+    // =========================================================================
+    // Modifiers
+    // =========================================================================
+
+    /// @dev Reverts when the outflow path is frozen. Mirrors OpenZeppelin's
+    ///      `whenNotPaused` (which gates inflow) but for the independent
+    ///      `_outflowPaused` flag, so `fundsOut` can be frozen without freezing
+    ///      `fundsIn` and vice versa.
+    modifier whenOutflowNotPaused() {
+        if (_outflowPaused) revert OutflowEnforcedPause();
+        _;
+    }
 
     // =========================================================================
     // Constructor
@@ -59,11 +92,41 @@ abstract contract BridgeBase is Ownable, Pausable {
     // Owner-only
     // =========================================================================
 
-    /// @notice Pause all user-facing operations.
-    function pause() external onlyOwner { _pause(); }
+    /// @notice Freeze the inflow (deposit) path only; withdrawals stay open.
+    /// @dev Intended for planned operations such as a bridge upgrade or
+    ///      liquidity migration. On the production `Bridge` this is reached
+    ///      through the timelocked `MultisigProxy` propose -> execute path
+    ///      (`PauseInflow` operation), giving the federation an observation
+    ///      window before it takes effect.
+    function pauseInflow() external onlyOwner { _pause(); }
 
-    /// @notice Resume all user-facing operations.
-    function unpause() external onlyOwner { _unpause(); }
+    /// @notice Resume the inflow (deposit) path.
+    function unpauseInflow() external onlyOwner { _unpause(); }
+
+    /// @notice Emergency freeze of BOTH inflow and outflow, set atomically.
+    /// @dev No-timelock control for incident response. On the production
+    ///      `Bridge` it is reached through the federation-signed
+    ///      `MultisigProxy.emergencyPause` (multisig only, no propose step).
+    ///      Each flag is set idempotently, so the call does not revert if one
+    ///      side is already frozen (e.g. inflow already paused via the planned
+    ///      path). Freezing `fundsOut` also freezes the enclave/TEE release
+    ///      path, which routes through `fundsOut`.
+    function emergencyPauseAll() external onlyOwner {
+        if (!paused()) _pause(); // inflow (OpenZeppelin flag), guarded against double-pause
+        if (!_outflowPaused) {
+            _outflowPaused = true;
+            emit OutflowPaused(_msgSender());
+        }
+    }
+
+    /// @notice Lift the emergency freeze on BOTH inflow and outflow. Idempotent.
+    function emergencyUnpauseAll() external onlyOwner {
+        if (paused()) _unpause();
+        if (_outflowPaused) {
+            _outflowPaused = false;
+            emit OutflowUnpaused(_msgSender());
+        }
+    }
 
     /// @notice Permanently blocks renouncing ownership.
     function renounceOwnership() public view virtual override onlyOwner {
@@ -77,6 +140,12 @@ abstract contract BridgeBase is Ownable, Pausable {
     /// @notice Returns the token balance held by the contract (bridgeable liquidity).
     function getContractBalance() external view returns (uint256) {
         return IERC20(TOKEN).balanceOf(address(this));
+    }
+
+    /// @notice Whether the outflow (withdrawal) path is currently frozen.
+    /// @dev The inflow freeze is exposed by OpenZeppelin's `paused()`.
+    function outflowPaused() external view returns (bool) {
+        return _outflowPaused;
     }
 
     /// @notice Returns the current chain ID.

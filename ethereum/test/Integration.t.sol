@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 import { Test } from 'forge-std/Test.sol';
 
@@ -91,7 +91,8 @@ contract IntegrationTest is Test {
     bytes32 constant COMMITMENT_HASH   = keccak256('integration-btc-block');
     uint256 constant BTC_CONFIRMATIONS = 6;
 
-    uint256 constant TIMELOCK = 1 hours;
+    uint256 constant TIMELOCK     = 1 hours;
+    uint256 constant MIN_TIMELOCK = 1 hours; // floor passed to the proxy constructor in tests
 
     /// @dev New 8-arg fundsOut selector:
     ///        fundsOut(
@@ -189,7 +190,8 @@ contract IntegrationTest is Test {
             enc, 2,
             fed, 2,
             commissionReceiver,
-            TIMELOCK
+            TIMELOCK,
+            MIN_TIMELOCK
         );
 
         cm.transferOwnership(address(proxy));

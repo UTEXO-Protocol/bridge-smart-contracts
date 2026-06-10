@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 import { IERC20 }            from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import { SafeERC20 }         from '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
@@ -174,7 +174,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         string  calldata sourceAddress,
         bytes   calldata proof,
         bytes   calldata settlementData
-    ) external override onlyOwner nonReentrant {
+    ) external override onlyOwner nonReentrant whenOutflowNotPaused {
         if (recipient          == address(0))                revert InvalidRecipientAddress();
         if (sourceChainId      == 0)                         revert InvalidSourceChainId();
         if (destinationChainId == 0)                         revert InvalidDestinationChainId();

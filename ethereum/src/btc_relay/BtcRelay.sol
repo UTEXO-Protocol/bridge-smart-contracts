@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 import {ForkImpl, Fork} from "./state/Fork.sol";
 import {StoredBlockHeaderImpl, StoredBlockHeader, StoredBlockHeaderByteLength} from "./structs/StoredBlockHeader.sol";
