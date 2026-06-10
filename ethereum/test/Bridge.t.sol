@@ -404,7 +404,7 @@ contract BridgeTest is Test {
 
     function test_fundsIn_revertsWhenPaused() public {
         vm.prank(multisig);
-        bridge.pause();
+        bridge.pauseInflow();
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
@@ -762,16 +762,16 @@ contract BridgeTest is Test {
     function test_pause_onlyOwner() public {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
-        bridge.pause();
+        bridge.pauseInflow();
     }
 
     function test_unpause_onlyOwner() public {
         vm.prank(multisig);
-        bridge.pause();
+        bridge.pauseInflow();
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
-        bridge.unpause();
+        bridge.unpauseInflow();
     }
 
     function test_renounceOwnership_alwaysReverts() public {

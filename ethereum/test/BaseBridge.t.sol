@@ -95,7 +95,7 @@ contract BaseBridgeTest is Test {
 
     function test_fundsIn_revertsWhenPaused() public {
         vm.prank(owner);
-        bridge.pause();
+        bridge.pauseInflow();
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
@@ -154,23 +154,23 @@ contract BaseBridgeTest is Test {
     function test_pause_onlyOwner() public {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
-        bridge.pause();
+        bridge.pauseInflow();
     }
 
     function test_unpause_onlyOwner() public {
         vm.prank(owner);
-        bridge.pause();
+        bridge.pauseInflow();
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
-        bridge.unpause();
+        bridge.unpauseInflow();
     }
 
     function test_unpause_ownerCanUnpause() public {
         vm.prank(owner);
-        bridge.pause();
+        bridge.pauseInflow();
         vm.prank(owner);
-        bridge.unpause();
+        bridge.unpauseInflow();
 
         // fundsIn works again
         vm.prank(user);
@@ -182,6 +182,118 @@ contract BaseBridgeTest is Test {
         vm.expectRevert(BridgeBase.RenounceOwnershipBlocked.selector);
         vm.prank(owner);
         bridge.renounceOwnership();
+    }
+
+    // ========================================================================
+    // R-W-05 — two-tier pause (inflow vs outflow / emergency)
+    // ========================================================================
+
+    /// @dev UT-FIX-08: with outflow frozen, fundsOut reverts. The
+    ///      whenOutflowNotPaused modifier runs before the body, so a dummy
+    ///      release is enough to exercise the gate.
+    function test_fundsOut_revertsWhenOutflowPaused() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, OPERATION_ID); // seed the pool
+
+        vm.prank(owner);
+        bridge.emergencyPauseAll();
+
+        vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
+        vm.prank(owner);
+        bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+    }
+
+    /// @dev The planned inflow-only pause blocks deposits but leaves
+    ///      withdrawals open — the core two-tier distinction (liquidity can be
+    ///      migrated out while new deposits are frozen).
+    function test_fundsOut_worksWhenOnlyInflowPaused() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, OPERATION_ID); // seed before freezing inflow
+
+        vm.prank(owner);
+        bridge.pauseInflow();
+
+        // Deposits are frozen...
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, OPERATION_ID);
+
+        // ...but withdrawals still work.
+        vm.prank(owner);
+        bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+        assertEq(token.balanceOf(recipient), AMOUNT);
+    }
+
+    /// @dev Emergency pause freezes BOTH paths.
+    function test_emergencyPauseAll_freezesBothPaths() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, OPERATION_ID); // seed the pool
+
+        vm.prank(owner);
+        bridge.emergencyPauseAll();
+
+        assertTrue(bridge.paused(),        'inflow frozen');
+        assertTrue(bridge.outflowPaused(), 'outflow frozen');
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, OPERATION_ID);
+
+        vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
+        vm.prank(owner);
+        bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+    }
+
+    /// @dev Emergency unpause lifts BOTH freezes.
+    function test_emergencyUnpauseAll_liftsBoth() public {
+        vm.startPrank(owner);
+        bridge.emergencyPauseAll();
+        bridge.emergencyUnpauseAll();
+        vm.stopPrank();
+
+        assertFalse(bridge.paused(),        'inflow resumed');
+        assertFalse(bridge.outflowPaused(), 'outflow resumed');
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, OPERATION_ID);
+        assertEq(token.balanceOf(address(bridge)), AMOUNT);
+    }
+
+    /// @dev emergencyPauseAll must be idempotent per flag: it must not revert
+    ///      if inflow is already frozen via the planned path.
+    function test_emergencyPauseAll_idempotentWhenInflowAlreadyPaused() public {
+        vm.startPrank(owner);
+        bridge.pauseInflow();      // inflow already frozen
+        bridge.emergencyPauseAll(); // must not revert on the already-set inflow flag
+        vm.stopPrank();
+
+        assertTrue(bridge.paused(),        'inflow still frozen');
+        assertTrue(bridge.outflowPaused(), 'outflow now frozen');
+    }
+
+    function test_pauseInflow_onlyOwner() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        vm.prank(user);
+        bridge.pauseInflow();
+    }
+
+    function test_emergencyPauseAll_onlyOwner() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        vm.prank(user);
+        bridge.emergencyPauseAll();
+    }
+
+    function test_emergencyUnpauseAll_onlyOwner() public {
+        vm.prank(owner);
+        bridge.emergencyPauseAll();
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        vm.prank(user);
+        bridge.emergencyUnpauseAll();
+    }
+
+    function test_outflowPaused_defaultsFalse() public view {
+        assertFalse(bridge.outflowPaused());
     }
 
     // ========================================================================

@@ -48,6 +48,13 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Minimum delay (seconds) between proposal creation and execution.
     uint256 public timelockDuration;
 
+    /// @notice Lower bound for `timelockDuration`, fixed at deploy time.
+    /// @dev Immutable so the governance observation/veto window can never be
+    ///      reduced below this floor — not by a `SetTimelockDuration` proposal
+    ///      and not by any later action. Set in the constructor and validated to
+    ///      be in (0, MAX_PROPOSAL_LIFETIME).
+    uint256 public immutable MIN_TIMELOCK;
+
     // =========================================================================
     // Constants
     // =========================================================================
@@ -143,6 +150,14 @@ contract MultisigProxy is IMultisigProxy {
         'EmergencyUnpause(uint256 nonce,uint256 deadline)'
     );
 
+    // Federation propose — planned inflow-only pause (timelocked)
+    bytes32 private constant _PROPOSE_PAUSE_INFLOW_TYPEHASH = keccak256(
+        'ProposePauseInflow(uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _PROPOSE_UNPAUSE_INFLOW_TYPEHASH = keccak256(
+        'ProposeUnpauseInflow(uint256 nonce,uint256 deadline)'
+    );
+
     // =========================================================================
     // Constructor
     // =========================================================================
@@ -155,7 +170,8 @@ contract MultisigProxy is IMultisigProxy {
         address[] memory federationSigners_,
         uint256 federationThreshold_,
         address commissionRecipient_,
-        uint256 timelockDuration_
+        uint256 timelockDuration_,
+        uint256 minTimelock_
     ) {
         if (bridge_ == address(0)) revert ZeroBridge();
         if (commissionManager_ == address(0)) revert ZeroCommissionManager();
@@ -164,6 +180,8 @@ contract MultisigProxy is IMultisigProxy {
         if (federationSigners_.length == 0) revert NoSigners();
         if (federationThreshold_ == 0 || federationThreshold_ > federationSigners_.length) revert InvalidThreshold();
         if (commissionRecipient_ == address(0)) revert ZeroCommissionRecipient();
+        if (minTimelock_ == 0 || minTimelock_ >= MAX_PROPOSAL_LIFETIME) revert InvalidMinTimelock();
+        if (timelockDuration_ < minTimelock_) revert TimelockTooShort();
         if (timelockDuration_ >= MAX_PROPOSAL_LIFETIME) revert TimelockTooLong();
 
         _validateSigners(enclaveSigners_);
@@ -177,6 +195,7 @@ contract MultisigProxy is IMultisigProxy {
         federationThreshold = federationThreshold_;
         commissionRecipient = commissionRecipient_;
         timelockDuration = timelockDuration_;
+        MIN_TIMELOCK = minTimelock_;
 
         // Default TEE allowlist: Bridge.fundsOut. Additional (target, selector) pairs
         // (e.g. for the LayerZero adapter's outbound `sendOut`) are added later via
@@ -298,7 +317,10 @@ contract MultisigProxy is IMultisigProxy {
 
         proposalNonce++;
 
-        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('pause()'));
+        // Emergency freeze of BOTH inflow and outflow — no timelock, federation
+        // signatures only. Also halts the enclave/TEE release path (it routes
+        // through Bridge.fundsOut, now gated by whenOutflowNotPaused).
+        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('emergencyPauseAll()'));
         _propagateRevert(ok, ret);
 
         emit EmergencyPaused(nonce, fedBitmap);
@@ -321,7 +343,8 @@ contract MultisigProxy is IMultisigProxy {
 
         proposalNonce++;
 
-        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('unpause()'));
+        // Lift the emergency freeze on BOTH inflow and outflow.
+        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('emergencyUnpauseAll()'));
         _propagateRevert(ok, ret);
 
         emit EmergencyUnpaused(nonce, fedBitmap);
@@ -654,6 +677,48 @@ contract MultisigProxy is IMultisigProxy {
         );
     }
 
+    /// @inheritdoc IMultisigProxy
+    /// @dev Planned inflow-only pause: freezes deposits while leaving
+    ///      withdrawals open (e.g. to migrate liquidity during an upgrade).
+    ///      Runs through the timelocked propose -> execute path, so the
+    ///      federation has an observation window. The emergency, no-timelock
+    ///      freeze of BOTH paths is `emergencyPause` instead. Carries no payload.
+    function proposePauseInflow(
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_PAUSE_INFLOW_TYPEHASH, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.PauseInflow,
+            '',
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    /// @dev Resumes the inflow path, reversing `proposePauseInflow`. Timelocked.
+    function proposeUnpauseInflow(
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_UNPAUSE_INFLOW_TYPEHASH, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.UnpauseInflow,
+            '',
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
     // =========================================================================
     // Cancel
     // =========================================================================
@@ -827,6 +892,7 @@ contract MultisigProxy is IMultisigProxy {
 
         } else if (opType == OperationType.SetTimelockDuration) {
             uint256 newDuration = abi.decode(opData, (uint256));
+            if (newDuration < MIN_TIMELOCK) revert TimelockTooShort();
             if (newDuration >= MAX_PROPOSAL_LIFETIME) revert TimelockTooLong();
             timelockDuration = newDuration;
             emit TimelockDurationUpdated(newDuration);
@@ -904,6 +970,15 @@ contract MultisigProxy is IMultisigProxy {
             // `NotBridge` and the route plane goes dark.
             address newRegistry = abi.decode(opData, (address));
             IBridge(bridge).setRouteRegistry(newRegistry);
+
+        } else if (opType == OperationType.PauseInflow) {
+            // Planned inflow-only freeze (no payload). Withdrawals stay open.
+            (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('pauseInflow()'));
+            _propagateRevert(ok, ret);
+
+        } else if (opType == OperationType.UnpauseInflow) {
+            (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('unpauseInflow()'));
+            _propagateRevert(ok, ret);
 
         } else {
             revert UnknownOperationType();
