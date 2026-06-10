@@ -611,4 +611,50 @@ contract CommissionManagerTest is Test {
         vm.expectRevert(ICommissionManager.InsufficientBalance.selector);
         cm.withdrawNativeCommission(payable(recipient), 1 wei);
     }
+
+    // --- Formula regression coverage ---
+
+    function test_convertTokenFeeToNative_formulaAcrossTokenAndFeedDecimals() public {
+        uint256[3] memory tokenFees = [
+            uint256(100e6),
+            uint256(1e18),
+            uint256(25e6)
+        ];
+        uint256[3] memory tokenDecimals = [
+            uint256(6),
+            uint256(18),
+            uint256(6)
+        ];
+        uint8[3] memory feedDecimals = [
+            uint8(8),
+            uint8(8),
+            uint8(10)
+        ];
+        int256[3] memory prices = [
+            int256(2_000e8),
+            int256(2_000e8),
+            int256(2_500e10)
+        ];
+        uint256[3] memory expectedNativeFees = [
+            uint256(5e16), // 100 USD / 2000 USD per ETH = 0.05 ETH
+            uint256(5e14), // 1 USD / 2000 USD per ETH = 0.0005 ETH
+            uint256(1e16)  // 25 USD / 2500 USD per ETH = 0.01 ETH
+        ];
+
+        // Use hand-computed expected values so this test anchors the conversion
+        // formula instead of mirroring the implementation expression.
+        for (uint256 i = 0; i < tokenFees.length; i++) {
+            MockAggregatorV3 feed =
+                new MockAggregatorV3(feedDecimals[i], prices[i], block.timestamp);
+
+            vm.prank(owner);
+            cm.setEthUsdFeed(address(feed), HEARTBEAT);
+
+            assertEq(
+                cm.convertTokenFeeToNative(tokenFees[i], tokenDecimals[i]),
+                expectedNativeFees[i],
+                'native fee formula'
+            );
+        }
+    }
 }

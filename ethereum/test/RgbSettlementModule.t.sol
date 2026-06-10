@@ -245,4 +245,23 @@ contract RgbSettlementModuleTest is Test {
         vm.expectRevert(RgbSettlementModule.NotRouteRegistry.selector);
         module.beforeFundsOut(_fundsOutCtx(AMOUNT), _settlementData(_single(TX_ID_1)));
     }
+
+    function test_beforeFundsOut_duplicateIdsFullyConsumedReverts() public {
+        _record(TX_ID_1, AMOUNT);
+
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = TX_ID_1;
+        ids[1] = TX_ID_1;
+
+        // The first entry fully consumes and deletes the record. The duplicate
+        // entry must not count the same record again.
+        vm.prank(routeRegistry);
+        vm.expectRevert(
+            abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, TX_ID_1)
+        );
+        // +1 forces a second loop iteration; exact AMOUNT would break before the duplicate is read.
+        module.beforeFundsOut(_fundsOutCtx(AMOUNT + 1), _settlementData(ids));
+
+        assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, 'record restored on revert');
+    }
 }
