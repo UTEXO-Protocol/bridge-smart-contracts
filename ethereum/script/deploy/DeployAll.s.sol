@@ -37,7 +37,7 @@ import { RgbSettlementModule } from '../../src/settlement/RgbSettlementModule.so
 ///   PRIVATE_KEY, USDT0_ADDRESS, BTC_RELAY_ADDRESS,
 ///   ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD,
 ///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD,
-///   COMMISSION_RECIPIENT, TIMELOCK_DURATION
+///   COMMISSION_RECIPIENT, TIMELOCK_DURATION, MIN_TIMELOCK
 ///
 /// Env (optional):
 ///   ETH_USD_FEED      — Chainlink ETH/USD aggregator (wired in before CM
@@ -71,6 +71,7 @@ contract DeployAll is Script {
         uint256 fedThr         = vm.envUint('FEDERATION_THRESHOLD');
         address commission     = vm.envAddress('COMMISSION_RECIPIENT');
         uint256 timelock       = vm.envUint('TIMELOCK_DURATION');
+        uint256 minTimelock    = vm.envUint('MIN_TIMELOCK');
         address ethUsdFeed     = vm.envOr('ETH_USD_FEED', address(0));
         uint256 ethUsdHb       = vm.envOr('ETH_USD_HEARTBEAT', uint256(0));
 
@@ -109,7 +110,8 @@ contract DeployAll is Script {
             enc, encThr,
             fed, fedThr,
             commission,
-            timelock
+            timelock,
+            minTimelock
         );
 
         // ---- 7. Wire optional ETH/USD feed before CM ownership transfer --
