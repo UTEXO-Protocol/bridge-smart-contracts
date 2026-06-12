@@ -54,6 +54,7 @@ interface IMultisigProxy {
     error ProposalExpired();
     error DataMismatch();
     error DeadlineTooFar();
+    error DeadlineBeforeTimelock();
     error ProposalExists();
     error IndexOutOfRange();
     error BitmapOutOfRange();

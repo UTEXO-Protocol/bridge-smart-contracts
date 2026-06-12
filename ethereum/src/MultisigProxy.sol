@@ -831,6 +831,7 @@ contract MultisigProxy is IMultisigProxy {
     ) private returns (bytes32 proposalId) {
         if (block.timestamp > deadline) revert Expired();
         if (deadline > block.timestamp + MAX_PROPOSAL_LIFETIME) revert DeadlineTooFar();
+        if (deadline < block.timestamp + timelockDuration) revert DeadlineBeforeTimelock();
         if (nonce != proposalNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(structHash);
