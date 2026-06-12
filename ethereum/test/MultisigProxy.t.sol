@@ -28,6 +28,7 @@ contract MockOutboundLZAdapter {
     address   public immutable oft;
     address   public immutable multisigProxy;
     uint256   public immutable nativeFee;
+    uint256   public sendOutCalls;
 
     event SendOut(bytes32 indexed guid, uint32 dstEid, bytes32 recipient, uint256 amountLD);
 
@@ -51,6 +52,7 @@ contract MockOutboundLZAdapter {
         require(recipient != bytes32(0), 'zero recipient');
         require(minAmountLD <= amount, 'min too high');
 
+        sendOutCalls++;
         token.transfer(oft, amount);
         (bool ok, ) = oft.call{ value: msg.value }('');
         require(ok, 'oft fee');
@@ -1569,5 +1571,229 @@ contract MultisigProxyTest is Test {
             AMOUNT,
             'gross batch payout conserved'
         );
+    }
+
+    // Batch rollback coverage for Bridge fundsOut followed by an outbound adapter send.
+    // Real UtexoLZAdapter insufficient-fee rollback belongs in a cross-repo integration test.
+    function test_executeBatch_sendOutInsufficientNativeFee_rollsBackBridgeState() public {
+        uint256 percent = 500; // 5%
+        vm.prank(address(proxy));
+        cm.setCommissionRule(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            CommissionConfig({
+                stablePercent: percent,
+                multiplier: 100,
+                side: CommissionSide.FUNDS_OUT,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
+        assertGt(tokenCommission, 0, 'token fee quoted');
+        assertEq(nativeCommission, 0, 'native fee is zero');
+
+        address mockOft = makeAddr('mockOft');
+        MockOutboundLZAdapter adapter =
+            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
+        bytes4 sendOutSelector = MockOutboundLZAdapter.sendOut.selector;
+        _allowTeeCall(address(adapter), sendOutSelector);
+
+        bytes memory bridgeCallData = _fundsOutCalldata(address(adapter), AMOUNT, BURN_ID);
+        bytes memory adapterCallData = abi.encodeWithSelector(
+            sendOutSelector,
+            DST_EID,
+            LZ_RECIPIENT,
+            netAmount,
+            netAmount,
+            hex'0003010011010000000000000000000000000000ea60'
+        );
+
+        address[] memory targets = new address[](2);
+        bytes[] memory callDatas = new bytes[](2);
+        uint256[] memory values = new uint256[](2);
+        targets[0] = address(bridge);
+        targets[1] = address(adapter);
+        callDatas[0] = bridgeCallData;
+        callDatas[1] = adapterCallData;
+        values[0] = 0;
+        values[1] = LZ_NATIVE_FEE - 1;
+
+        uint256 nonce = proxy.batchNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
+            domainSep, targets, callDatas, values, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        // Snapshot all state touched by the first Bridge leg and the failed adapter leg.
+        uint256 bridgeBefore     = token.balanceOf(address(bridge));
+        uint256 adapterBefore    = token.balanceOf(address(adapter));
+        uint256 oftBefore        = token.balanceOf(mockOft);
+        uint256 cmBefore         = token.balanceOf(address(cm));
+        uint256 cmPoolBefore     = cm.tokenCommissionPool(address(token));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 recordBefore     = rgbModule.fundsInRecords(TX_ID);
+        uint256 proxyEthBefore   = address(proxy).balance;
+        uint256 adapterEthBefore = address(adapter).balance;
+        uint256 oftEthBefore     = mockOft.balance;
+
+        assertEq(bridgeBefore,     AMOUNT * 5, 'pre bridge pool');
+        assertEq(adapterBefore,    0,          'pre adapter token');
+        assertEq(oftBefore,        0,          'pre oft token');
+        assertEq(cmBefore,         0,          'pre cm token');
+        assertEq(cmPoolBefore,     0,          'pre cm pool');
+        assertEq(nativePoolBefore, 0,          'pre native pool');
+        assertEq(recordBefore,     AMOUNT * 5, 'pre record');
+        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+
+        // msg.value matches the batch values sum, so the revert happens in sendOut,
+        // after Bridge.fundsOut already ran inside the same batch transaction.
+        vm.deal(address(this), LZ_NATIVE_FEE - 1);
+        vm.expectRevert(bytes('native fee'));
+        proxy.executeBatch{ value: LZ_NATIVE_FEE - 1 }(
+            targets,
+            callDatas,
+            values,
+            nonce,
+            deadline,
+            bitmap,
+            sigs
+        );
+
+        assertEq(proxy.batchNonce(),              nonce,            'batch nonce unchanged');
+        assertFalse(bridge.consumedBurnIds(BURN_ID),                'burn id unchanged');
+        assertEq(token.balanceOf(address(bridge)), bridgeBefore,    'bridge token unchanged');
+        assertEq(token.balanceOf(address(adapter)), adapterBefore,  'adapter token unchanged');
+        assertEq(token.balanceOf(mockOft),          oftBefore,      'oft token unchanged');
+        assertEq(token.balanceOf(address(cm)),      cmBefore,       'cm token unchanged');
+        assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore, 'cm pool unchanged');
+        assertEq(cm.nativeCommissionPool(),         nativePoolBefore,  'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore,      'record unchanged');
+        assertEq(address(proxy).balance,            proxyEthBefore,    'proxy native unchanged');
+        assertEq(address(adapter).balance,          adapterEthBefore,  'adapter native unchanged');
+        assertEq(mockOft.balance,                   oftEthBefore,      'oft native unchanged');
+    }
+
+    // Batch rollback coverage when the Bridge fundsOut leg fails before adapter send.
+    // Real UtexoLZAdapter call-skipping coverage belongs in a cross-repo integration test.
+    function test_executeBatch_bridgeVerifierFailure_doesNotCallAdapter() public {
+        uint256 percent = 500; // 5%
+        vm.prank(address(proxy));
+        cm.setCommissionRule(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            CommissionConfig({
+                stablePercent: percent,
+                multiplier: 100,
+                side: CommissionSide.FUNDS_OUT,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
+        assertGt(tokenCommission, 0, 'token fee quoted');
+        assertEq(nativeCommission, 0, 'native fee is zero');
+
+        address mockOft = makeAddr('mockOft');
+        MockOutboundLZAdapter adapter =
+            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
+        bytes4 sendOutSelector = MockOutboundLZAdapter.sendOut.selector;
+        _allowTeeCall(address(adapter), sendOutSelector);
+
+        bytes memory badProof = abi.encode(uint256(999_999), keccak256('unknown-block'));
+        bytes memory settlementData = abi.encode(_fundsInIds());
+        bytes memory bridgeCallData = abi.encodeWithSelector(
+            FUNDS_OUT_SELECTOR,
+            address(adapter),
+            AMOUNT,
+            BURN_ID,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            badProof,
+            settlementData
+        );
+        bytes memory adapterCallData = abi.encodeWithSelector(
+            sendOutSelector,
+            DST_EID,
+            LZ_RECIPIENT,
+            netAmount,
+            netAmount,
+            hex'0003010011010000000000000000000000000000ea60'
+        );
+
+        address[] memory targets = new address[](2);
+        bytes[] memory callDatas = new bytes[](2);
+        uint256[] memory values = new uint256[](2);
+        targets[0] = address(bridge);
+        targets[1] = address(adapter);
+        callDatas[0] = bridgeCallData;
+        callDatas[1] = adapterCallData;
+        values[0] = 0;
+        values[1] = LZ_NATIVE_FEE;
+
+        uint256 nonce = proxy.batchNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
+            domainSep, targets, callDatas, values, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        // The adapter call is valid and funded; only the Bridge verifier failure should stop dispatch.
+        uint256 bridgeBefore     = token.balanceOf(address(bridge));
+        uint256 adapterBefore    = token.balanceOf(address(adapter));
+        uint256 oftBefore        = token.balanceOf(mockOft);
+        uint256 cmBefore         = token.balanceOf(address(cm));
+        uint256 cmPoolBefore     = cm.tokenCommissionPool(address(token));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 recordBefore     = rgbModule.fundsInRecords(TX_ID);
+        uint256 proxyEthBefore   = address(proxy).balance;
+        uint256 adapterEthBefore = address(adapter).balance;
+        uint256 oftEthBefore     = mockOft.balance;
+
+        assertEq(bridgeBefore,     AMOUNT * 5, 'pre bridge pool');
+        assertEq(adapterBefore,    0,          'pre adapter token');
+        assertEq(oftBefore,        0,          'pre oft token');
+        assertEq(cmBefore,         0,          'pre cm token');
+        assertEq(cmPoolBefore,     0,          'pre cm pool');
+        assertEq(nativePoolBefore, 0,          'pre native pool');
+        assertEq(recordBefore,     AMOUNT * 5, 'pre record');
+        assertEq(adapter.sendOutCalls(), 0,    'pre adapter calls');
+        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+
+        vm.deal(address(this), LZ_NATIVE_FEE);
+        vm.expectRevert(bytes('verify: block commitment'));
+        proxy.executeBatch{ value: LZ_NATIVE_FEE }(
+            targets,
+            callDatas,
+            values,
+            nonce,
+            deadline,
+            bitmap,
+            sigs
+        );
+
+        assertEq(proxy.batchNonce(),              nonce,            'batch nonce unchanged');
+        assertFalse(bridge.consumedBurnIds(BURN_ID),                'burn id unchanged');
+        assertEq(adapter.sendOutCalls(),           0,               'adapter not called');
+        assertEq(token.balanceOf(address(bridge)), bridgeBefore,    'bridge token unchanged');
+        assertEq(token.balanceOf(address(adapter)), adapterBefore,  'adapter token unchanged');
+        assertEq(token.balanceOf(mockOft),          oftBefore,      'oft token unchanged');
+        assertEq(token.balanceOf(address(cm)),      cmBefore,       'cm token unchanged');
+        assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore, 'cm pool unchanged');
+        assertEq(cm.nativeCommissionPool(),         nativePoolBefore,  'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore,      'record unchanged');
+        assertEq(address(proxy).balance,            proxyEthBefore,    'proxy native unchanged');
+        assertEq(address(adapter).balance,          adapterEthBefore,  'adapter native unchanged');
+        assertEq(mockOft.balance,                   oftEthBefore,      'oft native unchanged');
     }
 }
