@@ -848,6 +848,55 @@ contract MultisigProxyTest is Test {
         proxy.proposeUpdateBridge(makeAddr('nb'), nonce, deadline, bitmap, sigs);
     }
 
+    function test_proposeUpdateBridge_revertsOnDeadlineBeforeTimelock() public {
+        uint256 nonce    = proxy.proposalNonce();
+        // One second short of the timelock window → dead on arrival.
+        uint256 deadline = block.timestamp + proxy.timelockDuration() - 1;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateBridge(domainSep, makeAddr('nb'), nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.DeadlineBeforeTimelock.selector);
+        proxy.proposeUpdateBridge(makeAddr('nb'), nonce, deadline, bitmap, sigs);
+    }
+
+    function test_proposeUpdateBridge_acceptsDeadlineAtTimelockBoundary() public {
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + proxy.timelockDuration(); // exact boundary, `==` allowed
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateBridge(domainSep, makeAddr('nb'), nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 proposalId = proxy.proposeUpdateBridge(makeAddr('nb'), nonce, deadline, bitmap, sigs);
+        assertEq(
+            uint8(proxy.getProposal(proposalId).status),
+            uint8(IMultisigProxy.ProposalStatus.Pending),
+            'proposal at the exact boundary is created'
+        );
+    }
+
+    function test_proposeUpdateBridge_executableAtTimelockBoundary() public {
+        address newBridge = makeAddr('boundaryBridge');
+        uint256 nonce     = proxy.proposalNonce();
+        uint256 timelock  = proxy.timelockDuration();
+        uint256 deadline  = block.timestamp + timelock; // deadline == proposedAt + timelock
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 proposalId = proxy.proposeUpdateBridge(newBridge, nonce, deadline, bitmap, sigs);
+
+        // Execute at the single instant where block.timestamp == proposedAt +
+        // timelock == deadline: timelock has just elapsed and the deadline has
+        // not yet passed (both checks use strict comparisons).
+        vm.warp(block.timestamp + timelock);
+        proxy.executeProposal(proposalId, abi.encode(newBridge));
+        assertEq(proxy.bridge(), newBridge, 'boundary proposal executes at the exact instant');
+    }
+
     // ========================================================================
     // Propose + Execute — UpdateEnclaveSigners
     // ========================================================================
