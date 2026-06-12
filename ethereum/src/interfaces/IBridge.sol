@@ -9,6 +9,22 @@ interface IBridge {
     error InvalidDestinationAddress();
     error InvalidDestinationChainId();
     error InvalidSourceChainId();
+    /// @notice `fundsOut` was called with `amount == 0`. A zero-amount release
+    ///         is a no-op that only emits a redundant event, so it is rejected.
+    ///         (The inbound path is guarded by `AmountBelowMinimum` instead,
+    ///         since its non-zero `minFundsInAmount` already excludes zero.)
+    error ZeroAmount();
+    /// @notice A `fundsIn` deposit was below the configured `minFundsInAmount`.
+    ///         The minimum is always non-zero, so this also rejects zero-amount
+    ///         deposits, and it keeps dust — small enough that its commission
+    ///         rounds to zero and only adds event/processing noise — off the
+    ///         inbound path. Does not apply to `fundsOut` (authorized releases
+    ///         of already-recorded amounts only check `amount > 0`).
+    error AmountBelowMinimum(uint256 amount, uint256 minimum);
+    /// @notice `minFundsInAmount` was set to zero at construction or via
+    ///         `setMinFundsInAmount`. The floor must be non-zero so that it
+    ///         meaningfully rejects zero-amount and dust deposits.
+    error InvalidMinFundsInAmount();
     error InvalidRouteRegistryAddress();
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();
@@ -29,6 +45,11 @@ interface IBridge {
     ///                    before the first rotation).
     /// @param newRegistry New registry (non-zero by `setRouteRegistry` guard).
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+
+    /// @notice Emitted on every successful `setMinFundsInAmount`.
+    /// @param oldMinimum Previous minimum (constructor value before first update).
+    /// @param newMinimum New minimum (in token smallest units; always non-zero).
+    event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
 
     /// @param sender             Address that deposited the tokens (the EOA on the
     ///                           public overload, or the LZ adapter on the
@@ -147,6 +168,16 @@ interface IBridge {
     /// @notice Updates the `RouteRegistry` reference Bridge dispatches
     ///         `onFundsIn` / `beforeFundsOut` through. Owner-only.
     function setRouteRegistry(address newRouteRegistry) external;
+
+    /// @notice Updates the minimum accepted `fundsIn` deposit (token smallest
+    ///         units). Owner-only (MultisigProxy via the federation
+    ///         propose -> timelock -> execute flow). Must be non-zero; reverts
+    ///         `InvalidMinFundsInAmount` otherwise.
+    function setMinFundsInAmount(uint256 newMinimum) external;
+
+    /// @notice Current minimum accepted `fundsIn` deposit in token smallest
+    ///         units. Always non-zero.
+    function minFundsInAmount() external view returns (uint256);
 
     /// @notice Current trusted adapter; `address(0)` means the adapter
     ///         overload is closed.

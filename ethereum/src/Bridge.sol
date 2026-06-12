@@ -56,6 +56,12 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///         `fundsOut`.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
+    /// @inheritdoc IBridge
+    /// @dev Always non-zero (validated at the constructor and setter). Mutable
+    ///      so federation can retune the dust floor via the `MultisigProxy`
+    ///      propose -> timelock -> execute flow without redeploying the Bridge.
+    uint256 public override minFundsInAmount;
+
     // =========================================================================
     // Modifiers
     // =========================================================================
@@ -80,18 +86,24 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///                           `address(0)` if it has not been deployed yet
     ///                           (federation can wire it up later via
     ///                           `setLZAdapter`).
+    /// @param minFundsInAmount_  Initial minimum accepted `fundsIn` deposit in
+    ///                           token smallest units. Must be non-zero; it can
+    ///                           be retuned later via `setMinFundsInAmount`.
     constructor(
         address          usdt0_,
         address          routeRegistry_,
         address payable  commissionManager_,
-        address          lzAdapter_
+        address          lzAdapter_,
+        uint256          minFundsInAmount_
     ) BridgeBase(usdt0_) {
         if (routeRegistry_     == address(0)) revert InvalidRouteRegistryAddress();
         if (commissionManager_ == address(0)) revert InvalidCommissionManagerAddress();
+        if (minFundsInAmount_  == 0)          revert InvalidMinFundsInAmount();
 
         routeRegistry     = routeRegistry_;
         commissionManager = ICommissionManager(commissionManager_);
         lzAdapter         = lzAdapter_;
+        minFundsInAmount  = minFundsInAmount_;
     }
 
     // =========================================================================
@@ -115,6 +127,18 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         address old = routeRegistry;
         routeRegistry = newRouteRegistry;
         emit RouteRegistryUpdated(old, newRouteRegistry);
+    }
+
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`; federation gates this on its M-of-N
+    ///      timelock flow (generic `proposeAdminExecute` -> execute). Must be
+    ///      non-zero: a non-zero floor is what rejects zero-amount and dust
+    ///      deposits on the inbound path.
+    function setMinFundsInAmount(uint256 newMinimum) external override onlyOwner {
+        if (newMinimum == 0) revert InvalidMinFundsInAmount();
+        uint256 old = minFundsInAmount;
+        minFundsInAmount = newMinimum;
+        emit MinFundsInAmountUpdated(old, newMinimum);
     }
 
     // =========================================================================
@@ -175,6 +199,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         bytes   calldata proof,
         bytes   calldata settlementData
     ) external override onlyOwner nonReentrant whenOutflowNotPaused {
+        if (amount             == 0)                         revert ZeroAmount();
         if (recipient          == address(0))                revert InvalidRecipientAddress();
         if (sourceChainId      == 0)                         revert InvalidSourceChainId();
         if (destinationChainId == 0)                         revert InvalidDestinationChainId();
@@ -263,6 +288,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256          operationId,
         bytes   calldata settlementData
     ) private {
+        if (amount < minFundsInAmount)             revert AmountBelowMinimum(amount, minFundsInAmount);
         if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
         if (sourceChainId      == 0)               revert InvalidSourceChainId();
         if (destinationChainId == 0)               revert InvalidDestinationChainId();
