@@ -377,6 +377,68 @@ contract MultisigProxyTest is Test {
         proxy.execute(callData, nonce, deadline, bitmap, sigs);
     }
 
+    // ========================================================================
+    // TEE deadline upper bound (R-I-01 / UT-FIX-23)
+    //
+    // execute / executeBatch reject a signed deadline further than
+    // MAX_TEE_DEADLINE into the future, so a leaked or pre-signed payload cannot
+    // stay executable indefinitely. The boundary (exactly now + MAX_TEE_DEADLINE)
+    // is still accepted — the guard is a strict `>`.
+    // ========================================================================
+
+    function test_execute_revertsOnDeadlineTooFar() public {
+        bytes memory callData = _fundsOutCalldata();
+        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        uint256 deadline = block.timestamp + proxy.MAX_TEE_DEADLINE() + 1;
+
+        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.DeadlineTooFar.selector);
+        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_execute_acceptsDeadlineAtMaxBoundary() public {
+        bytes memory callData = _fundsOutCalldata();
+        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        uint256 deadline = block.timestamp + proxy.MAX_TEE_DEADLINE(); // exact boundary, strict `>` lets it through
+
+        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+        assertEq(token.balanceOf(recipient), AMOUNT, 'executes at the exact deadline ceiling');
+    }
+
+    function test_executeBatch_revertsOnDeadlineTooFar() public {
+        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
+        uint256 nonce    = proxy.batchNonce();
+        uint256 deadline = block.timestamp + proxy.MAX_TEE_DEADLINE() + 1;
+
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(domainSep, targets, callDatas, values, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.DeadlineTooFar.selector);
+        proxy.executeBatch(targets, callDatas, values, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_executeBatch_acceptsDeadlineAtMaxBoundary() public {
+        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
+        uint256 nonce    = proxy.batchNonce();
+        uint256 deadline = block.timestamp + proxy.MAX_TEE_DEADLINE(); // exact boundary
+
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(domainSep, targets, callDatas, values, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        proxy.executeBatch(targets, callDatas, values, nonce, deadline, bitmap, sigs);
+        assertEq(token.balanceOf(recipient), AMOUNT,    'batch executes at the exact deadline ceiling');
+        assertEq(proxy.batchNonce(),         nonce + 1, 'batchNonce incremented');
+    }
+
     function test_execute_revertsOnWrongNonce() public {
         bytes memory callData = _fundsOutCalldata();
         uint256 nonce = 99;
