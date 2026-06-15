@@ -25,6 +25,11 @@ interface IBridge {
     ///         `setMinFundsInAmount`. The floor must be non-zero so that it
     ///         meaningfully rejects zero-amount and dust deposits.
     error InvalidMinFundsInAmount();
+    /// @notice A `destinationAddress` (fundsIn) or `sourceAddress` (fundsOut)
+    ///         exceeded `MAX_ADDRESS_LENGTH`. The cap keeps oversized strings out
+    ///         of the event log, where they only inflate log-storage and indexer
+    ///         cost (~25 gas per non-indexed byte).
+    error AddressTooLong(uint256 length, uint256 maxLength);
     error InvalidRouteRegistryAddress();
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();
