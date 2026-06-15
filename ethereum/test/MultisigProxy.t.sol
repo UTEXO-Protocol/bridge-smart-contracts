@@ -2088,4 +2088,130 @@ contract MultisigProxyTest is Test {
         assertEq(address(adapter).balance,          adapterEthBefore, 'adapter native unchanged');
         assertEq(mockOft.balance,                   oftEthBefore + LZ_NATIVE_FEE, 'oft native fee');
     }
+
+    // ========================================================================
+    // Current behavior reproduction
+    // ========================================================================
+
+    function test_enclaveSignedFundsOutCanDrainPool_currentBehavior() public {
+        address drainRecipient = makeAddr('drainRecipient');
+
+        // The TEE path checks signatures and allowlist membership, but it does
+        // not impose an on-chain amount cap on the signed Bridge fundsOut.
+        uint256 bridgeBefore    = token.balanceOf(address(bridge));
+        uint256 recipientBefore = token.balanceOf(drainRecipient);
+        uint256 recordBefore    = rgbModule.fundsInRecords(TX_ID);
+
+        assertEq(bridgeBefore,    AMOUNT * 5, 'pre bridge pool');
+        assertEq(recipientBefore, 0,          'pre recipient token');
+        assertEq(recordBefore,    bridgeBefore, 'pre record backs full pool');
+        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+
+        // Current behavior: if an on-chain amount cap or rate limit is added
+        // later, this test should be inverted to expect a revert.
+        bytes memory callData = _fundsOutCalldata(drainRecipient, bridgeBefore, BURN_ID);
+        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsOut(
+            drainRecipient,
+            bridgeBefore,
+            bridgeBefore,
+            0,
+            BURN_ID,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR
+        );
+        vm.expectEmit(true, false, false, true, address(proxy));
+        emit Executed(FUNDS_OUT_SELECTOR, nonce, bitmap);
+
+        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+
+        assertEq(proxy.getNonce(FUNDS_OUT_SELECTOR), nonce + 1, 'nonce incremented');
+        assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
+        assertEq(token.balanceOf(address(bridge)), 0, 'bridge pool drained');
+        assertEq(token.balanceOf(drainRecipient), recipientBefore + bridgeBefore, 'recipient got full pool');
+        assertEq(rgbModule.fundsInRecords(TX_ID), 0, 'record fully consumed');
+    }
+
+    function test_governanceCanRotateEnclaveToUnattestedEOA_currentBehavior() public {
+        address[] memory newSigners = new address[](3);
+        newSigners[0] = makeAddr('unattestedEnc1');
+        newSigners[1] = makeAddr('unattestedEnc2');
+        newSigners[2] = makeAddr('unattestedEnc3');
+        uint256 newThreshold = 2;
+
+        address[] memory before_ = proxy.getEnclaveSigners();
+        assertEq(before_.length, 3, 'pre enclave count');
+        assertEq(before_[0], encA1, 'pre signer 0');
+        assertEq(before_[1], encA2, 'pre signer 1');
+        assertEq(before_[2], encA3, 'pre signer 2');
+        assertEq(proxy.enclaveThreshold(), 2, 'pre enclave threshold');
+
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(
+            domainSep, newSigners, newThreshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeUpdateEnclaveSigners(newSigners, newThreshold, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        // Current behavior: the normal rotation path is already covered above;
+        // this case documents that only address shape and threshold are checked,
+        // with no on-chain enclave attestation evidence. If attestation is
+        // enforced later, this test should be inverted to expect a revert.
+        vm.expectEmit(false, false, false, true, address(proxy));
+        emit EnclaveSignersUpdated(newSigners, newThreshold);
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit ProposalExecuted(id, IMultisigProxy.OperationType.UpdateEnclaveSigners);
+
+        proxy.executeProposal(id, abi.encode(newSigners, newThreshold));
+
+        address[] memory after_ = proxy.getEnclaveSigners();
+        assertEq(after_.length, 3, 'post enclave count');
+        assertEq(after_[0], newSigners[0], 'post signer 0');
+        assertEq(after_[1], newSigners[1], 'post signer 1');
+        assertEq(after_[2], newSigners[2], 'post signer 2');
+        assertEq(proxy.enclaveThreshold(), newThreshold, 'post enclave threshold');
+    }
+
+    function test_teeAllowlistCanEnablePrivilegedSetter_currentBehavior() public {
+        address newAdapter = makeAddr('teeSetAdapter');
+        bytes4 selector = Bridge.setLZAdapter.selector;
+
+        assertFalse(proxy.teeAllowedCalls(address(bridge), selector), 'pre setter disallowed');
+        assertEq(bridge.lzAdapter(), address(0), 'pre bridge adapter');
+
+        _allowTeeCall(address(bridge), selector);
+        assertTrue(proxy.teeAllowedCalls(address(bridge), selector), 'setter allowed');
+
+        bytes memory callData = abi.encodeWithSelector(selector, newAdapter);
+        uint256 nonce = proxy.getNonce(selector);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, selector, callData, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        // Current behavior: federation governance can allowlist an owner-only
+        // Bridge setter, after which the TEE path can execute that setter
+        // directly through the proxy-owned Bridge.
+        vm.expectEmit(true, true, false, true, address(bridge));
+        emit LZAdapterUpdated(address(0), newAdapter);
+        vm.expectEmit(true, false, false, true, address(proxy));
+        emit Executed(selector, nonce, bitmap);
+
+        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+
+        assertEq(proxy.getNonce(selector), nonce + 1, 'setter nonce incremented');
+        assertEq(bridge.lzAdapter(), newAdapter, 'bridge adapter updated');
+    }
 }

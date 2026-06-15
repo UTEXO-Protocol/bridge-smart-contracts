@@ -1220,4 +1220,72 @@ contract BridgeTest is Test {
         assertEq(rgbModule.fundsInRecords(txId1),  record1Before, 'record 1 rolled back');
         assertEq(rgbModule.fundsInRecords(txId2),  record2Before, 'record 2 unchanged');
     }
+
+    // Current behavior reproduction
+    // ========================================================================
+
+    function test_fundsOutAcceptsProofNotBoundToReleaseContext_currentBehavior() public {
+        address alternateRecipient = makeAddr('alternateRecipient');
+        uint256 releaseAmount = 37e18;
+        uint256 alternateBurnId = BURN_ID + 777;
+        uint256 alternateSourceChainId = RGB_CHAIN_ID + 77;
+        uint256 alternateDestinationChainId = SOURCE_CHAIN_ID + 77;
+        string memory alternateSourceAddress = 'rgb:unbound/source/utxo999';
+
+        vm.prank(deployer);
+        routeRegistry.setRoute(
+            alternateSourceChainId,
+            alternateDestinationChainId,
+            true,
+            address(rgbVerifier),
+            address(rgbModule)
+        );
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
+        uint256 recipientBefore = usdt0.balanceOf(alternateRecipient);
+        uint256 recordBefore = rgbModule.fundsInRecords(TX_ID);
+
+        assertEq(bridgeBefore, AMOUNT, 'pre bridge pool');
+        assertEq(recipientBefore, 0, 'pre recipient token');
+        assertEq(recordBefore, AMOUNT, 'pre record');
+        assertFalse(bridge.consumedBurnIds(alternateBurnId), 'pre burn id');
+
+        // Current behavior: this is still an authorized fundsOut call, but the
+        // RGBVerifier checks only the encoded BTC block commitment proof. The
+        // record was created on the default route and is consumed on this
+        // alternate enabled route because the proof is not bound to release
+        // context on-chain. If that binding is enforced later, invert this to
+        // expect a revert.
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsOut(
+            alternateRecipient,
+            releaseAmount,
+            releaseAmount,
+            0,
+            alternateBurnId,
+            alternateSourceChainId,
+            alternateDestinationChainId,
+            alternateSourceAddress
+        );
+
+        vm.prank(multisig);
+        bridge.fundsOut(
+            alternateRecipient,
+            releaseAmount,
+            alternateBurnId,
+            alternateSourceChainId,
+            alternateDestinationChainId,
+            alternateSourceAddress,
+            _proof(),
+            _settlement(_singleFundsInId())
+        );
+
+        assertTrue(bridge.consumedBurnIds(alternateBurnId), 'burn id consumed');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore - releaseAmount, 'bridge debit');
+        assertEq(usdt0.balanceOf(alternateRecipient), recipientBefore + releaseAmount, 'recipient credited');
+        assertEq(rgbModule.fundsInRecords(TX_ID), recordBefore - releaseAmount, 'record residual');
+    }
 }
