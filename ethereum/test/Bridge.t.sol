@@ -154,6 +154,15 @@ contract BridgeTest is Test {
         return abi.encode(ids);
     }
 
+    /// @dev Build an ASCII string of exactly `len` bytes (for address-length caps).
+    function _str(uint256 len) internal pure returns (string memory) {
+        bytes memory b = new bytes(len);
+        for (uint256 i = 0; i < len; i++) {
+            b[i] = 'a';
+        }
+        return string(b);
+    }
+
     function _setFundsInTokenRule(uint256 percent) internal {
         vm.prank(deployer);
         cm.setCommissionRule(
@@ -433,6 +442,54 @@ contract BridgeTest is Test {
         vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(999), uint256(1000)));
         vm.prank(mockAdapter);
         bridge.fundsIn(999, SOURCE_CHAIN_ID, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+    }
+
+    function test_fundsIn_revertsOnDestinationAddressTooLong() public {
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+        string memory tooLong = _str(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AddressTooLong.selector, max + 1, max));
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, tooLong, TX_ID, '');
+    }
+
+    function test_fundsIn_acceptsDestinationAddressAtMaxLength() public {
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, _str(max), TX_ID, '');
+        assertEq(rgbModule.fundsInRecords(TX_ID), AMOUNT, 'deposit at the address-length cap is accepted');
+    }
+
+    function test_fundsOut_revertsOnSourceAddressTooLong() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+        string memory tooLong = _str(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AddressTooLong.selector, max + 1, max));
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, tooLong,
+            _proof(), _settlement(_singleFundsInId())
+        );
+    }
+
+    function test_fundsOut_acceptsSourceAddressAtMaxLength() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, _str(max),
+            _proof(), _settlement(_singleFundsInId())
+        );
+        assertEq(usdt0.balanceOf(recipient), AMOUNT, 'release with sourceAddress at the cap succeeds');
     }
 
     // ========================================================================
