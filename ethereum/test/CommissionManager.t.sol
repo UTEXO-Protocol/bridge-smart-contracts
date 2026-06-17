@@ -541,6 +541,120 @@ contract CommissionManagerTest is Test {
         assertEq(uint8(stored.currency), uint8(CommissionCurrency.TOKEN));
     }
 
+    // --- Fee-shape invariant (R-W-03 / UT-FIX-06) -----------------------------
+    //
+    // The stable-fee formula is `amount * stablePercent / multiplier / multiplier`,
+    // i.e. a fee fraction of `stablePercent / multiplier^2`. If `stablePercent`
+    // exceeds `multiplier^2` the quoted fee exceeds the bridged amount and the
+    // later `netAmount = amount - fee` underflows (Panic 0x11), bricking the
+    // route until the federation reconfigures. The setters must therefore reject
+    // any `(stablePercent, multiplier)` pair where `stablePercent > multiplier^2`.
+    function test_setGlobalDefaults_revertsWhenStablePercentExceedsMultiplierSquared() public {
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(9000), uint8(1))
+        );
+        cm.setGlobalDefaults(9000, 1, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev Boundary just above the invariant: `multiplier = 10` → `multiplier^2 = 100`,
+    ///      so `stablePercent = 101` is the smallest rejected value for that multiplier.
+    function test_setGlobalDefaults_revertsJustAboveFeeShapeBoundary() public {
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(101), uint8(10))
+        );
+        cm.setGlobalDefaults(101, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev Exact boundary `stablePercent == multiplier^2` is accepted: it is a 100%
+    ///      fee (`netAmount = 0`) which is degenerate but does not underflow, so the
+    ///      invariant rejects only the strictly-greater case.
+    function test_setGlobalDefaults_acceptsFeeShapeAtExactBoundary() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(100, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        (uint256 sp, uint8 m,,) = cm.getGlobalDefaults();
+        assertEq(sp, 100);
+        assertEq(m, 10);
+    }
+
+    /// @dev Regression for the uint8 widening in the fix. With the default
+    ///      `multiplier = 100`, `multiplier^2 = 10000`, so `stablePercent = 9000`
+    ///      is a valid 90% fee and must be accepted. The audit's literal snippet
+    ///      `multiplier * multiplier` evaluates in uint8 and overflows at
+    ///      `100 * 100 = 10000 > 255`, which would wrongly revert this valid config;
+    ///      the fix widens to uint256 before squaring.
+    function test_setGlobalDefaults_acceptsHighPercentWithDefaultMultiplier() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(9000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        (uint256 sp, uint8 m,,) = cm.getGlobalDefaults();
+        assertEq(sp, 9000);
+        assertEq(m, 100);
+    }
+
+    /// @dev Same invariant on the per-route setter: `(9000, 1)` must revert.
+    function test_setCommissionRule_revertsWhenStablePercentExceedsMultiplierSquared() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 9000,
+            multiplier: 1,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(9000), uint8(1))
+        );
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
+    }
+
+    /// @dev Exact boundary `stablePercent == multiplier^2` accepted on the route setter.
+    function test_setCommissionRule_acceptsFeeShapeAtExactBoundary() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 100,
+            multiplier: 10,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
+        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token));
+        assertEq(stored.stablePercent, 100);
+        assertEq(stored.multiplier, 10);
+    }
+
+    /// @dev uint8-widening regression on the per-route setter: `(9000, 100)` is valid.
+    function test_setCommissionRule_acceptsHighPercentWithDefaultMultiplier() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 9000,
+            multiplier: 100,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
+        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token));
+        assertEq(stored.stablePercent, 9000);
+        assertEq(stored.multiplier, 100);
+    }
+
+    /// @dev End state of the invariant: a config accepted at the exact boundary
+    ///      yields `fee == amount` and `netAmount == 0` without underflowing. This
+    ///      is what the setter guard guarantees for every storable rule — the
+    ///      `amount - fee` subtraction in the calculators can never go negative.
+    function test_calculateFundsInCommission_acceptedBoundaryDoesNotUnderflow() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(100, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        uint256 amount = 50_000;
+        (uint256 tok, uint256 nat, uint256 net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), amount);
+        assertEq(tok, amount); // 100% fee at the boundary
+        assertEq(nat, 0);
+        assertEq(net, 0);      // no underflow
+    }
+
     // --- Bridge address ---
 
     function test_setBridgeAddress_updates() public {
