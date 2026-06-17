@@ -63,6 +63,7 @@ interface IMultisigProxy {
     error InvalidSignature();
     error ZeroAddressSigner();
     error DuplicateSigner();
+    error SignerSetsOverlap(address signer);
     error CallFailed();
     error UnknownOperationType();
     error ZeroRecipient();

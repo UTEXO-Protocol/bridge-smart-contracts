@@ -193,6 +193,9 @@ contract MultisigProxy is IMultisigProxy {
 
         _validateSigners(enclaveSigners_);
         _validateSigners(federationSigners_);
+        // The enclave and federation are distinct trust domains; an address in
+        // both would count toward quorum in each, collapsing that separation.
+        _requireDisjoint(enclaveSigners_, federationSigners_);
 
         bridge = bridge_;
         commissionManager = commissionManager_;
@@ -871,6 +874,7 @@ contract MultisigProxy is IMultisigProxy {
             if (newSigners.length == 0) revert NoSigners();
             _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
+            _requireDisjoint(newSigners, _federationSigners);
             _enclaveSigners = newSigners;
             enclaveThreshold = newThreshold;
             emit EnclaveSignersUpdated(newSigners, newThreshold);
@@ -880,6 +884,7 @@ contract MultisigProxy is IMultisigProxy {
             if (newSigners.length == 0) revert NoSigners();
             _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
+            _requireDisjoint(newSigners, _enclaveSigners);
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
             emit FederationSignersUpdated(newSigners, newThreshold);
@@ -1090,6 +1095,18 @@ contract MultisigProxy is IMultisigProxy {
     function _requireValidThreshold(uint256 threshold, uint256 n) private pure {
         if (n < 2 || threshold < 2 || threshold > n || 2 * threshold <= n) {
             revert InvalidThreshold();
+        }
+    }
+
+    /// @dev Reverts if any address in `candidate` also appears in `counterpart`.
+    ///      Used to keep the enclave and federation signer sets disjoint so the
+    ///      two trust domains stay independent (R-W-14). O(n*m), bounded by the
+    ///      signer-set sizes.
+    function _requireDisjoint(address[] memory candidate, address[] memory counterpart) private pure {
+        for (uint256 i = 0; i < candidate.length; i++) {
+            for (uint256 j = 0; j < counterpart.length; j++) {
+                if (candidate[i] == counterpart[j]) revert SignerSetsOverlap(candidate[i]);
+            }
         }
     }
 
