@@ -161,7 +161,8 @@ contract IntegrationTest is Test {
             address(token),
             address(routeRegistry),
             payable(address(cm)),
-            address(0)
+            address(0),
+            1 // minFundsInAmount: smallest non-zero floor for tests
         );
 
         rgbVerifier = new RGBVerifier(address(btcRelay));

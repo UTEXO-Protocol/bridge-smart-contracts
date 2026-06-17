@@ -37,7 +37,8 @@ import { RgbSettlementModule } from '../../src/settlement/RgbSettlementModule.so
 ///   PRIVATE_KEY, USDT0_ADDRESS, BTC_RELAY_ADDRESS,
 ///   ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD,
 ///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD,
-///   COMMISSION_RECIPIENT, TIMELOCK_DURATION, MIN_TIMELOCK
+///   COMMISSION_RECIPIENT, TIMELOCK_DURATION, MIN_TIMELOCK,
+///   MIN_FUNDS_IN_AMOUNT
 ///
 /// Env (optional):
 ///   ETH_USD_FEED      — Chainlink ETH/USD aggregator (wired in before CM
@@ -74,6 +75,7 @@ contract DeployAll is Script {
         uint256 minTimelock    = vm.envUint('MIN_TIMELOCK');
         address ethUsdFeed     = vm.envOr('ETH_USD_FEED', address(0));
         uint256 ethUsdHb       = vm.envOr('ETH_USD_HEARTBEAT', uint256(0));
+        uint256 minFundsIn     = vm.envUint('MIN_FUNDS_IN_AMOUNT');
 
         address deployer    = vm.addr(pk);
         uint64  startNonce  = vm.getNonce(deployer);
@@ -96,7 +98,8 @@ contract DeployAll is Script {
             usdt0,
             address(routeRegistry),
             payable(address(cm)),
-            address(0)
+            address(0),
+            minFundsIn
         );
 
         // ---- 5. Route plugins (nonce n+3, n+4) ---------------------------
