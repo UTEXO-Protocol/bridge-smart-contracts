@@ -72,6 +72,12 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Hard upper bound on `executeBatch` size to keep gas use bounded.
     uint256 public constant MAX_BATCH_SIZE = 3;
 
+    /// @notice Hard upper bound on the size of either signer set. Bounds the
+    ///         O(N^2) duplicate/disjointness checks and stays far within the
+    ///         `uint256` signature-bitmap width (so no signer index is ever
+    ///         unreachable). 20 is ample for an enclave/federation committee.
+    uint256 public constant MAX_SIGNERS = 20;
+
     /// @notice Length of a Solidity function selector (`bytes4`) in bytes. Used
     ///         to guard `callData` against payloads too short to even carry a
     ///         selector before it is sliced via `calldataload`.
@@ -193,6 +199,9 @@ contract MultisigProxy is IMultisigProxy {
 
         _validateSigners(enclaveSigners_);
         _validateSigners(federationSigners_);
+        // The enclave and federation are distinct trust domains; an address in
+        // both would count toward quorum in each, collapsing that separation.
+        _requireDisjoint(enclaveSigners_, federationSigners_);
 
         bridge = bridge_;
         commissionManager = commissionManager_;
@@ -871,6 +880,7 @@ contract MultisigProxy is IMultisigProxy {
             if (newSigners.length == 0) revert NoSigners();
             _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
+            _requireDisjoint(newSigners, _federationSigners);
             _enclaveSigners = newSigners;
             enclaveThreshold = newThreshold;
             emit EnclaveSignersUpdated(newSigners, newThreshold);
@@ -880,6 +890,7 @@ contract MultisigProxy is IMultisigProxy {
             if (newSigners.length == 0) revert NoSigners();
             _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
+            _requireDisjoint(newSigners, _enclaveSigners);
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
             emit FederationSignersUpdated(newSigners, newThreshold);
@@ -1093,7 +1104,22 @@ contract MultisigProxy is IMultisigProxy {
         }
     }
 
+    /// @dev Reverts if any address in `candidate` also appears in `counterpart`.
+    ///      Used to keep the enclave and federation signer sets disjoint so the
+    ///      two trust domains stay independent (R-W-14). O(n*m), bounded by the
+    ///      signer-set sizes.
+    function _requireDisjoint(address[] memory candidate, address[] memory counterpart) private pure {
+        for (uint256 i = 0; i < candidate.length; i++) {
+            for (uint256 j = 0; j < counterpart.length; j++) {
+                if (candidate[i] == counterpart[j]) revert SignerSetsOverlap(candidate[i]);
+            }
+        }
+    }
+
     function _validateSigners(address[] memory signers) private pure {
+        // Bound the set before the O(N^2) duplicate scan below, and keep every
+        // signer index within the uint256 signature bitmap (R-I-06).
+        if (signers.length > MAX_SIGNERS) revert TooManySigners(signers.length, MAX_SIGNERS);
         for (uint256 i = 0; i < signers.length; i++) {
             if (signers[i] == address(0)) revert ZeroAddressSigner();
             for (uint256 j = i + 1; j < signers.length; j++) {
