@@ -222,6 +222,20 @@ contract MultisigProxyTest is Test {
         ids[0] = TX_ID;
     }
 
+    /// @dev Valid strict-majority signer sets (2-of-2) used as filler in
+    ///      constructor-revert tests that target a non-threshold revert.
+    function _validEnc() internal view returns (address[] memory a) {
+        a = new address[](2);
+        a[0] = encA1;
+        a[1] = encA2;
+    }
+
+    function _validFed() internal view returns (address[] memory a) {
+        a = new address[](2);
+        a[0] = fedA1;
+        a[1] = fedA2;
+    }
+
     function _fundsOutCalldata() internal view returns (bytes memory) {
         bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
         bytes memory settlementData = abi.encode(_fundsInIds());
@@ -284,44 +298,34 @@ contract MultisigProxyTest is Test {
     }
 
     function test_constructor_revertsOnZeroCommission() public {
-        address[] memory enc = new address[](1); enc[0] = encA1;
-        address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.ZeroCommissionRecipient.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, address(0), TIMELOCK, MIN_TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), _validEnc(), 2, _validFed(), 2, address(0), TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnTimelockTooLong() public {
-        address[] memory enc = new address[](1); enc[0] = encA1;
-        address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.TimelockTooLong.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, 30 days, MIN_TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), _validEnc(), 2, _validFed(), 2, commissionReceiver, 30 days, MIN_TIMELOCK);
     }
 
     // ---- R-W-11: MIN_TIMELOCK floor (post-fix) ----
 
     /// @dev UT-FIX-13: deploying with a timelock below the requested floor reverts.
     function test_constructor_revertsOnTimelockBelowMinTimelock() public {
-        address[] memory enc = new address[](1); enc[0] = encA1;
-        address[] memory fed = new address[](1); fed[0] = fedA1;
         // timelock (1h) is below the requested floor (2h) -> TimelockTooShort
         vm.expectRevert(IMultisigProxy.TimelockTooShort.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, 1 hours, 2 hours);
+        new MultisigProxy(address(bridge), address(cm), _validEnc(), 2, _validFed(), 2, commissionReceiver, 1 hours, 2 hours);
     }
 
     /// @dev A zero floor is rejected — it would defeat the purpose of the fix.
     function test_constructor_revertsOnZeroMinTimelock() public {
-        address[] memory enc = new address[](1); enc[0] = encA1;
-        address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.InvalidMinTimelock.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK, 0);
+        new MultisigProxy(address(bridge), address(cm), _validEnc(), 2, _validFed(), 2, commissionReceiver, TIMELOCK, 0);
     }
 
     /// @dev A floor at/above the upper bound leaves no valid range — rejected.
     function test_constructor_revertsOnMinTimelockTooLong() public {
-        address[] memory enc = new address[](1); enc[0] = encA1;
-        address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.InvalidMinTimelock.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK, 30 days);
+        new MultisigProxy(address(bridge), address(cm), _validEnc(), 2, _validFed(), 2, commissionReceiver, TIMELOCK, 30 days);
     }
 
     function test_minTimelock_returnsConfiguredFloor() public view {
@@ -329,17 +333,142 @@ contract MultisigProxyTest is Test {
     }
 
     function test_constructor_revertsOnDuplicateSigner() public {
+        // Duplicate enclave signer with an otherwise-valid 2-of-2 threshold, so
+        // the call clears the threshold guard and reverts in _validateSigners.
         address[] memory enc = new address[](2); enc[0] = encA1; enc[1] = encA1;
-        address[] memory fed = new address[](1); fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.DuplicateSigner.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 2, _validFed(), 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnZeroAddressSigner() public {
-        address[] memory enc = new address[](1); enc[0] = address(0);
-        address[] memory fed = new address[](1); fed[0] = fedA1;
+        // Zero-address enclave signer in a 2-signer set with a valid 2-of-2
+        // threshold, so the call clears the threshold guard and reverts in
+        // _validateSigners.
+        address[] memory enc = new address[](2); enc[0] = address(0); enc[1] = encA2;
         vm.expectRevert(IMultisigProxy.ZeroAddressSigner.selector);
-        new MultisigProxy(address(bridge), address(cm), enc, 1, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 2, _validFed(), 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
+    }
+
+    // ========================================================================
+    // Strict-majority signer threshold floor (R-W-12 / UT-FIX-14)
+    //
+    // Both signer sets, at construction and on signer-update, must be a strict
+    // majority of at least 2 signers: n >= 2, threshold >= 2, threshold <= n,
+    // 2*threshold > n. Rejects 1-of-N, the degenerate 1-of-1, and sub-majority
+    // quorums; the smallest valid sets are 2-of-2 and 2-of-3. Signer-update
+    // validation runs at executeProposal time (in _executeByType), so the bad
+    // proposal is created successfully and reverts only on execution.
+    // ========================================================================
+
+    /// @dev Build an n-element signer array from a seed (distinct non-zero addrs).
+    function _signers(uint256 n) internal pure returns (address[] memory a) {
+        a = new address[](n);
+        for (uint256 i = 0; i < n; i++) {
+            a[i] = address(uint160(0xA000 + i));
+        }
+    }
+
+    // ---- Constructor ----
+
+    function test_constructor_rejectsOneOfThree_enclave() public {
+        vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
+        new MultisigProxy(address(bridge), address(cm), _signers(3), 1, _validFed(), 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
+    }
+
+    function test_constructor_rejectsOneOfOne_enclave() public {
+        // n < 2 — single-key set, rejected even though 2*1 > 1.
+        vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
+        new MultisigProxy(address(bridge), address(cm), _signers(1), 1, _validFed(), 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
+    }
+
+    function test_constructor_rejectsSubMajority_enclave() public {
+        // 2-of-4: 2*2 == 4, not a strict majority.
+        vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
+        new MultisigProxy(address(bridge), address(cm), _signers(4), 2, _validFed(), 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
+    }
+
+    function test_constructor_rejectsOneOfThree_federation() public {
+        // Enclave valid, federation 1-of-3 — the floor applies to both sets.
+        vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
+        new MultisigProxy(address(bridge), address(cm), _validEnc(), 2, _signers(3), 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
+    }
+
+    function test_constructor_acceptsTwoOfTwo() public {
+        MultisigProxy p = new MultisigProxy(
+            address(bridge), address(cm), _signers(2), 2, _signers(2), 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK
+        );
+        assertEq(p.enclaveThreshold(),    2);
+        assertEq(p.federationThreshold(), 2);
+    }
+
+    function test_constructor_acceptsThreeOfFour() public {
+        // Strict majority with a non-trivial set (2*3 > 4).
+        MultisigProxy p = new MultisigProxy(
+            address(bridge), address(cm), _signers(4), 3, _signers(4), 3, commissionReceiver, TIMELOCK, MIN_TIMELOCK
+        );
+        assertEq(p.enclaveThreshold(),    3);
+        assertEq(p.federationThreshold(), 3);
+    }
+
+    // ---- Signer update (validated at executeProposal) ----
+
+    function test_proposeUpdateEnclaveSigners_rejectsOneOfNAtExecute() public {
+        address[] memory newSigners = _signers(3);
+        uint256 badThreshold = 1; // 1-of-3
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(
+            domainSep, newSigners, badThreshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        // Propose succeeds — threshold validity is enforced on execution.
+        bytes32 id = proxy.proposeUpdateEnclaveSigners(newSigners, badThreshold, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
+        proxy.executeProposal(id, abi.encode(newSigners, badThreshold));
+    }
+
+    function test_proposeUpdateFederationSigners_rejectsSubMajorityAtExecute() public {
+        address[] memory newSigners = _signers(4);
+        uint256 badThreshold = 2; // 2-of-4, sub-majority
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateFederationSigners(
+            domainSep, newSigners, badThreshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeUpdateFederationSigners(newSigners, badThreshold, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
+        proxy.executeProposal(id, abi.encode(newSigners, badThreshold));
+    }
+
+    function test_proposeUpdateFederationSigners_acceptsStrictMajority() public {
+        address[] memory newSigners = _signers(3);
+        uint256 newThreshold = 2; // 2-of-3
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateFederationSigners(
+            domainSep, newSigners, newThreshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeUpdateFederationSigners(newSigners, newThreshold, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, abi.encode(newSigners, newThreshold));
+        assertEq(proxy.federationThreshold(), 2);
+        assertEq(proxy.getFederationSigners().length, 3);
     }
 
     // ========================================================================
