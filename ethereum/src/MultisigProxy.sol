@@ -72,6 +72,12 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Hard upper bound on `executeBatch` size to keep gas use bounded.
     uint256 public constant MAX_BATCH_SIZE = 3;
 
+    /// @notice Hard upper bound on the size of either signer set. Bounds the
+    ///         O(N^2) duplicate/disjointness checks and stays far within the
+    ///         `uint256` signature-bitmap width (so no signer index is ever
+    ///         unreachable). 20 is ample for an enclave/federation committee.
+    uint256 public constant MAX_SIGNERS = 20;
+
     /// @notice Length of a Solidity function selector (`bytes4`) in bytes. Used
     ///         to guard `callData` against payloads too short to even carry a
     ///         selector before it is sliced via `calldataload`.
@@ -1111,6 +1117,9 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     function _validateSigners(address[] memory signers) private pure {
+        // Bound the set before the O(N^2) duplicate scan below, and keep every
+        // signer index within the uint256 signature bitmap (R-I-06).
+        if (signers.length > MAX_SIGNERS) revert TooManySigners(signers.length, MAX_SIGNERS);
         for (uint256 i = 0; i < signers.length; i++) {
             if (signers[i] == address(0)) revert ZeroAddressSigner();
             for (uint256 j = i + 1; j < signers.length; j++) {

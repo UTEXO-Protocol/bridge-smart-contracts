@@ -64,6 +64,7 @@ interface IMultisigProxy {
     error ZeroAddressSigner();
     error DuplicateSigner();
     error SignerSetsOverlap(address signer);
+    error TooManySigners(uint256 count, uint256 max);
     error CallFailed();
     error UnknownOperationType();
     error ZeroRecipient();
