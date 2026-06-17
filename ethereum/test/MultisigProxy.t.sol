@@ -545,6 +545,56 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
+    // Signer-set size cap (R-I-06 / UT-FIX-27)
+    //
+    // Either set is capped at MAX_SIGNERS, at construction and on signer-update
+    // (validated in _validateSigners at executeProposal). The cap bounds the
+    // O(N^2) scan and keeps every index within the uint256 signature bitmap.
+    // ========================================================================
+
+    function test_constructor_rejectsTooManySigners() public {
+        uint256 max = proxy.MAX_SIGNERS();
+        address[] memory enc = _signers(max + 1); // 21 distinct enclave signers
+        uint256 encThreshold = (max + 1) / 2 + 1; // strict majority, so it clears the threshold guard
+
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.TooManySigners.selector, max + 1, max));
+        new MultisigProxy(
+            address(bridge), address(cm), enc, encThreshold, _validFed(), 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK
+        );
+    }
+
+    function test_constructor_acceptsSignersAtMax() public {
+        uint256 max = proxy.MAX_SIGNERS();
+        uint256 threshold = max / 2 + 1; // 11-of-20 strict majority
+
+        MultisigProxy p = new MultisigProxy(
+            address(bridge), address(cm), _signers(max), threshold, _signersB(max), threshold, commissionReceiver, TIMELOCK, MIN_TIMELOCK
+        );
+        assertEq(p.getEnclaveSigners().length,    max);
+        assertEq(p.getFederationSigners().length, max);
+    }
+
+    function test_proposeUpdateEnclaveSigners_rejectsTooManySignersAtExecute() public {
+        uint256 max = proxy.MAX_SIGNERS();
+        address[] memory newSigners = _signers(max + 1);
+        uint256 newThreshold = (max + 1) / 2 + 1; // valid strict majority
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(
+            domainSep, newSigners, newThreshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeUpdateEnclaveSigners(newSigners, newThreshold, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.TooManySigners.selector, max + 1, max));
+        proxy.executeProposal(id, abi.encode(newSigners, newThreshold));
+    }
+
+    // ========================================================================
     // TEE execute — happy path
     // ========================================================================
 
