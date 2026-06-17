@@ -154,6 +154,15 @@ contract BridgeTest is Test {
         return abi.encode(ids);
     }
 
+    /// @dev Build an ASCII string of exactly `len` bytes (for address-length caps).
+    function _str(uint256 len) internal pure returns (string memory) {
+        bytes memory b = new bytes(len);
+        for (uint256 i = 0; i < len; i++) {
+            b[i] = 'a';
+        }
+        return string(b);
+    }
+
     function _setFundsInTokenRule(uint256 percent) internal {
         vm.prank(deployer);
         cm.setCommissionRule(
@@ -433,6 +442,131 @@ contract BridgeTest is Test {
         vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(999), uint256(1000)));
         vm.prank(mockAdapter);
         bridge.fundsIn(999, SOURCE_CHAIN_ID, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+    }
+
+    function test_fundsIn_revertsOnDestinationAddressTooLong() public {
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+        string memory tooLong = _str(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AddressTooLong.selector, max + 1, max));
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, tooLong, TX_ID, '');
+    }
+
+    function test_fundsIn_acceptsDestinationAddressAtMaxLength() public {
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, _str(max), TX_ID, '');
+        assertEq(rgbModule.fundsInRecords(TX_ID), AMOUNT, 'deposit at the address-length cap is accepted');
+    }
+
+    function test_fundsOut_revertsOnSourceAddressTooLong() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+        string memory tooLong = _str(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AddressTooLong.selector, max + 1, max));
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, tooLong,
+            _proof(), _settlement(_singleFundsInId())
+        );
+    }
+
+    function test_fundsOut_acceptsSourceAddressAtMaxLength() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, _str(max),
+            _proof(), _settlement(_singleFundsInId())
+        );
+        assertEq(usdt0.balanceOf(recipient), AMOUNT, 'release with sourceAddress at the cap succeeds');
+    }
+
+    // ========================================================================
+    // Proof length cap (R-I-12)
+    //
+    // fundsOut forwards `proof` to the route verifier, so it is capped at
+    // MAX_PROOF_LENGTH to bound calldata + verifier gas. The exact cap is
+    // accepted; one byte over reverts ProofTooLong. The real RGB proof
+    // (abi.encode(uint256, bytes32) = 64 bytes) is far under the cap.
+    // ========================================================================
+
+    /// @dev Build a `bytes` blob of exactly `len` bytes.
+    function _bytesOfLength(uint256 len) internal pure returns (bytes memory b) {
+        b = new bytes(len);
+        for (uint256 i = 0; i < len; i++) {
+            b[i] = 0x61;
+        }
+    }
+
+    function test_fundsOut_revertsOnProofTooLong() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 max = bridge.MAX_PROOF_LENGTH();
+        bytes memory tooLong = _bytesOfLength(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.ProofTooLong.selector, max + 1, max));
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            tooLong, _settlement(_singleFundsInId())
+        );
+    }
+
+    function test_fundsOut_acceptsProofAtMaxLength() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        // A proof at the exact cap passes the length guard. It then reverts in
+        // the verifier (the blob is not a valid (height, commitment) pair), so
+        // the cap check is isolated by asserting it is NOT ProofTooLong: the
+        // call reaches the verifier instead.
+        uint256 max = bridge.MAX_PROOF_LENGTH();
+        bytes memory atMax = _bytesOfLength(max);
+
+        vm.prank(multisig);
+        try bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            atMax, _settlement(_singleFundsInId())
+        ) {
+            // a decodable proof would succeed; this blob won't, so we don't
+            // expect to land here — but if a future verifier accepts it, the
+            // length guard still passed, which is what this test asserts.
+        } catch (bytes memory reason) {
+            // Must NOT be the length guard — proving max-length passes it.
+            bytes4 sel = bytes4(reason);
+            assertTrue(sel != IBridge.ProofTooLong.selector, 'max-length proof must clear the length guard');
+        }
+    }
+
+    function test_fundsOut_acceptsRealProofUnderCap() public {
+        // The production-shaped 64-byte RGB proof is well under the cap and the
+        // happy path still succeeds.
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        assertLt(_proof().length, bridge.MAX_PROOF_LENGTH(), 'sanity: real proof under cap');
+
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
+        assertEq(usdt0.balanceOf(recipient), AMOUNT, 'release with a normal proof succeeds');
     }
 
     // ========================================================================

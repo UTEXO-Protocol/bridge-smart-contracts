@@ -54,6 +54,7 @@ interface IMultisigProxy {
     error ProposalExpired();
     error DataMismatch();
     error DeadlineTooFar();
+    error DeadlineBeforeTimelock();
     error ProposalExists();
     error IndexOutOfRange();
     error BitmapOutOfRange();
@@ -62,6 +63,8 @@ interface IMultisigProxy {
     error InvalidSignature();
     error ZeroAddressSigner();
     error DuplicateSigner();
+    error SignerSetsOverlap(address signer);
+    error TooManySigners(uint256 count, uint256 max);
     error CallFailed();
     error UnknownOperationType();
     error ZeroRecipient();

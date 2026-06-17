@@ -40,6 +40,21 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // State
     // =========================================================================
 
+    /// @notice Upper bound on the `destinationAddress` (fundsIn) and
+    ///         `sourceAddress` (fundsOut) byte length. These strings are echoed
+    ///         into event logs, so an unbounded value would let a caller inflate
+    ///         log-storage and indexer cost. 512 bytes covers every supported
+    ///         destination representation (RGB invoices and other chains) with
+    ///         ample headroom.
+    uint256 public constant MAX_ADDRESS_LENGTH = 512;
+
+    /// @notice Upper bound on the `fundsOut` `proof` byte length. `proof` is
+    ///         forwarded to the route verifier, so an unbounded blob would let a
+    ///         release inflate calldata + verifier gas. 1024 bytes comfortably
+    ///         fits the verifier formats (RGB is 64 bytes today; a future SPV
+    ///         inclusion proof stays well under this).
+    uint256 public constant MAX_PROOF_LENGTH = 1024;
+
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
@@ -203,6 +218,10 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (recipient          == address(0))                revert InvalidRecipientAddress();
         if (sourceChainId      == 0)                         revert InvalidSourceChainId();
         if (destinationChainId == 0)                         revert InvalidDestinationChainId();
+        if (bytes(sourceAddress).length > MAX_ADDRESS_LENGTH) {
+            revert AddressTooLong(bytes(sourceAddress).length, MAX_ADDRESS_LENGTH);
+        }
+        if (proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(proof.length, MAX_PROOF_LENGTH);
         if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 
         // Common replay guard. Set the flag before any external interaction
@@ -290,6 +309,9 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ) private {
         if (amount < minFundsInAmount)             revert AmountBelowMinimum(amount, minFundsInAmount);
         if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
+        if (bytes(destinationAddress).length > MAX_ADDRESS_LENGTH) {
+            revert AddressTooLong(bytes(destinationAddress).length, MAX_ADDRESS_LENGTH);
+        }
         if (sourceChainId      == 0)               revert InvalidSourceChainId();
         if (destinationChainId == 0)               revert InvalidDestinationChainId();
 
