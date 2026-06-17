@@ -62,8 +62,21 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Maximum allowed time between proposal creation and its deadline.
     uint256 public constant MAX_PROPOSAL_LIFETIME = 30 days;
 
+    /// @notice Maximum allowed lifetime of a TEE-signed `execute` / `executeBatch`
+    ///         deadline. Tighter than `MAX_PROPOSAL_LIFETIME` because enclave
+    ///         operations (e.g. `fundsOut`) are meant to be executed promptly
+    ///         after signing; a short ceiling limits how long a leaked or
+    ///         pre-signed payload stays executable while its nonce is unconsumed.
+    uint256 public constant MAX_TEE_DEADLINE = 1 days;
+
     /// @notice Hard upper bound on `executeBatch` size to keep gas use bounded.
     uint256 public constant MAX_BATCH_SIZE = 3;
+
+    /// @notice Hard upper bound on the size of either signer set. Bounds the
+    ///         O(N^2) duplicate/disjointness checks and stays far within the
+    ///         `uint256` signature-bitmap width (so no signer index is ever
+    ///         unreachable). 20 is ample for an enclave/federation committee.
+    uint256 public constant MAX_SIGNERS = 20;
 
     /// @notice Length of a Solidity function selector (`bytes4`) in bytes. Used
     ///         to guard `callData` against payloads too short to even carry a
@@ -176,9 +189,9 @@ contract MultisigProxy is IMultisigProxy {
         if (bridge_ == address(0)) revert ZeroBridge();
         if (commissionManager_ == address(0)) revert ZeroCommissionManager();
         if (enclaveSigners_.length == 0) revert NoSigners();
-        if (enclaveThreshold_ == 0 || enclaveThreshold_ > enclaveSigners_.length) revert InvalidThreshold();
+        _requireValidThreshold(enclaveThreshold_, enclaveSigners_.length);
         if (federationSigners_.length == 0) revert NoSigners();
-        if (federationThreshold_ == 0 || federationThreshold_ > federationSigners_.length) revert InvalidThreshold();
+        _requireValidThreshold(federationThreshold_, federationSigners_.length);
         if (commissionRecipient_ == address(0)) revert ZeroCommissionRecipient();
         if (minTimelock_ == 0 || minTimelock_ >= MAX_PROPOSAL_LIFETIME) revert InvalidMinTimelock();
         if (timelockDuration_ < minTimelock_) revert TimelockTooShort();
@@ -186,6 +199,9 @@ contract MultisigProxy is IMultisigProxy {
 
         _validateSigners(enclaveSigners_);
         _validateSigners(federationSigners_);
+        // The enclave and federation are distinct trust domains; an address in
+        // both would count toward quorum in each, collapsing that separation.
+        _requireDisjoint(enclaveSigners_, federationSigners_);
 
         bridge = bridge_;
         commissionManager = commissionManager_;
@@ -228,6 +244,10 @@ contract MultisigProxy is IMultisigProxy {
         bytes[] calldata enclaveSigs
     ) external {
         if (block.timestamp > deadline) revert Expired();
+        // Bound how far in the future a signed deadline may sit, so a leaked or
+        // pre-signed payload cannot stay executable indefinitely while its
+        // nonce is unconsumed.
+        if (deadline > block.timestamp + MAX_TEE_DEADLINE) revert DeadlineTooFar();
         if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
 
         bytes4 selector;
@@ -258,6 +278,8 @@ contract MultisigProxy is IMultisigProxy {
         bytes[] calldata enclaveSigs
     ) external payable {
         if (block.timestamp > deadline) revert Expired();
+        // Bound the signed deadline's distance into the future;
+        if (deadline > block.timestamp + MAX_TEE_DEADLINE) revert DeadlineTooFar();
         uint256 n = targets.length;
         if (n == 0) revert BatchEmpty();
         if (n > MAX_BATCH_SIZE) revert BatchTooLarge();
@@ -818,6 +840,7 @@ contract MultisigProxy is IMultisigProxy {
     ) private returns (bytes32 proposalId) {
         if (block.timestamp > deadline) revert Expired();
         if (deadline > block.timestamp + MAX_PROPOSAL_LIFETIME) revert DeadlineTooFar();
+        if (deadline < block.timestamp + timelockDuration) revert DeadlineBeforeTimelock();
         if (nonce != proposalNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(structHash);
@@ -855,8 +878,9 @@ contract MultisigProxy is IMultisigProxy {
         } else if (opType == OperationType.UpdateEnclaveSigners) {
             (address[] memory newSigners, uint256 newThreshold) = abi.decode(opData, (address[], uint256));
             if (newSigners.length == 0) revert NoSigners();
-            if (newThreshold == 0 || newThreshold > newSigners.length) revert InvalidThreshold();
+            _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
+            _requireDisjoint(newSigners, _federationSigners);
             _enclaveSigners = newSigners;
             enclaveThreshold = newThreshold;
             emit EnclaveSignersUpdated(newSigners, newThreshold);
@@ -864,8 +888,9 @@ contract MultisigProxy is IMultisigProxy {
         } else if (opType == OperationType.UpdateFederationSigners) {
             (address[] memory newSigners, uint256 newThreshold) = abi.decode(opData, (address[], uint256));
             if (newSigners.length == 0) revert NoSigners();
-            if (newThreshold == 0 || newThreshold > newSigners.length) revert InvalidThreshold();
+            _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
+            _requireDisjoint(newSigners, _enclaveSigners);
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
             emit FederationSignersUpdated(newSigners, newThreshold);
@@ -1064,7 +1089,37 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     /// @dev Validates no zero addresses and no duplicates. O(n^2), fine for <20 signers.
+    /// @dev Enforces the quorum policy shared by both signer sets (enclave and
+    ///      federation), in the constructor and the signer-update handlers:
+    ///        - at least 2 signers (no single-key set);
+    ///        - threshold of at least 2 (no single signer can authorise alone);
+    ///        - threshold a strict majority (`2 * threshold > n`), which rejects
+    ///          1-of-N and any sub-majority quorum;
+    ///        - threshold not exceeding the signer count.
+    ///      The smallest valid sets are 2-of-2 and 2-of-3. This upholds the
+    ///      spec invariant "one signer MUST NOT authorise fundsOut alone".
+    function _requireValidThreshold(uint256 threshold, uint256 n) private pure {
+        if (n < 2 || threshold < 2 || threshold > n || 2 * threshold <= n) {
+            revert InvalidThreshold();
+        }
+    }
+
+    /// @dev Reverts if any address in `candidate` also appears in `counterpart`.
+    ///      Used to keep the enclave and federation signer sets disjoint so the
+    ///      two trust domains stay independent (R-W-14). O(n*m), bounded by the
+    ///      signer-set sizes.
+    function _requireDisjoint(address[] memory candidate, address[] memory counterpart) private pure {
+        for (uint256 i = 0; i < candidate.length; i++) {
+            for (uint256 j = 0; j < counterpart.length; j++) {
+                if (candidate[i] == counterpart[j]) revert SignerSetsOverlap(candidate[i]);
+            }
+        }
+    }
+
     function _validateSigners(address[] memory signers) private pure {
+        // Bound the set before the O(N^2) duplicate scan below, and keep every
+        // signer index within the uint256 signature bitmap (R-I-06).
+        if (signers.length > MAX_SIGNERS) revert TooManySigners(signers.length, MAX_SIGNERS);
         for (uint256 i = 0; i < signers.length; i++) {
             if (signers[i] == address(0)) revert ZeroAddressSigner();
             for (uint256 j = i + 1; j < signers.length; j++) {
