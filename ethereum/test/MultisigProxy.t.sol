@@ -84,6 +84,7 @@ contract MultisigProxyTest is Test {
     event TeeAllowedCallUpdated(address indexed target, bytes4 indexed selector, bool allowed);
     event TimelockDurationUpdated(uint256 newDuration);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
+    event TokenCommissionWithdrawn(address indexed token, address indexed to, uint256 amount);
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
     event BatchExecuted(uint256 indexed nonce, uint256 enclaveBitmap, address[] targets, bytes4[] selectors);
@@ -2213,5 +2214,287 @@ contract MultisigProxyTest is Test {
 
         assertEq(proxy.getNonce(selector), nonce + 1, 'setter nonce incremented');
         assertEq(bridge.lzAdapter(), newAdapter, 'bridge adapter updated');
+    }
+
+    function test_timelockCanBeSetToZero_currentBehavior() public {
+        uint256 newDuration = 0;
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        assertEq(proxy.timelockDuration(), TIMELOCK, 'pre timelock');
+
+        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(
+            domainSep, newDuration, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeSetTimelockDuration(newDuration, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        // Current behavior: the update path rejects only durations at or above
+        // MAX_PROPOSAL_LIFETIME, so zero removes the governance observation
+        // delay for future proposals.
+        vm.expectEmit(false, false, false, true, address(proxy));
+        emit TimelockDurationUpdated(newDuration);
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit ProposalExecuted(id, IMultisigProxy.OperationType.SetTimelockDuration);
+
+        proxy.executeProposal(id, abi.encode(newDuration));
+
+        assertEq(proxy.timelockDuration(), 0, 'timelock cleared');
+    }
+
+    // Pending proposals do not snapshot their timelock delay; execution checks
+    // the live timelockDuration, so a later governance update can re-lock an
+    // already mature proposal until the new duration elapses.
+    function test_pendingProposalUsesLiveTimelock_currentBehavior() public {
+        uint256 proposedAt = block.timestamp;
+        address newBridge = makeAddr('liveTimelockBridge');
+        uint256 newDuration = 2 hours;
+        uint256 deadline = proposedAt + 1 days;
+
+        assertEq(proxy.timelockDuration(), TIMELOCK, 'pre timelock');
+
+        uint256 bridgeNonce = proxy.proposalNonce();
+        bytes32 bridgeDigest = MultisigHelper.digestProposeUpdateBridge(
+            domainSep, newBridge, bridgeNonce, deadline
+        );
+        (uint256[] memory bridgePks, uint256 bridgeBitmap) = _fedSigSet2of3();
+        bytes[] memory bridgeSigs = MultisigHelper.signAll(vm, bridgeDigest, bridgePks);
+
+        bytes32 bridgeProposalId =
+            proxy.proposeUpdateBridge(newBridge, bridgeNonce, deadline, bridgeBitmap, bridgeSigs);
+
+        uint256 timelockNonce = proxy.proposalNonce();
+        bytes32 timelockDigest = MultisigHelper.digestProposeSetTimelockDuration(
+            domainSep, newDuration, timelockNonce, deadline
+        );
+        (uint256[] memory timelockPks, uint256 timelockBitmap) = _fedSigSet2of3();
+        bytes[] memory timelockSigs = MultisigHelper.signAll(vm, timelockDigest, timelockPks);
+
+        bytes32 timelockProposalId = proxy.proposeSetTimelockDuration(
+            newDuration, timelockNonce, deadline, timelockBitmap, timelockSigs
+        );
+
+        vm.warp(proposedAt + TIMELOCK + 1);
+
+        vm.expectEmit(false, false, false, true, address(proxy));
+        emit TimelockDurationUpdated(newDuration);
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit ProposalExecuted(timelockProposalId, IMultisigProxy.OperationType.SetTimelockDuration);
+
+        proxy.executeProposal(timelockProposalId, abi.encode(newDuration));
+
+        assertEq(proxy.timelockDuration(), newDuration, 'live timelock increased');
+
+        // Current behavior: execution compares the frozen proposedAt against
+        // the live timelockDuration, so raising the timelock re-locks this
+        // already mature bridge proposal.
+        vm.expectRevert(IMultisigProxy.TimelockActive.selector);
+        proxy.executeProposal(bridgeProposalId, abi.encode(newBridge));
+
+        assertEq(proxy.bridge(), address(bridge), 'bridge unchanged while re-locked');
+
+        vm.warp(proposedAt + newDuration + 1);
+
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit BridgeAddressUpdated(address(bridge), newBridge);
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit ProposalExecuted(bridgeProposalId, IMultisigProxy.OperationType.UpdateBridge);
+
+        proxy.executeProposal(bridgeProposalId, abi.encode(newBridge));
+
+        assertEq(proxy.bridge(), newBridge, 'bridge updated after live timelock');
+    }
+
+    // The typed commission-withdraw path pins the recipient to
+    // commissionRecipient, while generic CM admin execution forwards arbitrary
+    // calldata and lets the encoded withdrawal recipient win.
+    function test_adminExecuteCommissionManagerBypassesRecipientPin_currentBehavior() public {
+        address arbitraryRecipient = makeAddr('arbitraryCommissionRecipient');
+
+        vm.prank(address(proxy));
+        cm.setCommissionRule(
+            SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token),
+            CommissionConfig({
+                stablePercent: 400, // 4%
+                multiplier: 100,
+                side: CommissionSide.FUNDS_IN,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        uint256 depositAmount = 100e18;
+        vm.prank(user);
+        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, TX_ID + 777, '');
+
+        uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
+        uint256 poolBefore = cm.tokenCommissionPool(address(token));
+        uint256 pinnedRecipientBefore = token.balanceOf(commissionReceiver);
+        uint256 arbitraryRecipientBefore = token.balanceOf(arbitraryRecipient);
+
+        assertEq(poolBefore, expectedCommission, 'pre cm pool');
+        assertEq(pinnedRecipientBefore, 0, 'pre pinned recipient');
+        assertEq(arbitraryRecipientBefore, 0, 'pre arbitrary recipient');
+
+        bytes memory callData = abi.encodeWithSignature(
+            'withdrawTokenCommission(address,address,uint256)',
+            address(token),
+            arbitraryRecipient,
+            expectedCommission
+        );
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(
+            domainSep,
+            bytes4(callData),
+            callData,
+            nonce,
+            deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeAdminExecuteCommissionManager(callData, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        // Current behavior: generic CM admin execution emits only the
+        // CommissionManager withdrawal event and sends funds to the calldata
+        // recipient, not to the proxy's pinned commissionRecipient.
+        vm.expectEmit(true, true, false, true, address(cm));
+        emit TokenCommissionWithdrawn(address(token), arbitraryRecipient, expectedCommission);
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit ProposalExecuted(id, IMultisigProxy.OperationType.AdminExecuteCommissionManager);
+
+        proxy.executeProposal(id, callData);
+
+        assertEq(cm.tokenCommissionPool(address(token)), 0, 'cm pool drained');
+        assertEq(token.balanceOf(commissionReceiver), pinnedRecipientBefore, 'pinned recipient unchanged');
+        assertEq(
+            token.balanceOf(arbitraryRecipient),
+            arbitraryRecipientBefore + expectedCommission,
+            'arbitrary recipient credited'
+        );
+    }
+
+    // executeBatch validates signatures, allowlisted calls, and total native
+    // value, but it does not bind the Bridge payout amount to the adapter send
+    // amount. A smaller send leaves the remainder on the adapter.
+    function test_executeBatchAcceptsUnpairedFundsOutAndSendOut_currentBehavior() public {
+        uint256 percent = 500; // 5%
+        vm.prank(address(proxy));
+        cm.setCommissionRule(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            CommissionConfig({
+                stablePercent: percent,
+                multiplier: 100,
+                side: CommissionSide.FUNDS_OUT,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
+        uint256 adapterSendAmount = netAmount - 1e18;
+        assertGt(tokenCommission, 0, 'token fee quoted');
+        assertEq(nativeCommission, 0, 'native fee is zero');
+        assertLt(adapterSendAmount, netAmount, 'send amount smaller than bridge payout');
+
+        address mockOft = makeAddr('mismatchMockOft');
+        MockOutboundLZAdapter adapter =
+            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
+        bytes4 sendOutSelector = MockOutboundLZAdapter.sendOut.selector;
+        _allowTeeCall(address(adapter), sendOutSelector);
+
+        bytes memory bridgeCallData = _fundsOutCalldata(address(adapter), AMOUNT, BURN_ID + 88);
+        bytes memory adapterCallData = abi.encodeWithSelector(
+            sendOutSelector,
+            DST_EID,
+            LZ_RECIPIENT,
+            adapterSendAmount,
+            adapterSendAmount,
+            bytes('')
+        );
+
+        address[] memory targets = new address[](2);
+        bytes[] memory callDatas = new bytes[](2);
+        uint256[] memory values = new uint256[](2);
+        targets[0] = address(bridge);
+        targets[1] = address(adapter);
+        callDatas[0] = bridgeCallData;
+        callDatas[1] = adapterCallData;
+        values[0] = 0;
+        values[1] = LZ_NATIVE_FEE;
+
+        uint256 nonce = proxy.batchNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
+            domainSep, targets, callDatas, values, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        uint256 bridgeBefore = token.balanceOf(address(bridge));
+        uint256 adapterBefore = token.balanceOf(address(adapter));
+        uint256 oftBefore = token.balanceOf(mockOft);
+        uint256 cmBefore = token.balanceOf(address(cm));
+        uint256 cmPoolBefore = cm.tokenCommissionPool(address(token));
+        uint256 recordBefore = rgbModule.fundsInRecords(TX_ID);
+
+        assertEq(bridgeBefore, AMOUNT * 5, 'pre bridge pool');
+        assertEq(adapterBefore, 0, 'pre adapter token');
+        assertEq(oftBefore, 0, 'pre oft token');
+        assertEq(recordBefore, AMOUNT * 5, 'pre record');
+
+        bytes4[] memory selectors = new bytes4[](2);
+        selectors[0] = FUNDS_OUT_SELECTOR;
+        selectors[1] = sendOutSelector;
+        bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, adapterSendAmount));
+
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsOut(
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            BURN_ID + 88,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR
+        );
+        vm.expectEmit(true, false, false, true, address(adapter));
+        emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, adapterSendAmount);
+        vm.expectEmit(true, false, false, true, address(proxy));
+        emit BatchExecuted(nonce, bitmap, targets, selectors);
+
+        vm.deal(address(this), LZ_NATIVE_FEE);
+        proxy.executeBatch{ value: LZ_NATIVE_FEE }(targets, callDatas, values, nonce, deadline, bitmap, sigs);
+
+        assertEq(proxy.batchNonce(), nonce + 1, 'batch nonce incremented');
+        assertTrue(bridge.consumedBurnIds(BURN_ID + 88), 'burn id consumed');
+        assertEq(token.balanceOf(address(bridge)), bridgeBefore - AMOUNT, 'bridge gross debit');
+        assertEq(token.balanceOf(address(cm)), cmBefore + tokenCommission, 'cm fee delta');
+        assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore + tokenCommission, 'cm pool delta');
+        assertEq(rgbModule.fundsInRecords(TX_ID), recordBefore - AMOUNT, 'record consumed');
+        assertEq(token.balanceOf(mockOft), oftBefore + adapterSendAmount, 'oft receives smaller send');
+        assertEq(
+            token.balanceOf(address(adapter)),
+            adapterBefore + (netAmount - adapterSendAmount),
+            'adapter keeps unpaired remainder'
+        );
+        assertEq(
+            (token.balanceOf(address(cm)) - cmBefore) +
+            (token.balanceOf(mockOft) - oftBefore) +
+            (token.balanceOf(address(adapter)) - adapterBefore),
+            AMOUNT,
+            'gross batch payout conserved'
+        );
     }
 }

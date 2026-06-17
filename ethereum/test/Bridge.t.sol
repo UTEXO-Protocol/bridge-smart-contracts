@@ -1288,4 +1288,120 @@ contract BridgeTest is Test {
         assertEq(usdt0.balanceOf(alternateRecipient), recipientBefore + releaseAmount, 'recipient credited');
         assertEq(rgbModule.fundsInRecords(TX_ID), recordBefore - releaseAmount, 'record residual');
     }
+
+    function test_operationIdPreemptionBlocksVictimRgbDeposit_currentBehavior() public {
+        address preemptor = makeAddr('operationIdPreemptor');
+        uint256 predictedOperationId = TX_ID + 9_000;
+        uint256 preemptAmount = 25e18;
+
+        usdt0.mint(preemptor, preemptAmount);
+        vm.prank(preemptor);
+        usdt0.approve(address(bridge), preemptAmount);
+
+        uint256 preemptorBefore = usdt0.balanceOf(preemptor);
+        uint256 victimBefore = usdt0.balanceOf(user);
+        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
+        uint256 recordBefore = rgbModule.fundsInRecords(predictedOperationId);
+
+        assertEq(preemptorBefore, preemptAmount, 'pre preemptor token');
+        assertEq(recordBefore, 0, 'pre predicted record');
+
+        // Current behavior: operationId uniqueness is enforced only by the
+        // settlement record. A different address can occupy a predicted id
+        // first, but doing so locks that address's own USDT0 in the Bridge.
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit FundsIn(preemptor, predictedOperationId, preemptAmount);
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsIn(
+            preemptor,
+            predictedOperationId,
+            preemptAmount,
+            preemptAmount,
+            0,
+            0,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR
+        );
+
+        vm.prank(preemptor);
+        bridge.fundsIn(preemptAmount, RGB_CHAIN_ID, DST_ADDR, predictedOperationId, '');
+
+        uint256 bridgeAfterPreempt = usdt0.balanceOf(address(bridge));
+        uint256 recordAfterPreempt = rgbModule.fundsInRecords(predictedOperationId);
+
+        assertEq(usdt0.balanceOf(preemptor), preemptorBefore - preemptAmount, 'preemptor funds locked');
+        assertEq(bridgeAfterPreempt, bridgeBefore + preemptAmount, 'bridge credited by preemptor');
+        assertEq(recordAfterPreempt, recordBefore + preemptAmount, 'record occupied');
+
+        vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, predictedOperationId, '');
+
+        assertEq(usdt0.balanceOf(user), victimBefore, 'victim token unchanged');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeAfterPreempt, 'bridge unchanged after victim revert');
+        assertEq(rgbModule.fundsInRecords(predictedOperationId), recordAfterPreempt, 'preempted record unchanged');
+    }
+
+    // Bridge calls the settlement hook after pulling gross funds but before
+    // forwarding token commission, so a hook that reads Bridge's raw balance
+    // sees funds that will not remain as Bridge liquidity after the call.
+    function test_onFundsInHookSeesBalanceIncludingFutureCommission_currentBehavior() public {
+        uint256 percent = 400; // 4%
+        _setFundsInTokenRule(percent);
+
+        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+        assertGt(tokenCommission, 0, 'token fee quoted');
+        assertEq(nativeCommission, 0, 'native fee is zero');
+
+        MockSettlementModule observingModule = new MockSettlementModule();
+        observingModule.setFundsInBalanceProbe(address(usdt0), address(bridge));
+
+        vm.prank(deployer);
+        routeRegistry.setRoute(
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            true,
+            address(rgbVerifier),
+            address(observingModule)
+        );
+
+        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
+        uint256 cmBefore = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
+
+        assertEq(bridgeBefore, 0, 'pre bridge token');
+        assertEq(cmBefore, 0, 'pre cm token');
+        assertEq(cmPoolBefore, 0, 'pre cm pool');
+
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit FundsIn(user, TX_ID + 10_000, netAmount);
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsIn(
+            user,
+            TX_ID + 10_000,
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            nativeCommission,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR
+        );
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID + 10_000, '');
+
+        assertEq(observingModule.onFundsInCount(), 1, 'module called once');
+        assertEq(observingModule.lastNetAmount(), netAmount, 'module got net amount');
+        assertEq(
+            observingModule.lastObservedBalanceOnFundsIn(),
+            bridgeBefore + AMOUNT,
+            'hook saw gross bridge balance'
+        );
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + netAmount, 'final bridge net');
+        assertEq(usdt0.balanceOf(address(cm)), cmBefore + tokenCommission, 'cm token delta');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore + tokenCommission, 'cm pool delta');
+    }
 }
