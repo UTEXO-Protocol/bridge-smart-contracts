@@ -368,6 +368,15 @@ contract MultisigProxyTest is Test {
         }
     }
 
+    /// @dev A second n-element signer array disjoint from `_signers` — used as
+    ///      the counterpart set so the two trust domains do not overlap.
+    function _signersB(uint256 n) internal pure returns (address[] memory a) {
+        a = new address[](n);
+        for (uint256 i = 0; i < n; i++) {
+            a[i] = address(uint160(0xB000 + i));
+        }
+    }
+
     // ---- Constructor ----
 
     function test_constructor_rejectsOneOfThree_enclave() public {
@@ -395,7 +404,7 @@ contract MultisigProxyTest is Test {
 
     function test_constructor_acceptsTwoOfTwo() public {
         MultisigProxy p = new MultisigProxy(
-            address(bridge), address(cm), _signers(2), 2, _signers(2), 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK
+            address(bridge), address(cm), _signers(2), 2, _signersB(2), 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK
         );
         assertEq(p.enclaveThreshold(),    2);
         assertEq(p.federationThreshold(), 2);
@@ -404,7 +413,7 @@ contract MultisigProxyTest is Test {
     function test_constructor_acceptsThreeOfFour() public {
         // Strict majority with a non-trivial set (2*3 > 4).
         MultisigProxy p = new MultisigProxy(
-            address(bridge), address(cm), _signers(4), 3, _signers(4), 3, commissionReceiver, TIMELOCK, MIN_TIMELOCK
+            address(bridge), address(cm), _signers(4), 3, _signersB(4), 3, commissionReceiver, TIMELOCK, MIN_TIMELOCK
         );
         assertEq(p.enclaveThreshold(),    3);
         assertEq(p.federationThreshold(), 3);
@@ -469,6 +478,70 @@ contract MultisigProxyTest is Test {
         proxy.executeProposal(id, abi.encode(newSigners, newThreshold));
         assertEq(proxy.federationThreshold(), 2);
         assertEq(proxy.getFederationSigners().length, 3);
+    }
+
+    // ========================================================================
+    // Disjoint signer sets (R-W-14 / UT-FIX-16)
+    //
+    // The enclave and federation sets must not share an address, at construction
+    // and on signer-update (validated at executeProposal). The setUp sets are
+    // already disjoint (encA* vs fedA*).
+    // ========================================================================
+
+    function test_constructor_rejectsOverlappingSignerSets() public {
+        // encA1 is present in both the enclave and the federation set.
+        address[] memory enc = new address[](2); enc[0] = encA1; enc[1] = encA2;
+        address[] memory fed = new address[](2); fed[0] = encA1; fed[1] = fedA2;
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.SignerSetsOverlap.selector, encA1));
+        new MultisigProxy(address(bridge), address(cm), enc, 2, fed, 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
+    }
+
+    function test_constructor_acceptsDisjointSignerSets() public {
+        MultisigProxy p = new MultisigProxy(
+            address(bridge), address(cm), _signers(2), 2, _signersB(2), 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK
+        );
+        assertEq(p.getEnclaveSigners().length,    2);
+        assertEq(p.getFederationSigners().length, 2);
+    }
+
+    function test_proposeUpdateEnclaveSigners_rejectsOverlapWithFederationAtExecute() public {
+        // New enclave set includes fedA1, a current federation signer.
+        address[] memory newSigners = new address[](2); newSigners[0] = fedA1; newSigners[1] = encA2;
+        uint256 newThreshold = 2;
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(
+            domainSep, newSigners, newThreshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeUpdateEnclaveSigners(newSigners, newThreshold, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.SignerSetsOverlap.selector, fedA1));
+        proxy.executeProposal(id, abi.encode(newSigners, newThreshold));
+    }
+
+    function test_proposeUpdateFederationSigners_rejectsOverlapWithEnclaveAtExecute() public {
+        // New federation set includes encA1, a current enclave signer.
+        address[] memory newSigners = new address[](2); newSigners[0] = encA1; newSigners[1] = fedA2;
+        uint256 newThreshold = 2;
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateFederationSigners(
+            domainSep, newSigners, newThreshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeUpdateFederationSigners(newSigners, newThreshold, nonce, deadline, bitmap, sigs);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.SignerSetsOverlap.selector, encA1));
+        proxy.executeProposal(id, abi.encode(newSigners, newThreshold));
     }
 
     // ========================================================================
