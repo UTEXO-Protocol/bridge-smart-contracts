@@ -48,6 +48,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///         ample headroom.
     uint256 public constant MAX_ADDRESS_LENGTH = 512;
 
+    /// @notice Upper bound on the `fundsOut` `proof` byte length. `proof` is
+    ///         forwarded to the route verifier, so an unbounded blob would let a
+    ///         release inflate calldata + verifier gas. 1024 bytes comfortably
+    ///         fits the verifier formats (RGB is 64 bytes today; a future SPV
+    ///         inclusion proof stays well under this).
+    uint256 public constant MAX_PROOF_LENGTH = 1024;
+
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
@@ -214,6 +221,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (bytes(sourceAddress).length > MAX_ADDRESS_LENGTH) {
             revert AddressTooLong(bytes(sourceAddress).length, MAX_ADDRESS_LENGTH);
         }
+        if (proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(proof.length, MAX_PROOF_LENGTH);
         if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 
         // Common replay guard. Set the flag before any external interaction
