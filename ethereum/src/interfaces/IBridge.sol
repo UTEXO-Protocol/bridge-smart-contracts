@@ -9,22 +9,11 @@ interface IBridge {
     error InvalidDestinationAddress();
     error InvalidDestinationChainId();
     error InvalidSourceChainId();
-    /// @notice `fundsOut` was called with `amount == 0`. A zero-amount release
-    ///         is a no-op that only emits a redundant event, so it is rejected.
-    ///         (The inbound path is guarded by `AmountBelowMinimum` instead,
-    ///         since its non-zero `minFundsInAmount` already excludes zero.)
     error ZeroAmount();
-    /// @notice A `fundsIn` deposit was below the configured `minFundsInAmount`.
-    ///         The minimum is always non-zero, so this also rejects zero-amount
-    ///         deposits, and it keeps dust — small enough that its commission
-    ///         rounds to zero and only adds event/processing noise — off the
-    ///         inbound path. Does not apply to `fundsOut` (authorized releases
-    ///         of already-recorded amounts only check `amount > 0`).
     error AmountBelowMinimum(uint256 amount, uint256 minimum);
-    /// @notice `minFundsInAmount` was set to zero at construction or via
-    ///         `setMinFundsInAmount`. The floor must be non-zero so that it
-    ///         meaningfully rejects zero-amount and dust deposits.
     error InvalidMinFundsInAmount();
+    error AddressTooLong(uint256 length, uint256 maxLength);
+    error ProofTooLong(uint256 length, uint256 maxLength);
     error InvalidRouteRegistryAddress();
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();
