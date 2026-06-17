@@ -50,6 +50,7 @@ contract BridgeTest is Test {
     );
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+    event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
 
     Bridge              bridge;
     MockERC20           usdt0;
@@ -101,7 +102,8 @@ contract BridgeTest is Test {
             address(usdt0),
             address(routeRegistry),
             payable(address(cm)),
-            address(0)
+            address(0),
+            1 // minFundsInAmount: smallest non-zero floor; cases that need a higher floor deploy their own Bridge
         );
 
         rgbVerifier = new RGBVerifier(address(btcRelay));
@@ -150,6 +152,15 @@ contract BridgeTest is Test {
 
     function _settlement(uint256[] memory ids) internal pure returns (bytes memory) {
         return abi.encode(ids);
+    }
+
+    /// @dev Build an ASCII string of exactly `len` bytes (for address-length caps).
+    function _str(uint256 len) internal pure returns (string memory) {
+        bytes memory b = new bytes(len);
+        for (uint256 i = 0; i < len; i++) {
+            b[i] = 'a';
+        }
+        return string(b);
     }
 
     function _setFundsInTokenRule(uint256 percent) internal {
@@ -221,24 +232,24 @@ contract BridgeTest is Test {
 
     function test_constructor_revertsOnZeroToken() public {
         vm.expectRevert(BridgeBase.InvalidTokenAddress.selector);
-        new Bridge(address(0), address(routeRegistry), payable(address(cm)), address(0));
+        new Bridge(address(0), address(routeRegistry), payable(address(cm)), address(0), 1);
     }
 
     function test_constructor_revertsOnZeroRouteRegistry() public {
         vm.expectRevert(IBridge.InvalidRouteRegistryAddress.selector);
-        new Bridge(address(usdt0), address(0), payable(address(cm)), address(0));
+        new Bridge(address(usdt0), address(0), payable(address(cm)), address(0), 1);
     }
 
     function test_constructor_revertsOnZeroCommissionManager() public {
         vm.expectRevert(IBridge.InvalidCommissionManagerAddress.selector);
-        new Bridge(address(usdt0), address(routeRegistry), payable(address(0)), address(0));
+        new Bridge(address(usdt0), address(routeRegistry), payable(address(0)), address(0), 1);
     }
 
     function test_constructor_storesInitialLZAdapter() public {
         address initialAdapter = makeAddr('initial-adapter');
         vm.prank(deployer);
         Bridge b = new Bridge(
-            address(usdt0), address(routeRegistry), payable(address(cm)), initialAdapter
+            address(usdt0), address(routeRegistry), payable(address(cm)), initialAdapter, 1
         );
         assertEq(b.lzAdapter(), initialAdapter, 'lzAdapter set in constructor');
     }
@@ -299,6 +310,263 @@ contract BridgeTest is Test {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         bridge.setRouteRegistry(makeAddr('newReg'));
+    }
+
+    // ========================================================================
+    // Minimum fundsIn amount + zero-amount guards
+    //
+    // `minFundsInAmount` is a non-zero floor enforced on the inbound path: it
+    // rejects zero-amount deposits (R-I-07) and dust whose commission would
+    // round to zero (R-I-08). `fundsOut` is an authorized release and only
+    // rejects amount == 0. The harness deploys with the smallest floor (1), so
+    // tests that need a higher floor raise it via `setMinFundsInAmount`.
+    // ========================================================================
+
+    function test_constructor_storesMinFundsInAmount() public {
+        vm.prank(deployer);
+        Bridge b = new Bridge(
+            address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1234
+        );
+        assertEq(b.minFundsInAmount(), 1234, 'minFundsInAmount stored from constructor');
+    }
+
+    function test_constructor_revertsOnZeroMinFundsInAmount() public {
+        vm.expectRevert(IBridge.InvalidMinFundsInAmount.selector);
+        new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 0);
+    }
+
+    function test_setMinFundsInAmount_updatesAndEmits() public {
+        vm.expectEmit(false, false, false, true, address(bridge));
+        emit MinFundsInAmountUpdated(1, 1000);
+
+        vm.prank(multisig);
+        bridge.setMinFundsInAmount(1000);
+        assertEq(bridge.minFundsInAmount(), 1000);
+    }
+
+    function test_setMinFundsInAmount_revertsOnZero() public {
+        vm.prank(multisig);
+        vm.expectRevert(IBridge.InvalidMinFundsInAmount.selector);
+        bridge.setMinFundsInAmount(0);
+    }
+
+    function test_setMinFundsInAmount_revertsIfNotOwner() public {
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        bridge.setMinFundsInAmount(1000);
+    }
+
+    // --- R-I-07: zero amount ---
+
+    function test_fundsIn_revertsOnZeroAmount() public {
+        // Floor is 1 (setUp), so a zero deposit is below the minimum.
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(0), uint256(1)));
+        vm.prank(user);
+        bridge.fundsIn(0, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+    }
+
+    function test_fundsOut_revertsOnZeroAmount() public {
+        // fundsOut has no minimum — only the zero-amount no-op guard, which
+        // fires before the burn-id and balance checks.
+        vm.expectRevert(IBridge.ZeroAmount.selector);
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, 0, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
+    }
+
+    // --- R-I-08: dust / below-minimum on the inbound path ---
+
+    function test_fundsIn_revertsBelowMinimum() public {
+        vm.prank(multisig);
+        bridge.setMinFundsInAmount(1000);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(999), uint256(1000)));
+        vm.prank(user);
+        bridge.fundsIn(999, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+    }
+
+    function test_fundsIn_acceptsExactlyAtMinimum() public {
+        vm.prank(multisig);
+        bridge.setMinFundsInAmount(1000);
+
+        vm.prank(user);
+        bridge.fundsIn(1000, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+        assertEq(rgbModule.fundsInRecords(TX_ID), 1000, 'deposit at the floor is accepted');
+    }
+
+    function test_fundsIn_acceptsAboveMinimum() public {
+        vm.prank(multisig);
+        bridge.setMinFundsInAmount(1000);
+
+        vm.prank(user);
+        bridge.fundsIn(1001, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+        assertEq(rgbModule.fundsInRecords(TX_ID), 1001, 'deposit above the floor is accepted');
+    }
+
+    function test_fundsIn_dustThatRoundsCommissionToZeroIsRejected() public {
+        // 4% token commission. Below 25 units the fee floors to zero
+        // (24 * 400 / 100 / 100 == 0) — the exact dust case R-I-08 describes.
+        // A floor of 25 keeps such dust off the inbound path; at 25 the fee is
+        // a non-zero 1 unit.
+        _setFundsInTokenRule(400);
+        vm.prank(multisig);
+        bridge.setMinFundsInAmount(25);
+
+        assertEq(cm.calculateStableFee(24, 400, 100), 0, 'sanity: 24 pays zero commission');
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(24), uint256(25)));
+        vm.prank(user);
+        bridge.fundsIn(24, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        // At the floor the deposit is accepted and pays a non-zero commission.
+        vm.prank(user);
+        bridge.fundsIn(25, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+        assertEq(rgbModule.fundsInRecords(TX_ID), 24, 'net = 25 - 1 commission');
+    }
+
+    function test_fundsInFromAdapter_revertsBelowMinimum() public {
+        // The adapter overload shares `_fundsIn`, so the floor applies there too.
+        address mockAdapter = makeAddr('mock-adapter');
+        vm.prank(multisig);
+        bridge.setLZAdapter(mockAdapter);
+        vm.prank(multisig);
+        bridge.setMinFundsInAmount(1000);
+
+        usdt0.mint(mockAdapter, 999);
+        vm.prank(mockAdapter);
+        usdt0.approve(address(bridge), 999);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(999), uint256(1000)));
+        vm.prank(mockAdapter);
+        bridge.fundsIn(999, SOURCE_CHAIN_ID, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+    }
+
+    function test_fundsIn_revertsOnDestinationAddressTooLong() public {
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+        string memory tooLong = _str(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AddressTooLong.selector, max + 1, max));
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, tooLong, TX_ID, '');
+    }
+
+    function test_fundsIn_acceptsDestinationAddressAtMaxLength() public {
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, _str(max), TX_ID, '');
+        assertEq(rgbModule.fundsInRecords(TX_ID), AMOUNT, 'deposit at the address-length cap is accepted');
+    }
+
+    function test_fundsOut_revertsOnSourceAddressTooLong() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+        string memory tooLong = _str(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AddressTooLong.selector, max + 1, max));
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, tooLong,
+            _proof(), _settlement(_singleFundsInId())
+        );
+    }
+
+    function test_fundsOut_acceptsSourceAddressAtMaxLength() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 max = bridge.MAX_ADDRESS_LENGTH();
+
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, _str(max),
+            _proof(), _settlement(_singleFundsInId())
+        );
+        assertEq(usdt0.balanceOf(recipient), AMOUNT, 'release with sourceAddress at the cap succeeds');
+    }
+
+    // ========================================================================
+    // Proof length cap (R-I-12)
+    //
+    // fundsOut forwards `proof` to the route verifier, so it is capped at
+    // MAX_PROOF_LENGTH to bound calldata + verifier gas. The exact cap is
+    // accepted; one byte over reverts ProofTooLong. The real RGB proof
+    // (abi.encode(uint256, bytes32) = 64 bytes) is far under the cap.
+    // ========================================================================
+
+    /// @dev Build a `bytes` blob of exactly `len` bytes.
+    function _bytesOfLength(uint256 len) internal pure returns (bytes memory b) {
+        b = new bytes(len);
+        for (uint256 i = 0; i < len; i++) {
+            b[i] = 0x61;
+        }
+    }
+
+    function test_fundsOut_revertsOnProofTooLong() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 max = bridge.MAX_PROOF_LENGTH();
+        bytes memory tooLong = _bytesOfLength(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.ProofTooLong.selector, max + 1, max));
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            tooLong, _settlement(_singleFundsInId())
+        );
+    }
+
+    function test_fundsOut_acceptsProofAtMaxLength() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        // A proof at the exact cap passes the length guard. It then reverts in
+        // the verifier (the blob is not a valid (height, commitment) pair), so
+        // the cap check is isolated by asserting it is NOT ProofTooLong: the
+        // call reaches the verifier instead.
+        uint256 max = bridge.MAX_PROOF_LENGTH();
+        bytes memory atMax = _bytesOfLength(max);
+
+        vm.prank(multisig);
+        try bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            atMax, _settlement(_singleFundsInId())
+        ) {
+            // a decodable proof would succeed; this blob won't, so we don't
+            // expect to land here — but if a future verifier accepts it, the
+            // length guard still passed, which is what this test asserts.
+        } catch (bytes memory reason) {
+            // Must NOT be the length guard — proving max-length passes it.
+            bytes4 sel = bytes4(reason);
+            assertTrue(sel != IBridge.ProofTooLong.selector, 'max-length proof must clear the length guard');
+        }
+    }
+
+    function test_fundsOut_acceptsRealProofUnderCap() public {
+        // The production-shaped 64-byte RGB proof is well under the cap and the
+        // happy path still succeeds.
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        assertLt(_proof().length, bridge.MAX_PROOF_LENGTH(), 'sanity: real proof under cap');
+
+        vm.prank(multisig);
+        bridge.fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
+        assertEq(usdt0.balanceOf(recipient), AMOUNT, 'release with a normal proof succeeds');
     }
 
     // ========================================================================
