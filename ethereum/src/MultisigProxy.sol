@@ -183,9 +183,9 @@ contract MultisigProxy is IMultisigProxy {
         if (bridge_ == address(0)) revert ZeroBridge();
         if (commissionManager_ == address(0)) revert ZeroCommissionManager();
         if (enclaveSigners_.length == 0) revert NoSigners();
-        if (enclaveThreshold_ == 0 || enclaveThreshold_ > enclaveSigners_.length) revert InvalidThreshold();
+        _requireValidThreshold(enclaveThreshold_, enclaveSigners_.length);
         if (federationSigners_.length == 0) revert NoSigners();
-        if (federationThreshold_ == 0 || federationThreshold_ > federationSigners_.length) revert InvalidThreshold();
+        _requireValidThreshold(federationThreshold_, federationSigners_.length);
         if (commissionRecipient_ == address(0)) revert ZeroCommissionRecipient();
         if (minTimelock_ == 0 || minTimelock_ >= MAX_PROPOSAL_LIFETIME) revert InvalidMinTimelock();
         if (timelockDuration_ < minTimelock_) revert TimelockTooShort();
@@ -869,7 +869,7 @@ contract MultisigProxy is IMultisigProxy {
         } else if (opType == OperationType.UpdateEnclaveSigners) {
             (address[] memory newSigners, uint256 newThreshold) = abi.decode(opData, (address[], uint256));
             if (newSigners.length == 0) revert NoSigners();
-            if (newThreshold == 0 || newThreshold > newSigners.length) revert InvalidThreshold();
+            _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
             _enclaveSigners = newSigners;
             enclaveThreshold = newThreshold;
@@ -878,7 +878,7 @@ contract MultisigProxy is IMultisigProxy {
         } else if (opType == OperationType.UpdateFederationSigners) {
             (address[] memory newSigners, uint256 newThreshold) = abi.decode(opData, (address[], uint256));
             if (newSigners.length == 0) revert NoSigners();
-            if (newThreshold == 0 || newThreshold > newSigners.length) revert InvalidThreshold();
+            _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
@@ -1078,6 +1078,21 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     /// @dev Validates no zero addresses and no duplicates. O(n^2), fine for <20 signers.
+    /// @dev Enforces the quorum policy shared by both signer sets (enclave and
+    ///      federation), in the constructor and the signer-update handlers:
+    ///        - at least 2 signers (no single-key set);
+    ///        - threshold of at least 2 (no single signer can authorise alone);
+    ///        - threshold a strict majority (`2 * threshold > n`), which rejects
+    ///          1-of-N and any sub-majority quorum;
+    ///        - threshold not exceeding the signer count.
+    ///      The smallest valid sets are 2-of-2 and 2-of-3. This upholds the
+    ///      spec invariant "one signer MUST NOT authorise fundsOut alone".
+    function _requireValidThreshold(uint256 threshold, uint256 n) private pure {
+        if (n < 2 || threshold < 2 || threshold > n || 2 * threshold <= n) {
+            revert InvalidThreshold();
+        }
+    }
+
     function _validateSigners(address[] memory signers) private pure {
         for (uint256 i = 0; i < signers.length; i++) {
             if (signers[i] == address(0)) revert ZeroAddressSigner();
