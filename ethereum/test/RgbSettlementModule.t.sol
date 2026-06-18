@@ -264,4 +264,24 @@ contract RgbSettlementModuleTest is Test {
 
         assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, 'record restored on revert');
     }
+
+    function test_beforeFundsOut_trailingUnknownIdsUnread_currentBehavior() public {
+        _record(TX_ID_1, AMOUNT);
+
+        uint256 trailingUnknownId = TX_ID_2;
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = TX_ID_1;
+        ids[1] = trailingUnknownId;
+
+        assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, 'pre first record');
+        assertEq(module.fundsInRecords(trailingUnknownId), 0, 'pre trailing unknown');
+
+        // Current behavior: the loop exits once the requested amount is
+        // satisfied, so trailing ids are not read or validated.
+        vm.prank(routeRegistry);
+        module.beforeFundsOut(_fundsOutCtx(AMOUNT), _settlementData(ids));
+
+        assertEq(module.fundsInRecords(TX_ID_1), 0, 'first record consumed');
+        assertEq(module.fundsInRecords(trailingUnknownId), 0, 'trailing unknown unread');
+    }
 }
