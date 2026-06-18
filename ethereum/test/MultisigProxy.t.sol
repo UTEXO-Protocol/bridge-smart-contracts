@@ -2759,67 +2759,52 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.timelockDuration(), 0, 'timelock cleared');
     }
 
-    // Pending proposals do not snapshot their timelock delay; execution checks
-    // the live timelockDuration, so a later governance update can re-lock an
-    // already mature proposal until the new duration elapses.
-    function test_pendingProposalUsesLiveTimelock_currentBehavior() public {
-        uint256 proposedAt = block.timestamp;
-        address newBridge = makeAddr('liveTimelockBridge');
-        uint256 newDuration = 2 hours;
-        uint256 deadline = proposedAt + 1 days;
+    function test_proposalUsesSnapshottedTimelock_afterFix() public {
+        uint256 proposedAt  = block.timestamp;
+        address newBridge   = makeAddr('snapshotTimelockBridge');
+        uint256 newDuration = 2 hours;          // raise above the 1h in force at creation
+        uint256 deadline    = proposedAt + 1 days;
 
         assertEq(proxy.timelockDuration(), TIMELOCK, 'pre timelock');
 
+        // Proposal A — created while timelockDuration == TIMELOCK (1h).
         uint256 bridgeNonce = proxy.proposalNonce();
         bytes32 bridgeDigest = MultisigHelper.digestProposeUpdateBridge(
             domainSep, newBridge, bridgeNonce, deadline
         );
         (uint256[] memory bridgePks, uint256 bridgeBitmap) = _fedSigSet2of3();
         bytes[] memory bridgeSigs = MultisigHelper.signAll(vm, bridgeDigest, bridgePks);
-
         bytes32 bridgeProposalId =
             proxy.proposeUpdateBridge(newBridge, bridgeNonce, deadline, bridgeBitmap, bridgeSigs);
 
+        assertEq(
+            proxy.getProposal(bridgeProposalId).timelockSnapshot,
+            TIMELOCK,
+            'timelock snapshotted at creation'
+        );
+
+        // Raise the live timelock to 2h via its own proposal.
         uint256 timelockNonce = proxy.proposalNonce();
         bytes32 timelockDigest = MultisigHelper.digestProposeSetTimelockDuration(
             domainSep, newDuration, timelockNonce, deadline
         );
         (uint256[] memory timelockPks, uint256 timelockBitmap) = _fedSigSet2of3();
         bytes[] memory timelockSigs = MultisigHelper.signAll(vm, timelockDigest, timelockPks);
-
         bytes32 timelockProposalId = proxy.proposeSetTimelockDuration(
             newDuration, timelockNonce, deadline, timelockBitmap, timelockSigs
         );
 
+        // At proposedAt + 1h + 1: both proposals' creation-time snapshot (1h)
+        // has elapsed. Execute the timelock raise first.
         vm.warp(proposedAt + TIMELOCK + 1);
-
-        vm.expectEmit(false, false, false, true, address(proxy));
-        emit TimelockDurationUpdated(newDuration);
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit ProposalExecuted(timelockProposalId, IMultisigProxy.OperationType.SetTimelockDuration);
-
         proxy.executeProposal(timelockProposalId, abi.encode(newDuration));
+        assertEq(proxy.timelockDuration(), newDuration, 'live timelock raised to 2h');
 
-        assertEq(proxy.timelockDuration(), newDuration, 'live timelock increased');
-
-        // Current behavior: execution compares the frozen proposedAt against
-        // the live timelockDuration, so raising the timelock re-locks this
-        // already mature bridge proposal.
-        vm.expectRevert(IMultisigProxy.TimelockActive.selector);
+        // Proposal A uses its 1h snapshot, so it is mature now and executes —
+        // the raised live timelock (2h) does NOT re-lock it. Under the pre-fix
+        // live-timelock check this would revert TimelockActive.
         proxy.executeProposal(bridgeProposalId, abi.encode(newBridge));
-
-        assertEq(proxy.bridge(), address(bridge), 'bridge unchanged while re-locked');
-
-        vm.warp(proposedAt + newDuration + 1);
-
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit BridgeAddressUpdated(address(bridge), newBridge);
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit ProposalExecuted(bridgeProposalId, IMultisigProxy.OperationType.UpdateBridge);
-
-        proxy.executeProposal(bridgeProposalId, abi.encode(newBridge));
-
-        assertEq(proxy.bridge(), newBridge, 'bridge updated after live timelock');
+        assertEq(proxy.bridge(), newBridge, 'snapshotted proposal executes despite the live timelock raise');
     }
 
     // The typed commission-withdraw path pins the recipient to
