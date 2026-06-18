@@ -46,6 +46,8 @@ interface ICommissionManager {
     error InvalidRecipient();
     error StablePercentTooHigh();
     error MultiplierZero();
+    error InvalidFeeShape(uint256 stablePercent, uint8 multiplier);
+    error NativeCommissionNotAllowedOnFundsOut();
     error TokenDecimalsUnavailable();
     error BalanceBelowRecordedPool();
     error NothingReceived();

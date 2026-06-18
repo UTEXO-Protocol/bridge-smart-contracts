@@ -9,11 +9,15 @@ interface IBridge {
     error InvalidDestinationAddress();
     error InvalidDestinationChainId();
     error InvalidSourceChainId();
+    error ZeroAmount();
+    error AmountBelowMinimum(uint256 amount, uint256 minimum);
+    error InvalidMinFundsInAmount();
+    error AddressTooLong(uint256 length, uint256 maxLength);
+    error ProofTooLong(uint256 length, uint256 maxLength);
     error InvalidRouteRegistryAddress();
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();
     error BurnIdAlreadyConsumed(uint256 burnId);
-    error NativeCommissionNotAllowedOnFundsOut();
     error NativeValueMismatch();
 
     // =========================================================================
@@ -30,6 +34,11 @@ interface IBridge {
     ///                    before the first rotation).
     /// @param newRegistry New registry (non-zero by `setRouteRegistry` guard).
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+
+    /// @notice Emitted on every successful `setMinFundsInAmount`.
+    /// @param oldMinimum Previous minimum (constructor value before first update).
+    /// @param newMinimum New minimum (in token smallest units; always non-zero).
+    event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
 
     /// @param sender             Address that deposited the tokens (the EOA on the
     ///                           public overload, or the LZ adapter on the
@@ -148,6 +157,16 @@ interface IBridge {
     /// @notice Updates the `RouteRegistry` reference Bridge dispatches
     ///         `onFundsIn` / `beforeFundsOut` through. Owner-only.
     function setRouteRegistry(address newRouteRegistry) external;
+
+    /// @notice Updates the minimum accepted `fundsIn` deposit (token smallest
+    ///         units). Owner-only (MultisigProxy via the federation
+    ///         propose -> timelock -> execute flow). Must be non-zero; reverts
+    ///         `InvalidMinFundsInAmount` otherwise.
+    function setMinFundsInAmount(uint256 newMinimum) external;
+
+    /// @notice Current minimum accepted `fundsIn` deposit in token smallest
+    ///         units. Always non-zero.
+    function minFundsInAmount() external view returns (uint256);
 
     /// @notice Current trusted adapter; `address(0)` means the adapter
     ///         overload is closed.

@@ -161,25 +161,28 @@ contract CommissionManagerTest is Test {
     }
 
     function test_setGlobalDefaults_updatesAndEmits() public {
+        // FUNDS_IN + NATIVE is a valid shape (the user funds the native fee on
+        // deposit). NATIVE + FUNDS_OUT is rejected by the setter (R-W-04) and is
+        // covered by a dedicated revert test.
         vm.expectEmit(true, true, true, true);
         emit GlobalDefaultsUpdated(
             200,
             100,
-            CommissionSide.FUNDS_OUT,
+            CommissionSide.FUNDS_IN,
             CommissionCurrency.NATIVE
         );
         vm.prank(owner);
         cm.setGlobalDefaults(
             200,
             100,
-            CommissionSide.FUNDS_OUT,
+            CommissionSide.FUNDS_IN,
             CommissionCurrency.NATIVE
         );
         (uint256 sp, uint8 m, CommissionSide side, CommissionCurrency cur) =
             cm.getGlobalDefaults();
         assertEq(sp, 200);
         assertEq(m, 100);
-        assertEq(uint8(side), uint8(CommissionSide.FUNDS_OUT));
+        assertEq(uint8(side), uint8(CommissionSide.FUNDS_IN));
         assertEq(uint8(cur), uint8(CommissionCurrency.NATIVE));
     }
 
@@ -234,6 +237,32 @@ contract CommissionManagerTest is Test {
             CommissionSide.FUNDS_IN,
             CommissionCurrency.TOKEN
         );
+    }
+
+    /// @dev UT-FIX-07: setGlobalDefaults rejects the NATIVE + FUNDS_OUT shape.
+    function test_setGlobalDefaults_revertsNativeFundsOut() public {
+        vm.prank(owner);
+        vm.expectRevert(ICommissionManager.NativeCommissionNotAllowedOnFundsOut.selector);
+        cm.setGlobalDefaults(
+            100,
+            100,
+            CommissionSide.FUNDS_OUT,
+            CommissionCurrency.NATIVE
+        );
+    }
+
+    /// @dev FUNDS_IN + NATIVE stays valid — the user funds the native fee on deposit.
+    function test_setGlobalDefaults_acceptsNativeFundsIn() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(
+            100,
+            100,
+            CommissionSide.FUNDS_IN,
+            CommissionCurrency.NATIVE
+        );
+        (, , CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
+        assertEq(uint8(side), uint8(CommissionSide.FUNDS_IN));
+        assertEq(uint8(cur),  uint8(CommissionCurrency.NATIVE));
     }
 
     // --- Commission calculations (globals) ---
@@ -479,6 +508,153 @@ contract CommissionManagerTest is Test {
         cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
     }
 
+    /// @dev UT-FIX-07: setCommissionRule rejects the NATIVE + FUNDS_OUT shape.
+    function test_setCommissionRule_revertsNativeFundsOut() public {
+        address t = address(token);
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 100,
+            multiplier: 100,
+            side: CommissionSide.FUNDS_OUT,
+            currency: CommissionCurrency.NATIVE,
+            isSet: true
+        });
+        vm.prank(owner);
+        vm.expectRevert(ICommissionManager.NativeCommissionNotAllowedOnFundsOut.selector);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
+    }
+
+    /// @dev FUNDS_OUT + TOKEN stays valid (the fee is deducted from the release).
+    function test_setCommissionRule_acceptsFundsOutToken() public {
+        address t = address(token);
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 100,
+            multiplier: 100,
+            side: CommissionSide.FUNDS_OUT,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
+
+        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t);
+        assertEq(uint8(stored.side),     uint8(CommissionSide.FUNDS_OUT));
+        assertEq(uint8(stored.currency), uint8(CommissionCurrency.TOKEN));
+    }
+
+    // --- Fee-shape invariant (R-W-03 / UT-FIX-06) -----------------------------
+    //
+    // The stable-fee formula is `amount * stablePercent / multiplier / multiplier`,
+    // i.e. a fee fraction of `stablePercent / multiplier^2`. If `stablePercent`
+    // exceeds `multiplier^2` the quoted fee exceeds the bridged amount and the
+    // later `netAmount = amount - fee` underflows (Panic 0x11), bricking the
+    // route until the federation reconfigures. The setters must therefore reject
+    // any `(stablePercent, multiplier)` pair where `stablePercent > multiplier^2`.
+    function test_setGlobalDefaults_revertsWhenStablePercentExceedsMultiplierSquared() public {
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(9000), uint8(1))
+        );
+        cm.setGlobalDefaults(9000, 1, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev Boundary just above the invariant: `multiplier = 10` → `multiplier^2 = 100`,
+    ///      so `stablePercent = 101` is the smallest rejected value for that multiplier.
+    function test_setGlobalDefaults_revertsJustAboveFeeShapeBoundary() public {
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(101), uint8(10))
+        );
+        cm.setGlobalDefaults(101, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev Exact boundary `stablePercent == multiplier^2` is accepted: it is a 100%
+    ///      fee (`netAmount = 0`) which is degenerate but does not underflow, so the
+    ///      invariant rejects only the strictly-greater case.
+    function test_setGlobalDefaults_acceptsFeeShapeAtExactBoundary() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(100, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        (uint256 sp, uint8 m,,) = cm.getGlobalDefaults();
+        assertEq(sp, 100);
+        assertEq(m, 10);
+    }
+
+    /// @dev Regression for the uint8 widening in the fix. With the default
+    ///      `multiplier = 100`, `multiplier^2 = 10000`, so `stablePercent = 9000`
+    ///      is a valid 90% fee and must be accepted. The audit's literal snippet
+    ///      `multiplier * multiplier` evaluates in uint8 and overflows at
+    ///      `100 * 100 = 10000 > 255`, which would wrongly revert this valid config;
+    ///      the fix widens to uint256 before squaring.
+    function test_setGlobalDefaults_acceptsHighPercentWithDefaultMultiplier() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(9000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        (uint256 sp, uint8 m,,) = cm.getGlobalDefaults();
+        assertEq(sp, 9000);
+        assertEq(m, 100);
+    }
+
+    /// @dev Same invariant on the per-route setter: `(9000, 1)` must revert.
+    function test_setCommissionRule_revertsWhenStablePercentExceedsMultiplierSquared() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 9000,
+            multiplier: 1,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(9000), uint8(1))
+        );
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
+    }
+
+    /// @dev Exact boundary `stablePercent == multiplier^2` accepted on the route setter.
+    function test_setCommissionRule_acceptsFeeShapeAtExactBoundary() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 100,
+            multiplier: 10,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
+        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token));
+        assertEq(stored.stablePercent, 100);
+        assertEq(stored.multiplier, 10);
+    }
+
+    /// @dev uint8-widening regression on the per-route setter: `(9000, 100)` is valid.
+    function test_setCommissionRule_acceptsHighPercentWithDefaultMultiplier() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 9000,
+            multiplier: 100,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
+        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token));
+        assertEq(stored.stablePercent, 9000);
+        assertEq(stored.multiplier, 100);
+    }
+
+    /// @dev End state of the invariant: a config accepted at the exact boundary
+    ///      yields `fee == amount` and `netAmount == 0` without underflowing. This
+    ///      is what the setter guard guarantees for every storable rule — the
+    ///      `amount - fee` subtraction in the calculators can never go negative.
+    function test_calculateFundsInCommission_acceptedBoundaryDoesNotUnderflow() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(100, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        uint256 amount = 50_000;
+        (uint256 tok, uint256 nat, uint256 net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), amount);
+        assertEq(tok, amount); // 100% fee at the boundary
+        assertEq(nat, 0);
+        assertEq(net, 0);      // no underflow
+    }
+
     // --- Bridge address ---
 
     function test_setBridgeAddress_updates() public {
@@ -610,5 +786,51 @@ contract CommissionManagerTest is Test {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.InsufficientBalance.selector);
         cm.withdrawNativeCommission(payable(recipient), 1 wei);
+    }
+
+    // --- Formula regression coverage ---
+
+    function test_convertTokenFeeToNative_formulaAcrossTokenAndFeedDecimals() public {
+        uint256[3] memory tokenFees = [
+            uint256(100e6),
+            uint256(1e18),
+            uint256(25e6)
+        ];
+        uint256[3] memory tokenDecimals = [
+            uint256(6),
+            uint256(18),
+            uint256(6)
+        ];
+        uint8[3] memory feedDecimals = [
+            uint8(8),
+            uint8(8),
+            uint8(10)
+        ];
+        int256[3] memory prices = [
+            int256(2_000e8),
+            int256(2_000e8),
+            int256(2_500e10)
+        ];
+        uint256[3] memory expectedNativeFees = [
+            uint256(5e16), // 100 USD / 2000 USD per ETH = 0.05 ETH
+            uint256(5e14), // 1 USD / 2000 USD per ETH = 0.0005 ETH
+            uint256(1e16)  // 25 USD / 2500 USD per ETH = 0.01 ETH
+        ];
+
+        // Use hand-computed expected values so this test anchors the conversion
+        // formula instead of mirroring the implementation expression.
+        for (uint256 i = 0; i < tokenFees.length; i++) {
+            MockAggregatorV3 feed =
+                new MockAggregatorV3(feedDecimals[i], prices[i], block.timestamp);
+
+            vm.prank(owner);
+            cm.setEthUsdFeed(address(feed), HEARTBEAT);
+
+            assertEq(
+                cm.convertTokenFeeToNative(tokenFees[i], tokenDecimals[i]),
+                expectedNativeFees[i],
+                'native fee formula'
+            );
+        }
     }
 }

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
+import { IERC20 } from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
+
 import { ISettlementModule } from '../../src/interfaces/ISettlementModule.sol';
 import { FundsInContext, FundsOutContext } from '../../src/interfaces/RouteTypes.sol';
 
@@ -29,12 +31,21 @@ contract MockSettlementModule is ISettlementModule {
     uint256 public lastBurnId;
     bytes   public lastSettlementData;
 
+    address public balanceProbeToken;
+    address public balanceProbeTarget;
+    uint256 public lastObservedBalanceOnFundsIn;
+
     function setShouldRevertOnFundsIn(bool v) external {
         shouldRevertOnFundsIn = v;
     }
 
     function setShouldRevertOnBeforeFundsOut(bool v) external {
         shouldRevertOnBeforeFundsOut = v;
+    }
+
+    function setFundsInBalanceProbe(address token, address target) external {
+        balanceProbeToken = token;
+        balanceProbeTarget = target;
     }
 
     /// @inheritdoc ISettlementModule
@@ -48,6 +59,9 @@ contract MockSettlementModule is ISettlementModule {
         lastOperationId     = ctx.operationId;
         lastNetAmount       = ctx.netAmount;
         lastSettlementData  = settlementData;
+        if (balanceProbeToken != address(0)) {
+            lastObservedBalanceOnFundsIn = IERC20(balanceProbeToken).balanceOf(balanceProbeTarget);
+        }
     }
 
     /// @inheritdoc ISettlementModule
