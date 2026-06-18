@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 import { Vm } from 'forge-std/Vm.sol';
 
@@ -24,6 +24,14 @@ library MultisigHelper {
 
     bytes32 internal constant EMERGENCY_UNPAUSE_TYPEHASH = keccak256(
         'EmergencyUnpause(uint256 nonce,uint256 deadline)'
+    );
+
+    bytes32 internal constant PROPOSE_PAUSE_INFLOW_TYPEHASH = keccak256(
+        'ProposePauseInflow(uint256 nonce,uint256 deadline)'
+    );
+
+    bytes32 internal constant PROPOSE_UNPAUSE_INFLOW_TYPEHASH = keccak256(
+        'ProposeUnpauseInflow(uint256 nonce,uint256 deadline)'
     );
 
     bytes32 internal constant PROPOSE_ADMIN_EXECUTE_TYPEHASH = keccak256(
@@ -159,6 +167,14 @@ library MultisigHelper {
 
     function digestEmergencyUnpause(bytes32 domainSep, uint256 nonce, uint256 deadline) internal pure returns (bytes32) {
         return toTypedDataHash(domainSep, keccak256(abi.encode(EMERGENCY_UNPAUSE_TYPEHASH, nonce, deadline)));
+    }
+
+    function digestProposePauseInflow(bytes32 domainSep, uint256 nonce, uint256 deadline) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(PROPOSE_PAUSE_INFLOW_TYPEHASH, nonce, deadline)));
+    }
+
+    function digestProposeUnpauseInflow(bytes32 domainSep, uint256 nonce, uint256 deadline) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(PROPOSE_UNPAUSE_INFLOW_TYPEHASH, nonce, deadline)));
     }
 
     function digestProposeAdminExecute(

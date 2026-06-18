@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 /// @title RouteTypes
 /// @notice Shared data shapes used by `IRouteRegistry`, `ISettlementModule`

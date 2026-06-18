@@ -76,3 +76,12 @@ Each transfer deducts a service commission, configured per-route: source side (`
 ### Replay protection
 
 Each network enforces replay protection at the smart-contract level. On EVM the `Bridge` records consumed `burnId`s on-chain (each `FundsOut` carries the `burnId` extracted from the source-side burn consignment and is rejected if already seen) and `MultisigProxy` enforces per-selector sequential nonces on `execute` plus a sequential `batchNonce` on `executeBatch`. Route-specific bookkeeping — e.g. matching `FundsOut` against the exact source-side deposits being settled — lives in the per-route `SettlementModule` (for the RGB route, `RgbSettlementModule` tracks net deposit balances and consumes them atomically with the release).
+
+## Third-party code
+
+The Bitcoin SPV light client consulted on the RGB route lives under `ethereum/src/btc_relay/`. This code is vendored from the upstream Atomiq project:
+
+- **Source:** [atomiqlabs/atomiq-contracts-evm](https://github.com/atomiqlabs/atomiq-contracts-evm)
+- **License:** Apache License 2.0 — preserved in the SPDX headers of the vendored files.
+
+`RGBVerifier` does not import the vendored `BtcRelay` directly — it talks to a deployed relay through the minimal local `IBtcRelayView` interface (`ethereum/src/interfaces/IBtcRelayView.sol`), which mirrors only the read methods the verifier relies on.

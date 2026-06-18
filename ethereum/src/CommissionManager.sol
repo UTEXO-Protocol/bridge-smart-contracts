@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -7,7 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import {AggregatorV3Interface} from "./interfaces/AggregatorV3Interface.sol";
 
 import {
     CommissionConfig,
@@ -292,6 +292,20 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
     ) external onlyOwner {
         if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (multiplier == 0) revert MultiplierZero();
+        // Joint invariant: the fee fraction is `stablePercent / multiplier^2`.
+        // When `stablePercent > multiplier^2` the quoted fee exceeds the
+        // bridged amount, so `netAmount = amount - fee` underflows and bricks
+        // every subsequent funds flow on the affected route. Widen to uint256
+        // before squaring — `multiplier` is uint8 and the common `100 * 100`
+        // would itself overflow uint8.
+        if (stablePercent > uint256(multiplier) * uint256(multiplier)) {
+            revert InvalidFeeShape(stablePercent, multiplier);
+        }
+        // NATIVE on FUNDS_OUT is unrepresentable: a release has no payer for a
+        // native fee
+        if (currency == CommissionCurrency.NATIVE && side == CommissionSide.FUNDS_OUT) {
+            revert NativeCommissionNotAllowedOnFundsOut();
+        }
 
         globalStablePercent = stablePercent;
         globalMultiplier = multiplier;
@@ -338,6 +352,20 @@ contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
         // Validate config
         if (config.stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (config.multiplier == 0) revert MultiplierZero();
+        // Joint invariant: the fee fraction is `stablePercent / multiplier^2`.
+        // When `stablePercent > multiplier^2` the quoted fee exceeds the
+        // bridged amount, so `netAmount = amount - fee` underflows and bricks
+        // every subsequent funds flow on the affected route. Widen to uint256
+        // before squaring — `multiplier` is uint8 and the common `100 * 100`
+        // would itself overflow uint8.
+        if (config.stablePercent > uint256(config.multiplier) * uint256(config.multiplier)) {
+            revert InvalidFeeShape(config.stablePercent, config.multiplier);
+        }
+        // NATIVE on FUNDS_OUT is unrepresentable: a release has no payer for a
+        // native fee
+        if (config.currency == CommissionCurrency.NATIVE && config.side == CommissionSide.FUNDS_OUT) {
+            revert NativeCommissionNotAllowedOnFundsOut();
+        }
 
         // Build route key
         bytes32 key = buildRouteKey(sourceChainId, destChainId, token);

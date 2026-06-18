@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.35;
 
 /// @title IMultisigProxy
 /// @notice Two-level ECDSA multisig proxy that owns the Bridge and the CommissionManager.
@@ -43,6 +43,8 @@ interface IMultisigProxy {
     error InvalidThreshold();
     error ZeroCommissionRecipient();
     error TimelockTooLong();
+    error TimelockTooShort();
+    error InvalidMinTimelock();
     error Expired();
     error CallDataTooShort();
     error CallNotAllowed(address target, bytes4 selector);
@@ -52,6 +54,7 @@ interface IMultisigProxy {
     error ProposalExpired();
     error DataMismatch();
     error DeadlineTooFar();
+    error DeadlineBeforeTimelock();
     error ProposalExists();
     error IndexOutOfRange();
     error BitmapOutOfRange();
@@ -60,6 +63,8 @@ interface IMultisigProxy {
     error InvalidSignature();
     error ZeroAddressSigner();
     error DuplicateSigner();
+    error SignerSetsOverlap(address signer);
+    error TooManySigners(uint256 count, uint256 max);
     error CallFailed();
     error UnknownOperationType();
     error ZeroRecipient();
@@ -88,7 +93,9 @@ interface IMultisigProxy {
         AdminExecuteAdapter,             // 11 — generic call into LZAdapter (setTrustedEntrypoint, refundStuckFunds, …)
         UpdateLZAdapter,                 // 12 — rotate the routing target for AdminExecuteAdapter
         SetRoute,                        // 13 — RouteRegistry.setRoute(src, dst, enabled, verifier, module)
-        UpdateRouteRegistry              // 14 — Bridge.setRouteRegistry(newRouteRegistry)
+        UpdateRouteRegistry,             // 14 — Bridge.setRouteRegistry(newRouteRegistry)
+        PauseInflow,                     // 15 — Bridge.pauseInflow()  (planned inflow-only freeze, timelocked)
+        UnpauseInflow                    // 16 — Bridge.unpauseInflow()
     }
 
     enum ProposalStatus { None, Pending, Executed, Cancelled }
@@ -373,6 +380,27 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
+    /// @notice Propose a planned inflow-only pause on Bridge (`pauseInflow`).
+    /// @dev Freezes deposits while leaving withdrawals open — intended for a
+    ///      bridge upgrade / liquidity migration. Runs through the timelocked
+    ///      propose -> execute path. For an immediate freeze of BOTH paths use
+    ///      `emergencyPause`. Carries no payload (opData is empty).
+    function proposePauseInflow(
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    /// @notice Propose resuming the inflow path on Bridge (`unpauseInflow`).
+    /// @dev Reverses `proposePauseInflow`. Timelocked. Carries no payload.
+    function proposeUnpauseInflow(
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
     // =========================================================================
     // Cancel & Execute
     // =========================================================================
@@ -416,5 +444,6 @@ interface IMultisigProxy {
     function DOMAIN_SEPARATOR() external view returns (bytes32);
     function proposalNonce() external view returns (uint256);
     function timelockDuration() external view returns (uint256);
+    function MIN_TIMELOCK() external view returns (uint256);
     function getProposal(bytes32 proposalId) external view returns (Proposal memory);
 }

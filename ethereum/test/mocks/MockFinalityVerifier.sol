@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 import { IFinalityVerifier } from '../../src/interfaces/IFinalityVerifier.sol';
 import { FundsOutContext }   from '../../src/interfaces/RouteTypes.sol';

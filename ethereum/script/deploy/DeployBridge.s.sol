@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 import { Script, console2 } from 'forge-std/Script.sol';
 import { Bridge } from '../../src/Bridge.sol';
@@ -29,6 +29,12 @@ import { Bridge } from '../../src/Bridge.sol';
 ///                               `Bridge.setLZAdapter(adapter)`. The Bridge
 ///                               accepts adapter-only `fundsInFromAdapter`
 ///                               calls *only* from the configured adapter.
+///   MIN_FUNDS_IN_AMOUNT       — Minimum accepted `fundsIn` deposit in token
+///                               smallest units (USDT0 has 6 decimals, so e.g.
+///                               10000 = 0.01 USDT0). Required and must be
+///                               non-zero; retune later via federation
+///                               governance with
+///                               `Bridge.setMinFundsInAmount(newMinimum)`.
 ///
 /// Usage:
 ///   forge script script/deploy/DeployBridge.s.sol \
@@ -40,9 +46,10 @@ contract DeployBridge is Script {
         address routeRegistry     = vm.envAddress('ROUTE_REGISTRY_ADDRESS');
         address commissionManager = vm.envAddress('COMMISSION_MANAGER');
         address lzAdapter         = vm.envOr('LZ_ADAPTER', address(0));
+        uint256 minFundsInAmount  = vm.envUint('MIN_FUNDS_IN_AMOUNT');
 
         vm.startBroadcast(pk);
-        bridge = new Bridge(usdt0, routeRegistry, payable(commissionManager), lzAdapter);
+        bridge = new Bridge(usdt0, routeRegistry, payable(commissionManager), lzAdapter, minFundsInAmount);
         vm.stopBroadcast();
 
         console2.log('Bridge deployed at:  ', address(bridge));
@@ -51,5 +58,6 @@ contract DeployBridge is Script {
         console2.log('RouteRegistry:       ', address(bridge.routeRegistry()));
         console2.log('CommissionManager:   ', address(bridge.commissionManager()));
         console2.log('LZ adapter:          ', bridge.lzAdapter());
+        console2.log('Min fundsIn amount:  ', bridge.minFundsInAmount());
     }
 }

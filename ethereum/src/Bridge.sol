@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.35;
 
 import { IERC20 }            from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import { SafeERC20 }         from '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
@@ -40,6 +40,21 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // State
     // =========================================================================
 
+    /// @notice Upper bound on the `destinationAddress` (fundsIn) and
+    ///         `sourceAddress` (fundsOut) byte length. These strings are echoed
+    ///         into event logs, so an unbounded value would let a caller inflate
+    ///         log-storage and indexer cost. 512 bytes covers every supported
+    ///         destination representation (RGB invoices and other chains) with
+    ///         ample headroom.
+    uint256 public constant MAX_ADDRESS_LENGTH = 512;
+
+    /// @notice Upper bound on the `fundsOut` `proof` byte length. `proof` is
+    ///         forwarded to the route verifier, so an unbounded blob would let a
+    ///         release inflate calldata + verifier gas. 1024 bytes comfortably
+    ///         fits the verifier formats (RGB is 64 bytes today; a future SPV
+    ///         inclusion proof stays well under this).
+    uint256 public constant MAX_PROOF_LENGTH = 1024;
+
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
@@ -55,6 +70,12 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @notice Set of burn identifiers already consumed by a successful
     ///         `fundsOut`.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
+
+    /// @inheritdoc IBridge
+    /// @dev Always non-zero (validated at the constructor and setter). Mutable
+    ///      so federation can retune the dust floor via the `MultisigProxy`
+    ///      propose -> timelock -> execute flow without redeploying the Bridge.
+    uint256 public override minFundsInAmount;
 
     // =========================================================================
     // Modifiers
@@ -80,18 +101,24 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///                           `address(0)` if it has not been deployed yet
     ///                           (federation can wire it up later via
     ///                           `setLZAdapter`).
+    /// @param minFundsInAmount_  Initial minimum accepted `fundsIn` deposit in
+    ///                           token smallest units. Must be non-zero; it can
+    ///                           be retuned later via `setMinFundsInAmount`.
     constructor(
         address          usdt0_,
         address          routeRegistry_,
         address payable  commissionManager_,
-        address          lzAdapter_
+        address          lzAdapter_,
+        uint256          minFundsInAmount_
     ) BridgeBase(usdt0_) {
         if (routeRegistry_     == address(0)) revert InvalidRouteRegistryAddress();
         if (commissionManager_ == address(0)) revert InvalidCommissionManagerAddress();
+        if (minFundsInAmount_  == 0)          revert InvalidMinFundsInAmount();
 
         routeRegistry     = routeRegistry_;
         commissionManager = ICommissionManager(commissionManager_);
         lzAdapter         = lzAdapter_;
+        minFundsInAmount  = minFundsInAmount_;
     }
 
     // =========================================================================
@@ -115,6 +142,18 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         address old = routeRegistry;
         routeRegistry = newRouteRegistry;
         emit RouteRegistryUpdated(old, newRouteRegistry);
+    }
+
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`; federation gates this on its M-of-N
+    ///      timelock flow (generic `proposeAdminExecute` -> execute). Must be
+    ///      non-zero: a non-zero floor is what rejects zero-amount and dust
+    ///      deposits on the inbound path.
+    function setMinFundsInAmount(uint256 newMinimum) external override onlyOwner {
+        if (newMinimum == 0) revert InvalidMinFundsInAmount();
+        uint256 old = minFundsInAmount;
+        minFundsInAmount = newMinimum;
+        emit MinFundsInAmountUpdated(old, newMinimum);
     }
 
     // =========================================================================
@@ -174,10 +213,15 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         string  calldata sourceAddress,
         bytes   calldata proof,
         bytes   calldata settlementData
-    ) external override onlyOwner nonReentrant {
+    ) external override onlyOwner nonReentrant whenOutflowNotPaused {
+        if (amount             == 0)                         revert ZeroAmount();
         if (recipient          == address(0))                revert InvalidRecipientAddress();
         if (sourceChainId      == 0)                         revert InvalidSourceChainId();
         if (destinationChainId == 0)                         revert InvalidDestinationChainId();
+        if (bytes(sourceAddress).length > MAX_ADDRESS_LENGTH) {
+            revert AddressTooLong(bytes(sourceAddress).length, MAX_ADDRESS_LENGTH);
+        }
+        if (proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(proof.length, MAX_PROOF_LENGTH);
         if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 
         // Common replay guard. Set the flag before any external interaction
@@ -186,11 +230,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (consumedBurnIds[burnId]) revert BurnIdAlreadyConsumed(burnId);
         consumedBurnIds[burnId] = true;
 
-        // Quote commission. NATIVE on fundsOut is disallowed — the caller is
-        // the multisig, there is no user to fund a native payment.
+        // Quote commission. NATIVE on fundsOut is unrepresentable: the
+        // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
+        // so `nativeCommission` is always 0 on this path. The
+        // value is ignored here.
         (
             uint256 tokenCommission,
-            uint256 nativeCommission,
+            ,
             uint256 netAmount
         ) = commissionManager.calculateFundsOutCommission(
             sourceChainId,
@@ -198,7 +244,6 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             TOKEN,
             amount
         );
-        if (nativeCommission != 0) revert NativeCommissionNotAllowedOnFundsOut();
 
         // Delegate route-specific finality verification + settlement-state
         // mutation to the configured plugins. The registry runs the verifier
@@ -262,7 +307,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256          operationId,
         bytes   calldata settlementData
     ) private {
+        if (amount < minFundsInAmount)             revert AmountBelowMinimum(amount, minFundsInAmount);
         if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
+        if (bytes(destinationAddress).length > MAX_ADDRESS_LENGTH) {
+            revert AddressTooLong(bytes(destinationAddress).length, MAX_ADDRESS_LENGTH);
+        }
         if (sourceChainId      == 0)               revert InvalidSourceChainId();
         if (destinationChainId == 0)               revert InvalidDestinationChainId();
 
