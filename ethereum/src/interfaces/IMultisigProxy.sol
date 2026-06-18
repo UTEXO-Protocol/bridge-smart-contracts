@@ -104,6 +104,7 @@ interface IMultisigProxy {
         bytes32 dataHash;
         uint256 proposedAt;
         uint256 deadline;
+        uint256 timelockSnapshot;
         OperationType opType;
         ProposalStatus status;
     }

@@ -778,7 +778,9 @@ contract MultisigProxy is IMultisigProxy {
     function executeProposal(bytes32 proposalId, bytes calldata opData) external {
         Proposal storage p = _proposals[proposalId];
         if (p.status != ProposalStatus.Pending) revert NotPending();
-        if (block.timestamp < p.proposedAt + timelockDuration) revert TimelockActive();
+        // Enforce the timelock that was in force when the proposal was created,
+        // not the current one — a later SetTimelockDuration cannot reschedule.
+        if (block.timestamp < p.proposedAt + p.timelockSnapshot) revert TimelockActive();
         if (block.timestamp > p.deadline) revert ProposalExpired();
         if (keccak256(opData) != p.dataHash) revert DataMismatch();
 
@@ -857,6 +859,7 @@ contract MultisigProxy is IMultisigProxy {
             dataHash: dataHash,
             proposedAt: block.timestamp,
             deadline: deadline,
+            timelockSnapshot: timelockDuration,
             opType: opType,
             status: ProposalStatus.Pending
         });
