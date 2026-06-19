@@ -83,7 +83,8 @@ contract MultisigProxy is IMultisigProxy {
     ///         selector before it is sliced via `calldataload`.
     uint256 public constant SELECTOR_LENGTH = 4;
 
-    bytes32 public immutable DOMAIN_SEPARATOR;
+    uint256 private immutable _cachedChainId;
+    bytes32 private immutable _cachedDomainSeparator;
 
     bytes32 private constant _DOMAIN_TYPEHASH = keccak256(
         'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'
@@ -222,13 +223,8 @@ contract MultisigProxy is IMultisigProxy {
             ))
         ] = true;
 
-        DOMAIN_SEPARATOR = keccak256(abi.encode(
-            _DOMAIN_TYPEHASH,
-            keccak256('MultisigProxy'),
-            keccak256('1'),
-            block.chainid,
-            address(this)
-        ));
+        _cachedChainId = block.chainid;
+        _cachedDomainSeparator = _buildDomainSeparator();
     }
 
     // =========================================================================
@@ -1017,9 +1013,35 @@ contract MultisigProxy is IMultisigProxy {
     // Internal — cryptography helpers
     // =========================================================================
 
+    /// @notice EIP-712 domain separator for this contract on the current chain.
+    /// @dev Returns the value cached at deploy while `block.chainid` is
+    ///      unchanged; after a chain-id change it is rebuilt, so pre-fork
+    ///      signatures are not valid on the forked chain (R-W-13).
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        return _domainSeparator();
+    }
+
+    /// @dev Cached domain separator on the original chain; rebuilt on a fork.
+    function _domainSeparator() private view returns (bytes32) {
+        return block.chainid == _cachedChainId
+            ? _cachedDomainSeparator
+            : _buildDomainSeparator();
+    }
+
+    /// @dev Computes the EIP-712 domain separator over the current chain id.
+    function _buildDomainSeparator() private view returns (bytes32) {
+        return keccak256(abi.encode(
+            _DOMAIN_TYPEHASH,
+            keccak256('MultisigProxy'),
+            keccak256('1'),
+            block.chainid,
+            address(this)
+        ));
+    }
+
     /// @dev Wraps a struct hash into a full EIP-712 digest.
     function _hashTypedData(bytes32 structHash) private view returns (bytes32) {
-        return keccak256(abi.encodePacked('\x19\x01', DOMAIN_SEPARATOR, structHash));
+        return keccak256(abi.encodePacked('\x19\x01', _domainSeparator(), structHash));
     }
 
     /// @dev Builds an EIP-712 digest for TEE execute().
