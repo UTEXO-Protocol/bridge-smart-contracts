@@ -1016,6 +1016,35 @@ contract BridgeTest is Test {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
     }
 
+    function test_nativeValueMismatchRejectsSmallOverpay_currentBehavior() public {
+        _setFundsInNativeRule(100);
+
+        (, uint256 nativeCommission,) =
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+        assertGt(nativeCommission, 0, 'native fee quoted');
+
+        vm.deal(user, nativeCommission + 1);
+
+        uint256 userTokenBefore   = usdt0.balanceOf(user);
+        uint256 bridgeTokenBefore = usdt0.balanceOf(address(bridge));
+        uint256 cmNativeBefore    = address(cm).balance;
+        uint256 nativePoolBefore  = cm.nativeCommissionPool();
+        uint256 recordBefore      = rgbModule.fundsInRecords(TX_ID);
+
+        // Current behavior: native fundsIn requires exact msg.value. Even a
+        // 1-wei overpay reverts before token pull, commission credit, or RGB
+        // settlement bookkeeping.
+        vm.expectRevert(IBridge.NativeValueMismatch.selector);
+        vm.prank(user);
+        bridge.fundsIn{ value: nativeCommission + 1 }(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        assertEq(usdt0.balanceOf(user),           userTokenBefore,   'user token unchanged');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeTokenBefore, 'bridge token unchanged');
+        assertEq(address(cm).balance,             cmNativeBefore,    'cm native unchanged');
+        assertEq(cm.nativeCommissionPool(),       nativePoolBefore,  'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(TX_ID), recordBefore,      'record unchanged');
+    }
+
     // ========================================================================
     // pause / unpause / renounceOwnership
     // ========================================================================
@@ -1603,9 +1632,99 @@ contract BridgeTest is Test {
         assertEq(rgbModule.fundsInRecords(predictedOperationId), recordAfterPreempt, 'preempted record unchanged');
     }
 
-    // Bridge calls the settlement hook after pulling gross funds but before
-    // forwarding token commission, so a hook that reads Bridge's raw balance
-    // sees funds that will not remain as Bridge liquidity after the call.
+    // Current behavior: a plain ERC20 transfer can change Bridge's raw balance,
+    // but it does not enter the Bridge.fundsIn accounting path.
+    function test_directTokenTransferDoesNotCreateFundsInAccounting_currentBehavior() public {
+        address donor = makeAddr('directTransferDonor');
+        uint256 directAmount = 17e18;
+        uint256 operationId = TX_ID + 11_000;
+
+        usdt0.mint(donor, directAmount);
+
+        uint256 donorBefore = usdt0.balanceOf(donor);
+        uint256 userBefore = usdt0.balanceOf(user);
+        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
+        uint256 cmBefore = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 recordBefore = rgbModule.fundsInRecords(operationId);
+
+        assertEq(donorBefore, directAmount, 'pre donor token');
+        assertEq(bridgeBefore, 0, 'pre bridge token');
+        assertEq(recordBefore, 0, 'pre record');
+
+        vm.prank(donor);
+        usdt0.transfer(address(bridge), directAmount);
+
+        assertEq(usdt0.balanceOf(donor), donorBefore - directAmount, 'donor direct transfer spent');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + directAmount, 'bridge raw balance increased');
+        assertEq(usdt0.balanceOf(address(cm)), cmBefore, 'cm token unchanged');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, 'cm pool unchanged');
+        assertEq(cm.nativeCommissionPool(), nativePoolBefore, 'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(operationId), recordBefore, 'record not created');
+
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit FundsIn(user, operationId, AMOUNT);
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsIn(
+            user,
+            operationId,
+            AMOUNT,
+            AMOUNT,
+            0,
+            0,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR
+        );
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, operationId, '');
+
+        assertEq(usdt0.balanceOf(user), userBefore - AMOUNT, 'user fundsIn spent');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + directAmount + AMOUNT, 'bridge includes direct plus fundsIn');
+        assertEq(rgbModule.fundsInRecords(operationId), recordBefore + AMOUNT, 'record created only by fundsIn');
+    }
+
+    // Current behavior: Bridge only rejects an empty destination address, so a
+    // non-empty string is accepted and emitted without format validation.
+    function test_fundsIn_acceptsInvalidButNonEmptyDestinationAddress_currentBehavior() public {
+        string memory invalidDestination = 'not-rgb-destination';
+        uint256 operationId = TX_ID + 12_000;
+
+        uint256 userBefore = usdt0.balanceOf(user);
+        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
+        uint256 recordBefore = rgbModule.fundsInRecords(operationId);
+
+        assertEq(bridgeBefore, 0, 'pre bridge token');
+        assertEq(recordBefore, 0, 'pre record');
+
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit FundsIn(user, operationId, AMOUNT);
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsIn(
+            user,
+            operationId,
+            AMOUNT,
+            AMOUNT,
+            0,
+            0,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            invalidDestination
+        );
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, invalidDestination, operationId, '');
+
+        assertEq(usdt0.balanceOf(user), userBefore - AMOUNT, 'user fundsIn spent');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + AMOUNT, 'bridge credited');
+        assertEq(rgbModule.fundsInRecords(operationId), recordBefore + AMOUNT, 'record created');
+    }
+
+    // Current behavior: Bridge calls the settlement hook after pulling gross
+    // funds but before forwarding token commission, so a hook can observe funds
+    // that will not remain as Bridge liquidity after the call.
     function test_onFundsInHookSeesBalanceIncludingFutureCommission_currentBehavior() public {
         uint256 percent = 400; // 4%
         _setFundsInTokenRule(percent);
