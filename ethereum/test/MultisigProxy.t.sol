@@ -1878,6 +1878,46 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
+    // Domain separator rebuild on chain-id change (R-W-13 / UT-FIX-15)
+    //
+    // The separator is cached at deploy with the chain id. After a chain-id
+    // change (e.g. a hard fork) it is rebuilt, so a signature made before the
+    // fork no longer verifies on the forked chain (no cross-fork replay).
+    // ========================================================================
+
+    function test_domainSeparator_rebuiltOnChainIdChange_afterFix() public {
+        uint256 originalChainId = block.chainid;
+        bytes32 dsBefore = proxy.DOMAIN_SEPARATOR();
+        assertEq(dsBefore, MultisigHelper.domainSeparator(address(proxy), originalChainId), 'cached on original chain');
+
+        uint256 forkedChainId = originalChainId + 1;
+        vm.chainId(forkedChainId);
+
+        bytes32 dsAfter = proxy.DOMAIN_SEPARATOR();
+        assertTrue(dsAfter != dsBefore, 'separator rebuilt after chain-id change');
+        assertEq(dsAfter, MultisigHelper.domainSeparator(address(proxy), forkedChainId), 'rebuilt over new chain id');
+    }
+
+    function test_executeSignatureNotReplayableAfterChainIdChange_afterFix() public {
+        // Sign a valid TEE fundsOut on the original chain (domainSep was cached
+        // at setUp for block.chainid).
+        bytes memory callData = _fundsOutCalldata();
+        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        // Simulate a hard fork: same state/nonces, different chain id. The
+        // domain separator is rebuilt, so the pre-fork signatures recover to the
+        // wrong addresses and verification fails — the release cannot be replayed.
+        vm.chainId(block.chainid + 1);
+        vm.expectRevert();
+        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+    }
+
+    // ========================================================================
     // TEE execute — full-flow state snapshots
     // ========================================================================
 
