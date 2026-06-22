@@ -14,6 +14,7 @@ interface IBridge {
     error InvalidMinFundsInAmount();
     error AddressTooLong(uint256 length, uint256 maxLength);
     error ProofTooLong(uint256 length, uint256 maxLength);
+    error InsufficientChainLiquidity(uint256 chainId, uint256 requested, uint256 available);
     error InvalidRouteRegistryAddress();
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();

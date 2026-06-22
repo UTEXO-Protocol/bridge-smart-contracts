@@ -71,6 +71,14 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///         `fundsOut`.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
+    /// @notice Isolated liquidity per non-Arbitrum chain. Tracks the
+    ///         net token amount locked on this chain on behalf of a given
+    ///         remote chain: `fundsIn` credits the deposit's `destinationChainId`
+    ///         bucket, `fundsOut` debits the release's `sourceChainId` bucket.
+    ///         A release can therefore never draw more than was actually
+    ///         bridged toward that chain.
+    mapping(uint256 chainId => uint256 locked) public lockedLiquidity;
+
     /// @inheritdoc IBridge
     /// @dev Always non-zero (validated at the constructor and setter). Mutable
     ///      so federation can retune the dust floor via the `MultisigProxy`
@@ -227,6 +235,17 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (consumedBurnIds[fundsOutParams.burnId]) revert BurnIdAlreadyConsumed(fundsOutParams.burnId);
         consumedBurnIds[fundsOutParams.burnId] = true;
 
+        // Isolated liquidity: a release may only draw from the liquidity
+        // locked for its source chain. Debit before any external interaction so
+        // a downstream revert rolls the debit back with the rest of the call.
+        // `amount` (gross) matches what was minted on the source side, i.e. the
+        // `netAmount` that `_fundsIn` credited to this bucket.
+        uint256 srcLiquidity = lockedLiquidity[fundsOutParams.sourceChainId];
+        if (fundsOutParams.amount > srcLiquidity) {
+            revert InsufficientChainLiquidity(fundsOutParams.sourceChainId, fundsOutParams.amount, srcLiquidity);
+        }
+        lockedLiquidity[fundsOutParams.sourceChainId] = srcLiquidity - fundsOutParams.amount;
+
         // Quote commission. NATIVE on fundsOut is unrepresentable: the
         // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
         // so `nativeCommission` is always 0 on this path. The value is ignored here.
@@ -342,6 +361,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             }),
             settlementData
         );
+
+        // Isolated liquidity: credit the net deposit to its destination
+        // chain's bucket. A later `fundsOut` from that chain can release at most
+        // the accumulated locked liquidity.
+        lockedLiquidity[destinationChainId] += netAmount;
 
         // Forward token commission, if any, to the CommissionManager pool.
         if (tokenCommission != 0) {
