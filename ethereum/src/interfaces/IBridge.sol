@@ -15,6 +15,9 @@ interface IBridge {
     error AddressTooLong(uint256 length, uint256 maxLength);
     error ProofTooLong(uint256 length, uint256 maxLength);
     error InsufficientChainLiquidity(uint256 chainId, uint256 requested, uint256 available);
+    error OutflowRateLimitExceeded(uint256 chainId, uint256 amount, uint256 available);
+    error OutflowLimitNotConfigured();
+    error InvalidOutflowLimit();
     error InvalidRouteRegistryAddress();
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();
@@ -40,6 +43,19 @@ interface IBridge {
     /// @param oldMinimum Previous minimum (constructor value before first update).
     /// @param newMinimum New minimum (in token smallest units; always non-zero).
     event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
+
+    /// @notice Emitted on `setOutflowLimit` (per-chain outflow token bucket).
+    /// @param chainId    Source chain the limit applies to.
+    /// @param capacity   New bucket capacity (max instant outflow).
+    /// @param refillRate New refill rate (token units per second).
+    /// @param available  Accrued allowance carried over after the update.
+    event OutflowLimitUpdated(uint256 indexed chainId, uint256 capacity, uint256 refillRate, uint256 available);
+
+    /// @notice Emitted on `setGlobalOutflowLimit` (aggregate outflow token bucket).
+    /// @param capacity   New bucket capacity (max instant aggregate outflow).
+    /// @param refillRate New refill rate (token units per second).
+    /// @param available  Accrued allowance carried over after the update.
+    event GlobalOutflowLimitUpdated(uint256 capacity, uint256 refillRate, uint256 available);
 
     /// @param sender             Address that deposited the tokens (the EOA on the
     ///                           public overload, or the LZ adapter on the
@@ -151,6 +167,19 @@ interface IBridge {
     ///         (`MultisigProxy`). Parameters are bundled in `FundsOutParams`.
     function fundsOut(FundsOutParams calldata params) external;
 
+    /// @notice Per-chain / global outflow rate limiter state.
+    /// @dev A continuously-refilling "token bucket": `available` is the spendable
+    ///      allowance right now, refilling toward `capacity` at `refillRate`
+    ///      token units per second. `initialized` distinguishes "never
+    ///      configured" (fail-closed) from a real zero allowance.
+    struct TokenBucket {
+        uint256 capacity;
+        uint256 available;
+        uint256 refillRate;
+        uint256 lastRefill;
+        bool    initialized;
+    }
+
     // =========================================================================
     // External — admin (called via MultisigProxy)
     // =========================================================================
@@ -173,6 +202,30 @@ interface IBridge {
     /// @notice Current minimum accepted `fundsIn` deposit in token smallest
     ///         units. Always non-zero.
     function minFundsInAmount() external view returns (uint256);
+
+    /// @notice Configure (or reconfigure) the per-chain outflow token bucket for
+    ///         `chainId`. Owner-only (MultisigProxy timelock flow). Reverts
+    ///         `InvalidOutflowLimit` on zero `chainId` or zero `capacity`. A
+    ///         reconfiguration accrues the pending refill under the old settings
+    ///         and preserves the accrued `available` (clamped to the new
+    ///         capacity) — it never gifts a fresh full burst.
+    function setOutflowLimit(uint256 chainId, uint256 capacity, uint256 refillRate) external;
+
+    /// @notice Configure (or reconfigure) the global (aggregate) outflow token
+    ///         bucket that bounds total `fundsOut` across all source chains.
+    ///         Owner-only. Same accrue-and-preserve semantics as
+    ///         `setOutflowLimit`.
+    function setGlobalOutflowLimit(uint256 capacity, uint256 refillRate) external;
+
+    /// @notice Spendable per-chain outflow allowance right now, including the
+    ///         refill accrued since the last update (which the stored
+    ///         `chainBuckets` getter does not materialize). Returns 0 for an
+    ///         unconfigured chain.
+    function availableOutflow(uint256 chainId) external view returns (uint256);
+
+    /// @notice Spendable global outflow allowance right now, including the
+    ///         accrued refill. Returns 0 if the global bucket is unconfigured.
+    function availableGlobalOutflow() external view returns (uint256);
 
     /// @notice Current trusted adapter; `address(0)` means the adapter
     ///         overload is closed.
