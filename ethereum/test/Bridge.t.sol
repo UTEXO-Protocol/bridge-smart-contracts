@@ -155,6 +155,25 @@ contract BridgeTest is Test {
         return abi.encode(ids);
     }
 
+    /// @dev Wrap the former 8 positional `fundsOut` args into the typed struct
+    ///      and make the external Bridge call. Keeps `vm.prank` / `vm.expectRevert`
+    ///      working: the inner `bridge.fundsOut` is the next external call.
+    function _fundsOut(
+        address recipient_,
+        uint256 amount,
+        uint256 burnId,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string memory sourceAddress,
+        bytes memory proof,
+        bytes memory settlementData
+    ) internal {
+        bridge.fundsOut(IBridge.FundsOutParams(
+            recipient_, amount, burnId, sourceChainId, destinationChainId,
+            sourceAddress, proof, settlementData
+        ));
+    }
+
     /// @dev Build an ASCII string of exactly `len` bytes (for address-length caps).
     function _str(uint256 len) internal pure returns (string memory) {
         bytes memory b = new bytes(len);
@@ -371,7 +390,7 @@ contract BridgeTest is Test {
         // fires before the burn-id and balance checks.
         vm.expectRevert(IBridge.ZeroAmount.selector);
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, 0, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
@@ -471,7 +490,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.AddressTooLong.selector, max + 1, max));
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, tooLong,
             _proof(), _settlement(_singleFundsInId())
@@ -485,7 +504,7 @@ contract BridgeTest is Test {
         uint256 max = bridge.MAX_ADDRESS_LENGTH();
 
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, _str(max),
             _proof(), _settlement(_singleFundsInId())
@@ -519,7 +538,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.ProofTooLong.selector, max + 1, max));
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             tooLong, _settlement(_singleFundsInId())
@@ -538,11 +557,11 @@ contract BridgeTest is Test {
         bytes memory atMax = _bytesOfLength(max);
 
         vm.prank(multisig);
-        try bridge.fundsOut(
+        try bridge.fundsOut(IBridge.FundsOutParams(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             atMax, _settlement(_singleFundsInId())
-        ) {
+        )) {
             // a decodable proof would succeed; this blob won't, so we don't
             // expect to land here — but if a future verifier accepts it, the
             // length guard still passed, which is what this test asserts.
@@ -562,7 +581,7 @@ contract BridgeTest is Test {
         assertLt(_proof().length, bridge.MAX_PROOF_LENGTH(), 'sanity: real proof under cap');
 
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
@@ -706,7 +725,7 @@ contract BridgeTest is Test {
         );
 
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
@@ -721,7 +740,7 @@ contract BridgeTest is Test {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
@@ -746,7 +765,7 @@ contract BridgeTest is Test {
         ids[1] = txId2;
 
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, amount1 + amount2, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(ids)
@@ -770,7 +789,7 @@ contract BridgeTest is Test {
         // RGBVerifier → BtcRelay reverts with the relay's string message.
         vm.expectRevert('verify: block commitment');
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             badProof, _settlement(_singleFundsInId())
@@ -791,7 +810,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, 999));
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(ids)
@@ -811,7 +830,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert(RgbSettlementModule.FundsOutAmountExceedsFundsIn.selector);
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, 60e18, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(ids)
@@ -830,7 +849,7 @@ contract BridgeTest is Test {
         uint256[] memory ids2 = new uint256[](1); ids2[0] = txId2;
 
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(ids1)
@@ -841,7 +860,7 @@ contract BridgeTest is Test {
         // module mutation, leaving the second record untouched.
         vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, BURN_ID));
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(ids2)
@@ -854,7 +873,7 @@ contract BridgeTest is Test {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
@@ -866,7 +885,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, TX_ID));
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID + 1,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
@@ -883,7 +902,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
@@ -896,7 +915,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert(BridgeBase.InvalidRecipientAddress.selector);
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             address(0), AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
@@ -909,7 +928,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert(BridgeBase.AmountExceedBridgePool.selector);
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT + 1, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
@@ -975,7 +994,7 @@ contract BridgeTest is Test {
         uint256 expectedNet        = AMOUNT - expectedCommission;
 
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient, AMOUNT, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
@@ -1255,7 +1274,7 @@ contract BridgeTest is Test {
 
         // Release only part of the RGB record; the module should preserve the residual.
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient,
             releaseAmount,
             BURN_ID,
@@ -1404,7 +1423,7 @@ contract BridgeTest is Test {
         // can be consumed.
         vm.expectRevert('verify: block commitment');
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient,
             AMOUNT,
             BURN_ID,
@@ -1460,7 +1479,7 @@ contract BridgeTest is Test {
         // is underfunded; the revert must restore that consumed record too.
         vm.expectRevert(RgbSettlementModule.FundsOutAmountExceedsFundsIn.selector);
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             recipient,
             releaseAmount,
             BURN_ID,
@@ -1532,7 +1551,7 @@ contract BridgeTest is Test {
         );
 
         vm.prank(multisig);
-        bridge.fundsOut(
+        _fundsOut(
             alternateRecipient,
             releaseAmount,
             alternateBurnId,
