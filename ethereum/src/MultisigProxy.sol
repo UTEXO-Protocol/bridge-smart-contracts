@@ -1,10 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { ECDSA } from '@openzeppelin/contracts/utils/cryptography/ECDSA.sol';
+import { ECDSA }  from '@openzeppelin/contracts/utils/cryptography/ECDSA.sol';
+import { IERC20 } from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import { IMultisigProxy } from './interfaces/IMultisigProxy.sol';
 import { IBridge }        from './interfaces/IBridge.sol';
 import { IRouteRegistry } from './interfaces/IRouteRegistry.sol';
+
+/// @notice Minimal view of the LayerZero adapter's outbound entry point. The
+///         adapter itself lives in the `utexo-usdt0-contracts` repo; this
+///         interface pins the ABI `lzFundsOut` calls. Keep it in sync with
+///         `UtexoLZAdapter.sendOut`.
+interface ILZAdapterSendOut {
+    function sendOut(
+        uint32  dstEid,
+        bytes32 recipient,
+        uint256 amount,
+        uint256 minAmountLD,
+        bytes   calldata extraOptions
+    ) external payable;
+}
+
+/// @notice Minimal view of the Bridge's custodied-token getter. `Bridge`
+///         exposes `TOKEN` as a public immutable; this avoids adding it to
+///         `IBridge` (which would clash with the `BridgeBase` state variable).
+interface IBridgeToken {
+    function TOKEN() external view returns (address);
+}
 
 contract MultisigProxy is IMultisigProxy {
     using ECDSA for bytes32;
@@ -29,15 +51,11 @@ contract MultisigProxy is IMultisigProxy {
 
     address public commissionRecipient;
 
-    /// @notice Per-selector nonce for TEE execute() calls.
-    mapping(bytes4 => uint256) public nonces;
-
-    /// @notice Sequential nonce for TEE executeBatch() calls.
-    uint256 public batchNonce;
-
-    /// @notice Allowed (target, selector) pairs for TEE execute() / executeBatch().
-    ///         Federation governance maintains this allowlist via SetTeeAllowedCall.
-    mapping(address => mapping(bytes4 => bool)) public teeAllowedCalls;
+    /// @notice Sequential nonce shared by the typed TEE methods (`fundsOut` /
+    ///         `lzFundsOut`). Each successful call must match the current value
+    ///         and then increments it, giving all enclave releases a single
+    ///         total order and one-shot replay protection.
+    uint256 public teeNonce;
 
     /// @notice Federation proposals.
     mapping(bytes32 => Proposal) private _proposals;
@@ -90,12 +108,12 @@ contract MultisigProxy is IMultisigProxy {
         'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'
     );
 
-    // TEE
-    bytes32 private constant _BRIDGE_OP_TYPEHASH = keccak256(
-        'BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
+    // TEE — typed enclave release operations
+    bytes32 private constant _TEE_FUNDS_OUT_TYPEHASH = keccak256(
+        'TeeFundsOut(address recipient,uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint256 nonce,uint256 deadline)'
     );
-    bytes32 private constant _BRIDGE_BATCH_OP_TYPEHASH = keccak256(
-        'BridgeBatchOperation(address[] targets,bytes[] callDatas,uint256[] values,uint256 nonce,uint256 deadline)'
+    bytes32 private constant _TEE_LZ_FUNDS_OUT_TYPEHASH = keccak256(
+        'TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)'
     );
 
     // Federation propose — typed EIP-712 structs per operation (Bridge side)
@@ -113,9 +131,6 @@ contract MultisigProxy is IMultisigProxy {
     );
     bytes32 private constant _PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH = keccak256(
         'ProposeSetCommissionRecipient(address newRecipient,uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _PROPOSE_SET_TEE_CALL_TYPEHASH = keccak256(
-        'ProposeSetTeeAllowedCall(address target,bytes4 selector,bool allowed,uint256 nonce,uint256 deadline)'
     );
     bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH = keccak256(
         'ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)'
@@ -214,15 +229,6 @@ contract MultisigProxy is IMultisigProxy {
         timelockDuration = timelockDuration_;
         MIN_TIMELOCK = minTimelock_;
 
-        // Default TEE allowlist: Bridge.fundsOut. Additional (target, selector) pairs
-        // (e.g. for the LayerZero adapter's outbound `sendOut`) are added later via
-        // federation governance through `proposeSetTeeAllowedCall`.
-        teeAllowedCalls[bridge_][
-            bytes4(keccak256(
-                'fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)'
-            ))
-        ] = true;
-
         _cachedChainId = block.chainid;
         _cachedDomainSeparator = _buildDomainSeparator();
     }
@@ -232,86 +238,142 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     /// @inheritdoc IMultisigProxy
-    function execute(
-        bytes calldata callData,
+    /// @dev Typed enclave release: the only call this makes is `Bridge.fundsOut`.
+    function fundsOutCall(
+        FundsOutParams calldata params,
         uint256 nonce,
         uint256 deadline,
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external {
-        if (block.timestamp > deadline) revert Expired();
-        // Bound how far in the future a signed deadline may sit, so a leaked or
-        // pre-signed payload cannot stay executable indefinitely while its
-        // nonce is unconsumed.
-        if (deadline > block.timestamp + MAX_TEE_DEADLINE) revert DeadlineTooFar();
-        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
+        _checkTeeTiming(deadline);
+        if (nonce != teeNonce) revert InvalidNonce();
 
-        bytes4 selector;
-        assembly { selector := calldataload(callData.offset) }
+        _verifySignatures(
+            _hashTypedData(_fundsOutStructHash(params, nonce, deadline)),
+            enclaveBitmap, enclaveSigs, _enclaveSigners, enclaveThreshold
+        );
 
-        if (!teeAllowedCalls[bridge][selector]) revert CallNotAllowed(bridge, selector);
-        if (nonce != nonces[selector]) revert InvalidNonce();
+        teeNonce++;
 
-        bytes32 digest = _buildDigest(_BRIDGE_OP_TYPEHASH, selector, callData, nonce, deadline);
-        _verifySignatures(digest, enclaveBitmap, enclaveSigs, _enclaveSigners, enclaveThreshold);
+        IBridge(bridge).fundsOut(
+            params.recipient,
+            params.amount,
+            params.burnId,
+            params.sourceChainId,
+            params.destinationChainId,
+            params.sourceAddress,
+            params.proof,
+            params.settlementData
+        );
 
-        nonces[selector]++;
+        emit FundsOutExecuted(nonce, enclaveBitmap);
+    }
 
-        (bool ok, bytes memory ret) = bridge.call(callData);
-        _propagateRevert(ok, ret);
-
-        emit Executed(selector, nonce, enclaveBitmap);
+    /// @dev EIP-712 struct hash for `TeeFundsOut`. Isolated in its own frame to
+    ///      keep `fundsOut` within stack limits.
+    function _fundsOutStructHash(
+        FundsOutParams calldata params,
+        uint256 nonce,
+        uint256 deadline
+    ) private pure returns (bytes32) {
+        return keccak256(abi.encode(
+            _TEE_FUNDS_OUT_TYPEHASH,
+            params.recipient,
+            params.amount,
+            params.burnId,
+            params.sourceChainId,
+            params.destinationChainId,
+            keccak256(bytes(params.sourceAddress)),
+            keccak256(params.proof),
+            keccak256(params.settlementData),
+            nonce,
+            deadline
+        ));
     }
 
     /// @inheritdoc IMultisigProxy
-    function executeBatch(
-        address[] calldata targets,
-        bytes[]   calldata callDatas,
-        uint256[] calldata values,
+    /// @dev Typed Flow-4 release: releases to the LZ adapter and bridges onward
+    ///      in one signed operation. The Bridge recipient is forced to
+    ///      `lzAdapter`, and the amount sent out is the balance actually
+    ///      delivered to the adapter (measured here), so the two legs are bound
+    ///      on-chain and cannot be mismatched (R-W-16).
+    function lzFundsOutCall(
+        LzFundsOutParams calldata params,
         uint256 nonce,
         uint256 deadline,
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external payable {
+        _checkTeeTiming(deadline);
+        if (nonce != teeNonce) revert InvalidNonce();
+
+        address adapter = lzAdapter;
+        if (adapter == address(0)) revert LZAdapterNotSet();
+
+        _verifySignatures(
+            _hashTypedData(_lzFundsOutStructHash(params, nonce, deadline)),
+            enclaveBitmap, enclaveSigs, _enclaveSigners, enclaveThreshold
+        );
+
+        teeNonce++;
+
+        // Release to the adapter, then bridge exactly what the adapter received,
+        // so the release and the cross-chain send are bound on-chain.
+        uint256 delivered;
+        {
+            address token = IBridgeToken(bridge).TOKEN();
+            uint256 balanceBefore = IERC20(token).balanceOf(adapter);
+            IBridge(bridge).fundsOut(
+                adapter,
+                params.amount,
+                params.burnId,
+                params.sourceChainId,
+                params.destinationChainId,
+                params.sourceAddress,
+                params.proof,
+                params.settlementData
+            );
+            delivered = IERC20(token).balanceOf(adapter) - balanceBefore;
+        }
+
+        ILZAdapterSendOut(adapter).sendOut{ value: msg.value }(
+            params.dstEid, params.recipient, delivered, params.minAmountLD, params.extraOptions
+        );
+
+        emit LzFundsOutExecuted(nonce, enclaveBitmap, params.dstEid, params.recipient, delivered);
+    }
+
+    /// @dev EIP-712 struct hash for `TeeLzFundsOut`. Isolated in its own frame
+    ///      to keep `lzFundsOut` within stack limits.
+    function _lzFundsOutStructHash(
+        LzFundsOutParams calldata params,
+        uint256 nonce,
+        uint256 deadline
+    ) private pure returns (bytes32) {
+        return keccak256(abi.encode(
+            _TEE_LZ_FUNDS_OUT_TYPEHASH,
+            params.amount,
+            params.burnId,
+            params.sourceChainId,
+            params.destinationChainId,
+            keccak256(bytes(params.sourceAddress)),
+            keccak256(params.proof),
+            keccak256(params.settlementData),
+            params.dstEid,
+            params.recipient,
+            params.minAmountLD,
+            keccak256(params.extraOptions),
+            nonce,
+            deadline
+        ));
+    }
+
+    /// @dev Shared timing guard for the typed enclave methods: not expired, and
+    ///      the signed deadline cannot sit further than `MAX_TEE_DEADLINE` ahead.
+    function _checkTeeTiming(uint256 deadline) private view {
         if (block.timestamp > deadline) revert Expired();
-        // Bound the signed deadline's distance into the future;
         if (deadline > block.timestamp + MAX_TEE_DEADLINE) revert DeadlineTooFar();
-        uint256 n = targets.length;
-        if (n == 0) revert BatchEmpty();
-        if (n > MAX_BATCH_SIZE) revert BatchTooLarge();
-        if (callDatas.length != n || values.length != n) revert BatchLengthMismatch();
-        if (nonce != batchNonce) revert InvalidNonce();
-
-        // 1. Allowlist + selector extraction + native value accounting.
-        bytes4[] memory selectors = new bytes4[](n);
-        uint256 totalValue;
-        for (uint256 i = 0; i < n; i++) {
-            if (callDatas[i].length < SELECTOR_LENGTH) revert CallDataTooShort();
-
-            bytes calldata cd = callDatas[i];
-            bytes4 sel;
-            assembly { sel := calldataload(cd.offset) }
-
-            if (!teeAllowedCalls[targets[i]][sel]) revert CallNotAllowed(targets[i], sel);
-
-            selectors[i] = sel;
-            totalValue  += values[i];
-        }
-        if (totalValue != msg.value) revert BatchValueMismatch();
-
-        // 2. EIP-712 digest over the whole batch + M-of-N enclave verification.
-        bytes32 digest = _buildBatchDigest(targets, callDatas, values, nonce, deadline);
-        _verifySignatures(digest, enclaveBitmap, enclaveSigs, _enclaveSigners, enclaveThreshold);
-
-        batchNonce++;
-
-        // 3. Atomic dispatch — any inner revert rolls back the whole batch.
-        for (uint256 i = 0; i < n; i++) {
-            (bool ok, bytes memory ret) = targets[i].call{ value: values[i] }(callDatas[i]);
-            _propagateRevert(ok, ret);
-        }
-
-        emit BatchExecuted(nonce, enclaveBitmap, targets, selectors);
     }
 
     // =========================================================================
@@ -468,29 +530,6 @@ contract MultisigProxy is IMultisigProxy {
         return _propose(
             OperationType.SetCommissionRecipient,
             abi.encode(newRecipient),
-            nonce, deadline, structHash, fedBitmap, fedSigs
-        );
-    }
-
-    /// @inheritdoc IMultisigProxy
-    function proposeSetTeeAllowedCall(
-        address target,
-        bytes4 selector,
-        bool allowed,
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32) {
-        if (target == address(0)) revert ZeroTarget();
-
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_SET_TEE_CALL_TYPEHASH, target, selector, allowed, nonce, deadline
-        ));
-
-        return _propose(
-            OperationType.SetTeeAllowedCall,
-            abi.encode(target, selector, allowed),
             nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
@@ -802,10 +841,6 @@ contract MultisigProxy is IMultisigProxy {
         return recovered == _enclaveSigners[signerIndex];
     }
 
-    /// @inheritdoc IMultisigProxy
-    function getNonce(bytes4 selector) external view returns (uint256) {
-        return nonces[selector];
-    }
 
     /// @inheritdoc IMultisigProxy
     function getEnclaveSigners() external view returns (address[] memory) {
@@ -907,12 +942,6 @@ contract MultisigProxy is IMultisigProxy {
             address old = commissionRecipient;
             commissionRecipient = newRecipient;
             emit CommissionRecipientUpdated(old, newRecipient);
-
-        } else if (opType == OperationType.SetTeeAllowedCall) {
-            (address target, bytes4 sel, bool allowed) = abi.decode(opData, (address, bytes4, bool));
-            if (target == address(0)) revert ZeroTarget();
-            teeAllowedCalls[target][sel] = allowed;
-            emit TeeAllowedCallUpdated(target, sel, allowed);
 
         } else if (opType == OperationType.SetTimelockDuration) {
             uint256 newDuration = abi.decode(opData, (uint256));
@@ -1042,46 +1071,6 @@ contract MultisigProxy is IMultisigProxy {
     /// @dev Wraps a struct hash into a full EIP-712 digest.
     function _hashTypedData(bytes32 structHash) private view returns (bytes32) {
         return keccak256(abi.encodePacked('\x19\x01', _domainSeparator(), structHash));
-    }
-
-    /// @dev Builds an EIP-712 digest for TEE execute().
-    function _buildDigest(
-        bytes32 typeHash,
-        bytes4 selector,
-        bytes calldata callData,
-        uint256 nonce,
-        uint256 deadline
-    ) private view returns (bytes32) {
-        return _hashTypedData(
-            keccak256(abi.encode(typeHash, selector, keccak256(callData), nonce, deadline))
-        );
-    }
-
-    /// @dev Builds an EIP-712 digest for TEE executeBatch().
-    ///      Per EIP-712 array encoding:
-    ///        - address[] / uint256[] hashes are keccak256 of their packed elements,
-    ///        - bytes[] hashes are keccak256 of the packed per-element keccak256.
-    function _buildBatchDigest(
-        address[] calldata targets,
-        bytes[]   calldata callDatas,
-        uint256[] calldata values,
-        uint256 nonce,
-        uint256 deadline
-    ) private view returns (bytes32) {
-        bytes32[] memory cdHashes = new bytes32[](callDatas.length);
-        for (uint256 i = 0; i < callDatas.length; i++) {
-            cdHashes[i] = keccak256(callDatas[i]);
-        }
-
-        bytes32 structHash = keccak256(abi.encode(
-            _BRIDGE_BATCH_OP_TYPEHASH,
-            keccak256(abi.encodePacked(targets)),
-            keccak256(abi.encodePacked(cdHashes)),
-            keccak256(abi.encodePacked(values)),
-            nonce,
-            deadline
-        ));
-        return _hashTypedData(structHash);
     }
 
     /// @dev Verifies M-of-N bitmap signatures against the given signer set.
