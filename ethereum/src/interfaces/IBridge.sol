@@ -121,29 +121,34 @@ interface IBridge {
     ) external payable;
 
     // =========================================================================
-    // External — owner-only (called via MultisigProxy.execute)
+    // External — owner-only (called via MultisigProxy)
     // =========================================================================
 
-    /// @notice Release tokens to a recipient.
-    ///
-    ///       Only callable by owner (`MultisigProxy` via `execute()`).
-    /// @dev `destinationChainId` is part of the CommissionManager route key
-    ///      and lets the same Bridge serve multi-hop routes.
-    /// @dev `burnId` is the common single-use replay guard enforced by Bridge
-    ///      itself; it MUST be unique across every successful fundsOut call.
-    /// @dev `proof` is opaque per-route data consumed by `IFinalityVerifier`.
-    ///      `settlementData` is opaque per-route data consumed by
-    ///      `ISettlementModule`. Each plugin owns its own encoding.
-    function fundsOut(
-        address recipient,
-        uint256 amount,
-        uint256 burnId,
-        uint256 sourceChainId,
-        uint256 destinationChainId,
-        string  calldata sourceAddress,
-        bytes   calldata proof,
-        bytes   calldata settlementData
-    ) external;
+    /// @notice Release parameters for `fundsOut`.
+    /// @param recipient          Recipient on this chain.
+    /// @param amount             Gross amount to release (pre-commission).
+    /// @param burnId             Single-use replay guard; MUST be unique across
+    ///                           every successful `fundsOut`.
+    /// @param sourceChainId      Source chain id.
+    /// @param destinationChainId Destination chain id; part of the
+    ///                           CommissionManager route key.
+    /// @param sourceAddress      Sender address on the source chain.
+    /// @param proof              Opaque per-route data for `IFinalityVerifier`.
+    /// @param settlementData     Opaque per-route data for `ISettlementModule`.
+    struct FundsOutParams {
+        address recipient;
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string  sourceAddress;
+        bytes   proof;
+        bytes   settlementData;
+    }
+
+    /// @notice Release tokens to a recipient. Only callable by owner
+    ///         (`MultisigProxy`). Parameters are bundled in `FundsOutParams`.
+    function fundsOut(FundsOutParams calldata params) external;
 
     // =========================================================================
     // External — admin (called via MultisigProxy)

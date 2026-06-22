@@ -200,49 +200,45 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     }
 
     // =========================================================================
-    // External — owner-only (called via MultisigProxy.execute)
+    // External — owner-only (called via MultisigProxy)
     // =========================================================================
 
     /// @inheritdoc IBridge
-    function fundsOut(
-        address recipient,
-        uint256 amount,
-        uint256 burnId,
-        uint256 sourceChainId,
-        uint256 destinationChainId,
-        string  calldata sourceAddress,
-        bytes   calldata proof,
-        bytes   calldata settlementData
-    ) external override onlyOwner nonReentrant whenOutflowNotPaused {
-        if (amount             == 0)                         revert ZeroAmount();
-        if (recipient          == address(0))                revert InvalidRecipientAddress();
-        if (sourceChainId      == 0)                         revert InvalidSourceChainId();
-        if (destinationChainId == 0)                         revert InvalidDestinationChainId();
-        if (bytes(sourceAddress).length > MAX_ADDRESS_LENGTH) {
-            revert AddressTooLong(bytes(sourceAddress).length, MAX_ADDRESS_LENGTH);
+    function fundsOut(FundsOutParams calldata fundsOutParams)
+        external
+        override
+        onlyOwner
+        nonReentrant
+        whenOutflowNotPaused
+    {
+        if (fundsOutParams.amount             == 0)                       revert ZeroAmount();
+        if (fundsOutParams.recipient          == address(0))              revert InvalidRecipientAddress();
+        if (fundsOutParams.sourceChainId      == 0)                       revert InvalidSourceChainId();
+        if (fundsOutParams.destinationChainId == 0)                       revert InvalidDestinationChainId();
+        if (bytes(fundsOutParams.sourceAddress).length > MAX_ADDRESS_LENGTH) {
+            revert AddressTooLong(bytes(fundsOutParams.sourceAddress).length, MAX_ADDRESS_LENGTH);
         }
-        if (proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(proof.length, MAX_PROOF_LENGTH);
-        if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
+        if (fundsOutParams.proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(fundsOutParams.proof.length, MAX_PROOF_LENGTH);
+        if (fundsOutParams.amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 
         // Common replay guard. Set the flag before any external interaction
         // so a revert anywhere downstream rolls the mark back with the rest
         // of the call.
-        if (consumedBurnIds[burnId]) revert BurnIdAlreadyConsumed(burnId);
-        consumedBurnIds[burnId] = true;
+        if (consumedBurnIds[fundsOutParams.burnId]) revert BurnIdAlreadyConsumed(fundsOutParams.burnId);
+        consumedBurnIds[fundsOutParams.burnId] = true;
 
         // Quote commission. NATIVE on fundsOut is unrepresentable: the
         // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
-        // so `nativeCommission` is always 0 on this path. The
-        // value is ignored here.
+        // so `nativeCommission` is always 0 on this path. The value is ignored here.
         (
             uint256 tokenCommission,
             ,
             uint256 netAmount
         ) = commissionManager.calculateFundsOutCommission(
-            sourceChainId,
-            destinationChainId,
+            fundsOutParams.sourceChainId,
+            fundsOutParams.destinationChainId,
             TOKEN,
-            amount
+            fundsOutParams.amount
         );
 
         // Delegate route-specific finality verification + settlement-state
@@ -251,15 +247,15 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         IRouteRegistry(routeRegistry).beforeFundsOut(
             FundsOutContext({
                 token:         TOKEN,
-                recipient:     recipient,
-                amount:        amount,
-                burnId:        burnId,
-                sourceChainId: sourceChainId,
-                destChainId:   destinationChainId,
-                sourceAddress: sourceAddress
+                recipient:     fundsOutParams.recipient,
+                amount:        fundsOutParams.amount,
+                burnId:        fundsOutParams.burnId,
+                sourceChainId: fundsOutParams.sourceChainId,
+                destChainId:   fundsOutParams.destinationChainId,
+                sourceAddress: fundsOutParams.sourceAddress
             }),
-            proof,
-            settlementData
+            fundsOutParams.proof,
+            fundsOutParams.settlementData
         );
 
         // Forward token commission to the CommissionManager pool.
@@ -269,17 +265,17 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         }
 
         // Deliver the net amount to the recipient.
-        IERC20(TOKEN).safeTransfer(recipient, netAmount);
+        IERC20(TOKEN).safeTransfer(fundsOutParams.recipient, netAmount);
 
         emit BridgeFundsOut(
-            recipient,
-            amount,
+            fundsOutParams.recipient,
+            fundsOutParams.amount,
             netAmount,
             tokenCommission,
-            burnId,
-            sourceChainId,
-            destinationChainId,
-            sourceAddress
+            fundsOutParams.burnId,
+            fundsOutParams.sourceChainId,
+            fundsOutParams.destinationChainId,
+            fundsOutParams.sourceAddress
         );
     }
 

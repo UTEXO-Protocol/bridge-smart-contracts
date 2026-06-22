@@ -240,7 +240,7 @@ contract MultisigProxy is IMultisigProxy {
     /// @inheritdoc IMultisigProxy
     /// @dev Typed enclave release: the only call this makes is `Bridge.fundsOut`.
     function fundsOutCall(
-        FundsOutParams calldata params,
+        IBridge.FundsOutParams calldata params,
         uint256 nonce,
         uint256 deadline,
         uint256 enclaveBitmap,
@@ -256,24 +256,15 @@ contract MultisigProxy is IMultisigProxy {
 
         teeNonce++;
 
-        IBridge(bridge).fundsOut(
-            params.recipient,
-            params.amount,
-            params.burnId,
-            params.sourceChainId,
-            params.destinationChainId,
-            params.sourceAddress,
-            params.proof,
-            params.settlementData
-        );
+        IBridge(bridge).fundsOut(params);
 
         emit FundsOutExecuted(nonce, enclaveBitmap);
     }
 
     /// @dev EIP-712 struct hash for `TeeFundsOut`. Isolated in its own frame to
-    ///      keep `fundsOut` within stack limits.
+    ///      keep `fundsOutCall` within stack limits.
     function _fundsOutStructHash(
-        FundsOutParams calldata params,
+        IBridge.FundsOutParams calldata params,
         uint256 nonce,
         uint256 deadline
     ) private pure returns (bytes32) {
@@ -319,21 +310,22 @@ contract MultisigProxy is IMultisigProxy {
         teeNonce++;
 
         // Release to the adapter, then bridge exactly what the adapter received,
-        // so the release and the cross-chain send are bound on-chain.
+        // so the release and the cross-chain send are bound on-chain. The Bridge
+        // recipient is forced to the adapter (not taken from params).
         uint256 delivered;
         {
             address token = IBridgeToken(bridge).TOKEN();
             uint256 balanceBefore = IERC20(token).balanceOf(adapter);
-            IBridge(bridge).fundsOut(
-                adapter,
-                params.amount,
-                params.burnId,
-                params.sourceChainId,
-                params.destinationChainId,
-                params.sourceAddress,
-                params.proof,
-                params.settlementData
-            );
+            IBridge(bridge).fundsOut(IBridge.FundsOutParams({
+                recipient:          adapter,
+                amount:             params.amount,
+                burnId:             params.burnId,
+                sourceChainId:      params.sourceChainId,
+                destinationChainId: params.destinationChainId,
+                sourceAddress:      params.sourceAddress,
+                proof:              params.proof,
+                settlementData:     params.settlementData
+            }));
             delivered = IERC20(token).balanceOf(adapter) - balanceBefore;
         }
 
@@ -345,27 +337,35 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     /// @dev EIP-712 struct hash for `TeeLzFundsOut`. Isolated in its own frame
-    ///      to keep `lzFundsOut` within stack limits.
+    ///      to keep `lzFundsOutCall` within stack limits.
     function _lzFundsOutStructHash(
         LzFundsOutParams calldata params,
         uint256 nonce,
         uint256 deadline
     ) private pure returns (bytes32) {
-        return keccak256(abi.encode(
-            _TEE_LZ_FUNDS_OUT_TYPEHASH,
-            params.amount,
-            params.burnId,
-            params.sourceChainId,
-            params.destinationChainId,
-            keccak256(bytes(params.sourceAddress)),
-            keccak256(params.proof),
-            keccak256(params.settlementData),
-            params.dstEid,
-            params.recipient,
-            params.minAmountLD,
-            keccak256(params.extraOptions),
-            nonce,
-            deadline
+        // Built in two `abi.encode` halves joined with `bytes.concat`. Every
+        // field is a 32-byte word (dynamic ones are pre-hashed), so the result
+        // is byte-identical to encoding all fields at once, but each half is
+        // shallow enough to compile without the optimizer (e.g. `forge coverage`).
+        return keccak256(bytes.concat(
+            abi.encode(
+                _TEE_LZ_FUNDS_OUT_TYPEHASH,
+                params.amount,
+                params.burnId,
+                params.sourceChainId,
+                params.destinationChainId,
+                keccak256(bytes(params.sourceAddress)),
+                keccak256(params.proof)
+            ),
+            abi.encode(
+                keccak256(params.settlementData),
+                params.dstEid,
+                params.recipient,
+                params.minAmountLD,
+                keccak256(params.extraOptions),
+                nonce,
+                deadline
+            )
         ));
     }
 

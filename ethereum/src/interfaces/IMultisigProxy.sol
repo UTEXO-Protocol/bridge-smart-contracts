@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
+import { IBridge } from './IBridge.sol';
+
 /// @title IMultisigProxy
 /// @notice Two-level ECDSA multisig proxy that owns the Bridge and the CommissionManager.
 ///
@@ -101,20 +103,6 @@ interface IMultisigProxy {
 
     enum ProposalStatus { None, Pending, Executed, Cancelled }
 
-    /// @notice Business parameters for `fundsOut`, bundled to keep the call
-    ///         within stack limits. Signed as the EIP-712 `TeeFundsOut` struct
-    ///         (these fields plus `nonce` and `deadline`).
-    struct FundsOutParams {
-        address recipient;
-        uint256 amount;
-        uint256 burnId;
-        uint256 sourceChainId;
-        uint256 destinationChainId;
-        string  sourceAddress;
-        bytes   proof;
-        bytes   settlementData;
-    }
-
     /// @notice Business parameters for `lzFundsOut`, bundled to keep the call
     ///         within stack limits. Signed as the EIP-712 `TeeLzFundsOut` struct
     ///         (these fields plus `nonce` and `deadline`).
@@ -191,7 +179,7 @@ interface IMultisigProxy {
     ///         makes is `Bridge.fundsOut` — there is no generic dispatch, so the
     ///         enclave path can never reach a privileged setter.
     function fundsOutCall(
-        FundsOutParams calldata params,
+        IBridge.FundsOutParams calldata params,
         uint256 nonce,
         uint256 deadline,
         uint256 enclaveBitmap,
