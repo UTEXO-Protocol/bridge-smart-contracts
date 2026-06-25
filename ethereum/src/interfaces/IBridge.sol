@@ -163,7 +163,7 @@ interface IBridge {
 
     /// @notice Release tokens to a recipient. Only callable by owner
     ///         (`MultisigProxy`). Parameters are bundled in `FundsOutParams`.
-    /// @dev Per-chain / global outflow rate limiting uses the `RateLimiter`
+    /// @dev Per-chain / global outflow rate limiting uses the outflow
     ///      token-bucket library; bucket state is exposed via the `chainBuckets`
     ///      / `globalBucket` getters and the `availableOutflow` previews.
     function fundsOut(FundsOutParams calldata params) external;

@@ -10,7 +10,7 @@ import { IBridge }            from './interfaces/IBridge.sol';
 import { ICommissionManager } from './interfaces/ICommissionManager.sol';
 import { IRouteRegistry }     from './interfaces/IRouteRegistry.sol';
 import { FundsInContext, FundsOutContext } from './interfaces/RouteTypes.sol';
-import { RateLimiter }     from './libraries/RateLimiter.sol';
+import { OutflowRateLimiter } from './libraries/OutflowRateLimiter.sol';
 
 /// @title Bridge
 /// @notice Production bridge for locking USDT0 on Arbitrum and unlocking it
@@ -36,7 +36,7 @@ import { RateLimiter }     from './libraries/RateLimiter.sol';
 ///        deployments without redeploying the Bridge.
 contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     using SafeERC20 for IERC20;
-    using RateLimiter for RateLimiter.TokenBucket;
+    using OutflowRateLimiter for OutflowRateLimiter.Bucket;
 
     // =========================================================================
     // State
@@ -83,13 +83,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
     /// @notice Per-source-chain outflow rate limiter. Bounds
     ///         how fast `fundsOut` can drain a single chain's liquidity.
-    mapping(uint256 chainId => RateLimiter.TokenBucket) public chainBuckets;
+    mapping(uint256 chainId => OutflowRateLimiter.Bucket) public chainBuckets;
 
     /// @notice Global (aggregate) outflow rate limiter. Bounds
     ///         total `fundsOut` across all source chains, since a compromised
     ///         shared TEE could otherwise drain every chain's per-chain bucket
     ///         in the same window (aggregate = sum of per-chain caps).
-    RateLimiter.TokenBucket public globalBucket;
+    OutflowRateLimiter.Bucket public globalBucket;
 
     /// @inheritdoc IBridge
     /// @dev Always non-zero (validated at the constructor and setter). Mutable
@@ -184,9 +184,9 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         onlyOwner
     {
         if (chainId == 0) revert InvalidOutflowLimit();
-        RateLimiter.Config memory cfg = _buildOutflowConfig(capacity, refillRate);
-        RateLimiter._validateTokenBucketConfig(cfg, false);
-        chainBuckets[chainId]._setConfigPrimed(cfg);
+        OutflowRateLimiter.Settings memory cfg = _buildOutflowConfig(capacity, refillRate);
+        OutflowRateLimiter.validate(cfg, false);
+        chainBuckets[chainId].configurePrimed(cfg);
         emit OutflowLimitUpdated(chainId, capacity, refillRate, chainBuckets[chainId].tokens);
     }
 
@@ -197,20 +197,20 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         override
         onlyOwner
     {
-        RateLimiter.Config memory cfg = _buildOutflowConfig(capacity, refillRate);
-        RateLimiter._validateTokenBucketConfig(cfg, false);
-        globalBucket._setConfigPrimed(cfg);
+        OutflowRateLimiter.Settings memory cfg = _buildOutflowConfig(capacity, refillRate);
+        OutflowRateLimiter.validate(cfg, false);
+        globalBucket.configurePrimed(cfg);
         emit GlobalOutflowLimitUpdated(capacity, refillRate, globalBucket.tokens);
     }
 
     /// @inheritdoc IBridge
     function availableOutflow(uint256 chainId) external view override returns (uint256) {
-        return RateLimiter._currentTokenBucketState(chainBuckets[chainId]).tokens;
+        return OutflowRateLimiter.currentState(chainBuckets[chainId]).tokens;
     }
 
     /// @inheritdoc IBridge
     function availableGlobalOutflow() external view override returns (uint256) {
-        return RateLimiter._currentTokenBucketState(globalBucket).tokens;
+        return OutflowRateLimiter.currentState(globalBucket).tokens;
     }
 
     // =========================================================================
@@ -301,9 +301,10 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // any external interaction, so a downstream revert restores them too.
         // Per-source-chain bucket (token-scoped errors), then the global
         // aggregate bucket (aggregate-scoped errors via the address(0) sentinel).
-        // `_consume` is fail-closed: an unconfigured chain reverts RateLimitDisabled.
-        chainBuckets[fundsOutParams.sourceChainId]._consume(fundsOutParams.amount, TOKEN);
-        globalBucket._consume(fundsOutParams.amount, address(0));
+        // The limiter is fail-closed: an unconfigured chain/global bucket
+        // rejects the release instead of falling back to unlimited outflow.
+        chainBuckets[fundsOutParams.sourceChainId].spend(fundsOutParams.amount, TOKEN);
+        globalBucket.spend(fundsOutParams.amount, address(0));
 
         // Quote commission. NATIVE on fundsOut is unrepresentable: the
         // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
@@ -371,19 +372,21 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // Internal
     // =========================================================================
 
-    /// @dev Build an enabled `RateLimiter.Config` from uint256 inputs, safely
+    /// @dev Build an enabled outflow-limit config from uint256 inputs, safely
     ///      narrowing to the library's uint128 fields. USDT0 amounts fit in
     ///      uint128; a value above that is a misconfiguration and reverts.
-    ///      `_validateTokenBucketConfig` then enforces `0 < rate < capacity`.
+    ///      `OutflowRateLimiter.validate` then enforces `0 < rate < capacity`.
     function _buildOutflowConfig(uint256 capacity, uint256 refillRate)
         private
         pure
-        returns (RateLimiter.Config memory)
+        returns (OutflowRateLimiter.Settings memory)
     {
         if (capacity > type(uint128).max || refillRate > type(uint128).max) revert InvalidOutflowLimit();
-        return RateLimiter.Config({
+        return OutflowRateLimiter.Settings({
             isEnabled: true,
+            // forge-lint: disable-next-line(unsafe-typecast)
             capacity:  uint128(capacity),
+            // forge-lint: disable-next-line(unsafe-typecast)
             rate:      uint128(refillRate)
         });
     }
