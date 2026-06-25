@@ -125,6 +125,12 @@ contract BridgeTest is Test {
         ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);
         cm.setEthUsdFeed(address(ethUsdFeed), 1 hours);
 
+        // Outflow rate limits: configure generous buckets so the
+        // release path is enabled (fundsOut fails closed on an unconfigured
+        // bucket). Buckets start full, so releases pass immediately.
+        bridge.setOutflowLimit(RGB_CHAIN_ID, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+        bridge.setGlobalOutflowLimit(1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+
         // Production-flow ownership transfer of Bridge → multisig. CM and
         // RouteRegistry stay owned by deployer for this suite so individual
         // tests can configure commission rules and routes inline. The
@@ -883,13 +889,140 @@ contract BridgeTest is Test {
         // release against the same — now consumed — fundsIn record.
         usdt0.mint(address(bridge), AMOUNT);
 
-        vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, TX_ID));
+        // Isolated liquidity (R-C-01 level 1): the first release drained the RGB
+        // bucket to zero, and a direct mint does not credit it (only fundsIn
+        // does). So the liquidity guard rejects the double-spend before the
+        // settlement module's FundsInNotFound — an earlier, stronger backstop.
+        vm.expectRevert(abi.encodeWithSelector(
+            IBridge.InsufficientChainLiquidity.selector, RGB_CHAIN_ID, AMOUNT, uint256(0)
+        ));
         vm.prank(multisig);
         _fundsOut(
             recipient, AMOUNT, BURN_ID + 1,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
         );
+    }
+
+    // ========================================================================
+    // Isolated liquidity
+    //
+    // fundsIn credits lockedLiquidity[destinationChainId] by netAmount; fundsOut
+    // debits lockedLiquidity[sourceChainId] by gross amount. A release can never
+    // draw more than was bridged toward that chain, and one chain's bucket can
+    // never be drained from another chain's release.
+    // ========================================================================
+
+    function test_isolatedLiquidity_fundsInCreditsNetAmount() public {
+        // No commission in setUp → net == gross.
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT, 'bucket credited net amount');
+    }
+
+    function test_isolatedLiquidity_tokenCommissionCreditsNetNotGross() public {
+        _setFundsInTokenRule(400); // 4%
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 fee = cm.calculateStableFee(AMOUNT, 400, 100);
+        assertGt(fee, 0, 'sanity: positive fee');
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT - fee, 'bucket credits net, not gross');
+    }
+
+    function test_isolatedLiquidity_fundsOutDebitsGrossAmount() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 release = 40e18;
+        vm.prank(multisig);
+        _fundsOut(
+            recipient, release, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT - release, 'bucket debited by gross release');
+    }
+
+    function test_isolatedLiquidity_chainCannotConsumeAnotherChainsLiquidity() public {
+        // Fund only the RGB bucket.
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        // A different source chain with an enabled route and a (full) outflow
+        // bucket, so the rate limiter is NOT what blocks — only isolated
+        // liquidity is. Its lockedLiquidity is zero.
+        uint256 otherChain = 777;
+        vm.prank(deployer);
+        routeRegistry.setRoute(otherChain, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+        vm.prank(multisig);
+        bridge.setOutflowLimit(otherChain, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+
+        // Bridge holds AMOUNT (from the RGB deposit), but it is locked for RGB,
+        // not for `otherChain`. The release must fail on isolated liquidity.
+        assertEq(usdt0.balanceOf(address(bridge)), AMOUNT, 'pool has balance');
+        vm.expectRevert(abi.encodeWithSelector(
+            IBridge.InsufficientChainLiquidity.selector, otherChain, AMOUNT, uint256(0)
+        ));
+        vm.prank(multisig);
+        _fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            otherChain, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
+    }
+
+    function test_isolatedLiquidity_revertRollsBackDebit() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        // Bad proof → verifier reverts downstream of the liquidity debit.
+        bytes memory badProof = abi.encode(uint256(999_999), keccak256('unknown'));
+        vm.expectRevert();
+        vm.prank(multisig);
+        _fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            badProof, _settlement(_singleFundsInId())
+        );
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT, 'debit rolled back on revert');
+    }
+
+    /// @dev Fuzz the deposit/release round trip: a release of exactly the locked
+    ///      net amount succeeds and zeroes the bucket; one unit more reverts.
+    function testFuzz_isolatedLiquidity_roundTrip(uint256 amount) public {
+        // Bound to the user's funded balance and above the dust floor; no
+        // commission in setUp so net == gross.
+        amount = bound(amount, bridge.minFundsInAmount(), AMOUNT * 10);
+
+        vm.prank(user);
+        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), amount, 'credited');
+
+        // Mint an unlocked buffer so the pool balance exceeds the locked amount;
+        // this isolates the per-chain liquidity guard from the raw balance guard
+        // (a direct mint does not credit lockedLiquidity).
+        usdt0.mint(address(bridge), amount + 1);
+
+        // One unit over the locked amount reverts on the per-chain liquidity guard.
+        vm.expectRevert(abi.encodeWithSelector(
+            IBridge.InsufficientChainLiquidity.selector, RGB_CHAIN_ID, amount + 1, amount
+        ));
+        vm.prank(multisig);
+        _fundsOut(
+            recipient, amount + 1, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
+
+        // Exactly the locked amount succeeds and zeroes the bucket.
+        vm.prank(multisig);
+        _fundsOut(
+            recipient, amount, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlement(_singleFundsInId())
+        );
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 0, 'fully debited');
     }
 
     // ========================================================================
@@ -1507,7 +1640,12 @@ contract BridgeTest is Test {
         address alternateRecipient = makeAddr('alternateRecipient');
         uint256 releaseAmount = 37e18;
         uint256 alternateBurnId = BURN_ID + 777;
-        uint256 alternateSourceChainId = RGB_CHAIN_ID + 77;
+        // R-C-01 (isolated liquidity + outflow limit) gates the `sourceChainId`
+        // dimension: a release can only draw from a funded + rate-limited source
+        // chain. So this reproduction keeps the source on the funded RGB chain
+        // and shows the *remaining* unbound dimensions — recipient, amount,
+        // burnId and destinationChainId are still not bound to the verifier proof.
+        uint256 alternateSourceChainId = RGB_CHAIN_ID;
         uint256 alternateDestinationChainId = SOURCE_CHAIN_ID + 77;
         string memory alternateSourceAddress = 'rgb:unbound/source/utxo999';
 
