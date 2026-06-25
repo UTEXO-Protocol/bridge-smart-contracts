@@ -7,6 +7,7 @@ import { Bridge } from '../src/Bridge.sol';
 import { CommissionManager } from '../src/CommissionManager.sol';
 import { MultisigProxy } from '../src/MultisigProxy.sol';
 import { IMultisigProxy } from '../src/interfaces/IMultisigProxy.sol';
+import { IBridge }        from '../src/interfaces/IBridge.sol';
 import { RouteRegistry } from '../src/RouteRegistry.sol';
 import { RGBVerifier } from '../src/verifiers/RGBVerifier.sol';
 import { RgbSettlementModule } from '../src/settlement/RgbSettlementModule.sol';
@@ -93,21 +94,6 @@ contract IntegrationTest is Test {
 
     uint256 constant TIMELOCK     = 1 hours;
     uint256 constant MIN_TIMELOCK = 1 hours; // floor passed to the proxy constructor in tests
-
-    /// @dev New 8-arg fundsOut selector:
-    ///        fundsOut(
-    ///          address recipient,
-    ///          uint256 amount,
-    ///          uint256 burnId,
-    ///          uint256 sourceChainId,
-    ///          uint256 destinationChainId,
-    ///          string  sourceAddress,
-    ///          bytes   proof,
-    ///          bytes   settlementData
-    ///        )
-    bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)'
-    ));
 
     // =========================================================================
     // Re-declared events for vm.expectEmit
@@ -300,8 +286,7 @@ contract IntegrationTest is Test {
         bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
         bytes memory settlementData = abi.encode(fundsInIds);
 
-        bytes memory callData = abi.encodeWithSelector(
-            FUNDS_OUT_SELECTOR,
+        IBridge.FundsOutParams memory params = IBridge.FundsOutParams(
             recipient,
             netBridgedIn,          // amount = full bridged pool from this deposit
             BURN_ID,
@@ -312,10 +297,10 @@ contract IntegrationTest is Test {
             settlementData
         );
 
-        uint256 outNonce    = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        uint256 outNonce    = proxy.teeNonce();
         uint256 outDeadline = block.timestamp + 1 hours;
-        bytes32 outDigest   = MultisigHelper.digestBridgeOp(
-            domainSep, FUNDS_OUT_SELECTOR, callData, outNonce, outDeadline
+        bytes32 outDigest   = MultisigHelper.digestTeeFundsOut(
+            domainSep, params, outNonce, outDeadline
         );
         bytes[] memory teeSigs = _signEnclave2of3(outDigest); // signers 0 and 1
 
@@ -334,7 +319,7 @@ contract IntegrationTest is Test {
             'rgb:sender/utxo1src'
         );
 
-        proxy.execute(callData, outNonce, outDeadline, 3, teeSigs);
+        proxy.fundsOutCall(params, outNonce, outDeadline, 3, teeSigs);
 
         assertEq(token.balanceOf(address(bridge)),       0,                                      'bridge drained');
         assertEq(token.balanceOf(recipient),             netOut,                                 'recipient got net');
