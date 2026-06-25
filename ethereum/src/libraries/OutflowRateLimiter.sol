@@ -2,7 +2,6 @@
 pragma solidity 0.8.35;
 
 /// @title OutflowRateLimiter
-/// @notice Small token-bucket helper used by Bridge withdrawals.
 /// @dev Amounts are stored as uint128 to keep bucket state compact; Bridge
 ///      rejects larger admin inputs before constructing a limit config.
 library OutflowRateLimiter {
