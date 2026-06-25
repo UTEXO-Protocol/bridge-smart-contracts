@@ -181,6 +181,12 @@ contract IntegrationTest is Test {
             MIN_TIMELOCK
         );
 
+        // Outflow rate limits: configure generous buckets while
+        // the deployer still owns the Bridge, so the release path is enabled
+        // before ownership moves to the proxy.
+        bridge.setOutflowLimit(RGB_CHAIN_ID, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+        bridge.setGlobalOutflowLimit(1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+
         cm.transferOwnership(address(proxy));
         bridge.transferOwnership(address(proxy));
         vm.stopPrank();
