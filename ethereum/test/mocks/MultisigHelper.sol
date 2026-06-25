@@ -3,6 +3,9 @@ pragma solidity 0.8.35;
 
 import { Vm } from 'forge-std/Vm.sol';
 
+import { IBridge }        from '../../src/interfaces/IBridge.sol';
+import { IMultisigProxy } from '../../src/interfaces/IMultisigProxy.sol';
+
 /// @title MultisigHelper
 /// @notice EIP-712 digest builders and signature bitmap helpers for MultisigProxy tests.
 library MultisigHelper {
@@ -10,12 +13,12 @@ library MultisigHelper {
         'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'
     );
 
-    bytes32 internal constant BRIDGE_OP_TYPEHASH = keccak256(
-        'BridgeOperation(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
+    bytes32 internal constant TEE_FUNDS_OUT_TYPEHASH = keccak256(
+        'TeeFundsOut(address recipient,uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint256 nonce,uint256 deadline)'
     );
 
-    bytes32 internal constant BRIDGE_BATCH_OP_TYPEHASH = keccak256(
-        'BridgeBatchOperation(address[] targets,bytes[] callDatas,uint256[] values,uint256 nonce,uint256 deadline)'
+    bytes32 internal constant TEE_LZ_FUNDS_OUT_TYPEHASH = keccak256(
+        'TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)'
     );
 
     bytes32 internal constant EMERGENCY_PAUSE_TYPEHASH = keccak256(
@@ -52,10 +55,6 @@ library MultisigHelper {
 
     bytes32 internal constant PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH = keccak256(
         'ProposeSetCommissionRecipient(address newRecipient,uint256 nonce,uint256 deadline)'
-    );
-
-    bytes32 internal constant PROPOSE_SET_TEE_CALL_TYPEHASH = keccak256(
-        'ProposeSetTeeAllowedCall(address target,bytes4 selector,bool allowed,uint256 nonce,uint256 deadline)'
     );
 
     bytes32 internal constant PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH = keccak256(
@@ -127,37 +126,56 @@ library MultisigHelper {
     // Digest builders
     // ========================================================================
 
-    function digestBridgeOp(
+    /// @dev EIP-712 digest for the typed `fundsOutCall` (TeeFundsOut).
+    function digestTeeFundsOut(
         bytes32 domainSep,
-        bytes4 selector,
-        bytes memory callData,
+        IBridge.FundsOutParams memory p,
         uint256 nonce,
         uint256 deadline
     ) internal pure returns (bytes32) {
         return toTypedDataHash(domainSep, keccak256(abi.encode(
-            BRIDGE_OP_TYPEHASH, selector, keccak256(callData), nonce, deadline
+            TEE_FUNDS_OUT_TYPEHASH,
+            p.recipient,
+            p.amount,
+            p.burnId,
+            p.sourceChainId,
+            p.destinationChainId,
+            keccak256(bytes(p.sourceAddress)),
+            keccak256(p.proof),
+            keccak256(p.settlementData),
+            nonce,
+            deadline
         )));
     }
 
-    function digestBridgeBatchOp(
+    /// @dev EIP-712 digest for the typed `lzFundsOutCall` (TeeLzFundsOut). Built
+    ///      in two `abi.encode` halves joined with `bytes.concat`, matching the
+    ///      contract (byte-identical, and compiles without the optimizer).
+    function digestTeeLzFundsOut(
         bytes32 domainSep,
-        address[] memory targets,
-        bytes[]   memory callDatas,
-        uint256[] memory values,
+        IMultisigProxy.LzFundsOutParams memory p,
         uint256 nonce,
         uint256 deadline
     ) internal pure returns (bytes32) {
-        bytes32[] memory cdHashes = new bytes32[](callDatas.length);
-        for (uint256 i = 0; i < callDatas.length; i++) {
-            cdHashes[i] = keccak256(callDatas[i]);
-        }
-        return toTypedDataHash(domainSep, keccak256(abi.encode(
-            BRIDGE_BATCH_OP_TYPEHASH,
-            keccak256(abi.encodePacked(targets)),
-            keccak256(abi.encodePacked(cdHashes)),
-            keccak256(abi.encodePacked(values)),
-            nonce,
-            deadline
+        return toTypedDataHash(domainSep, keccak256(bytes.concat(
+            abi.encode(
+                TEE_LZ_FUNDS_OUT_TYPEHASH,
+                p.amount,
+                p.burnId,
+                p.sourceChainId,
+                p.destinationChainId,
+                keccak256(bytes(p.sourceAddress)),
+                keccak256(p.proof)
+            ),
+            abi.encode(
+                keccak256(p.settlementData),
+                p.dstEid,
+                p.recipient,
+                p.minAmountLD,
+                keccak256(p.extraOptions),
+                nonce,
+                deadline
+            )
         )));
     }
 
@@ -223,19 +241,6 @@ library MultisigHelper {
     ) internal pure returns (bytes32) {
         return toTypedDataHash(domainSep, keccak256(abi.encode(
             PROPOSE_UPDATE_BRIDGE_TYPEHASH, newBridge, nonce, deadline
-        )));
-    }
-
-    function digestProposeSetTeeAllowedCall(
-        bytes32 domainSep,
-        address target,
-        bytes4 selector,
-        bool allowed,
-        uint256 nonce,
-        uint256 deadline
-    ) internal pure returns (bytes32) {
-        return toTypedDataHash(domainSep, keccak256(abi.encode(
-            PROPOSE_SET_TEE_CALL_TYPEHASH, target, selector, allowed, nonce, deadline
         )));
     }
 
