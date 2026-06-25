@@ -11,7 +11,7 @@ import { RouteRegistry }       from '../src/RouteRegistry.sol';
 import { IRouteRegistry }      from '../src/interfaces/IRouteRegistry.sol';
 import { RGBVerifier }         from '../src/verifiers/RGBVerifier.sol';
 import { RgbSettlementModule } from '../src/settlement/RgbSettlementModule.sol';
-import { RateLimiter }         from '../src/libraries/RateLimiter.sol';
+import { OutflowRateLimiter }         from '../src/libraries/OutflowRateLimiter.sol';
 import {
     CommissionConfig,
     CommissionSide,
@@ -1030,7 +1030,7 @@ contract BridgeTest is Test {
     }
 
     // ========================================================================
-    // Outflow rate limit — Chainlink RateLimiter token bucket
+    // Outflow rate limit — OutflowRateLimiter token bucket
     //
     // fundsOut consumes the per-chain bucket (token-scoped errors) then the
     // global bucket (aggregate-scoped errors). setUp configures both RGB and
@@ -1069,7 +1069,7 @@ contract BridgeTest is Test {
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 0, 'capacity fully spent');
 
         // One unit over the (now empty) bucket but still within capacity → rate-limited.
-        vm.expectPartialRevert(RateLimiter.TokenRateLimitReached.selector);
+        vm.expectPartialRevert(OutflowRateLimiter.TokenOutflowThrottled.selector);
         _releaseRGB(1, BURN_ID + 1);
     }
 
@@ -1080,7 +1080,7 @@ contract BridgeTest is Test {
 
         // Full bucket, but the request exceeds capacity entirely → a different,
         // more-specific error than the rate-limit one.
-        vm.expectPartialRevert(RateLimiter.TokenMaxCapacityExceeded.selector);
+        vm.expectPartialRevert(OutflowRateLimiter.TokenRequestAboveCapacity.selector);
         _releaseRGB(cap + 1, BURN_ID);
     }
 
@@ -1109,7 +1109,7 @@ contract BridgeTest is Test {
         vm.warp(block.timestamp + 1); // one second later
 
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), rate, 'only refillRate accrued, not a fresh cap');
-        vm.expectPartialRevert(RateLimiter.TokenRateLimitReached.selector);
+        vm.expectPartialRevert(OutflowRateLimiter.TokenOutflowThrottled.selector);
         _releaseRGB(cap, BURN_ID + 1);
     }
 
@@ -1138,7 +1138,7 @@ contract BridgeTest is Test {
         assertEq(bridge.availableGlobalOutflow(), 0, 'global drained');
 
         // The per-chain bucket still has room, but the global aggregate trips.
-        vm.expectPartialRevert(RateLimiter.AggregateValueRateLimitReached.selector);
+        vm.expectPartialRevert(OutflowRateLimiter.AggregateOutflowThrottled.selector);
         _releaseRGB(1, BURN_ID + 1);
     }
 
@@ -1173,7 +1173,7 @@ contract BridgeTest is Test {
 
         uint256[] memory ids = new uint256[](1);
         ids[0] = SEED_TX;
-        vm.expectRevert(RateLimiter.RateLimitDisabled.selector);
+        vm.expectRevert(OutflowRateLimiter.LimitNotConfigured.selector);
         vm.prank(multisig);
         _fundsOut(recipient, 100 ether, BURN_ID, unconfigured, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), abi.encode(ids));
     }
@@ -1204,8 +1204,8 @@ contract BridgeTest is Test {
     function test_setOutflowLimit_revertsOnInvalidRate() public {
         // Library validation requires 0 < rate < capacity.
         vm.startPrank(multisig);
-        vm.expectRevert(abi.encodeWithSelector(RateLimiter.InvalidRateLimitRate.selector,
-            RateLimiter.Config({ isEnabled: true, capacity: uint128(100 ether), rate: uint128(100 ether) })));
+        vm.expectRevert(abi.encodeWithSelector(OutflowRateLimiter.InvalidLimitConfig.selector,
+            OutflowRateLimiter.Settings({ isEnabled: true, capacity: uint128(100 ether), rate: uint128(100 ether) })));
         bridge.setOutflowLimit(RGB_CHAIN_ID, 100 ether, 100 ether); // rate == capacity
         vm.stopPrank();
     }
