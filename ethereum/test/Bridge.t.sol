@@ -10,6 +10,7 @@ import { CommissionManager }   from '../src/CommissionManager.sol';
 import { RouteRegistry }       from '../src/RouteRegistry.sol';
 import { RGBVerifier }         from '../src/verifiers/RGBVerifier.sol';
 import { RgbSettlementModule } from '../src/settlement/RgbSettlementModule.sol';
+import { RateLimiter }         from '../src/libraries/RateLimiter.sol';
 import {
     CommissionConfig,
     CommissionSide,
@@ -52,6 +53,8 @@ contract BridgeTest is Test {
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
     event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
+    event OutflowLimitUpdated(uint256 indexed chainId, uint256 capacity, uint256 refillRate, uint256 available);
+    event GlobalOutflowLimitUpdated(uint256 capacity, uint256 refillRate, uint256 available);
 
     Bridge              bridge;
     MockERC20           usdt0;
@@ -1023,6 +1026,249 @@ contract BridgeTest is Test {
             _proof(), _settlement(_singleFundsInId())
         );
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 0, 'fully debited');
+    }
+
+    // ========================================================================
+    // Outflow rate limit — Chainlink RateLimiter token bucket
+    //
+    // fundsOut consumes the per-chain bucket (token-scoped errors) then the
+    // global bucket (aggregate-scoped errors). setUp configures both RGB and
+    // global to 1_000_000 ether and primes them full; tests reconfigure RGB down
+    // (clamp makes available == new capacity) to exercise tight limits. SEED_TX
+    // seeds ample isolated liquidity + a consumable settlement record, so the
+    // token bucket is the only limiter. Rate-limit reverts are matched by
+    // selector (the library's minWait is an implementation detail).
+    // ========================================================================
+
+    uint256 constant SEED_TX = 5_000;
+
+    function _seedRGB(uint256 amount) internal {
+        vm.prank(user);
+        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, SEED_TX, '');
+    }
+
+    function _releaseRGB(uint256 amount, uint256 burnId) internal {
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = SEED_TX;
+        vm.prank(multisig);
+        _fundsOut(recipient, amount, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), abi.encode(ids));
+    }
+
+    function _setRGBBucket(uint256 cap, uint256 rate) internal {
+        vm.prank(multisig);
+        bridge.setOutflowLimit(RGB_CHAIN_ID, cap, rate);
+    }
+
+    function test_outflow_fullBucketAllowsCapacityRejectsOverByOne() public {
+        _seedRGB(1000 ether);
+        uint256 cap = 100 ether;
+        _setRGBBucket(cap, cap / 1 days); // reconfig down → available == cap
+
+        _releaseRGB(cap, BURN_ID);
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 0, 'capacity fully spent');
+
+        // One unit over the (now empty) bucket but still within capacity → rate-limited.
+        vm.expectPartialRevert(RateLimiter.TokenRateLimitReached.selector);
+        _releaseRGB(1, BURN_ID + 1);
+    }
+
+    function test_outflow_releaseAboveCapacityReverts() public {
+        _seedRGB(1000 ether);
+        uint256 cap = 100 ether;
+        _setRGBBucket(cap, cap / 1 days);
+
+        // Full bucket, but the request exceeds capacity entirely → a different,
+        // more-specific error than the rate-limit one.
+        vm.expectPartialRevert(RateLimiter.TokenMaxCapacityExceeded.selector);
+        _releaseRGB(cap + 1, BURN_ID);
+    }
+
+    function test_outflow_refillAccruesOverTime() public {
+        _seedRGB(1000 ether);
+        uint256 cap = 100 ether;
+        uint256 rate = cap / 1 days;
+        _setRGBBucket(cap, rate);
+
+        _releaseRGB(cap, BURN_ID);
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 0, 'drained');
+
+        vm.warp(block.timestamp + 12 hours);
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), rate * 12 hours, 'partial linear refill');
+
+        _releaseRGB(rate * 12 hours, BURN_ID + 1); // the refilled allowance is spendable
+    }
+
+    function test_outflow_noDoubleCapBurstOverShortGap() public {
+        _seedRGB(1000 ether);
+        uint256 cap = 100 ether;
+        uint256 rate = cap / 1 days;
+        _setRGBBucket(cap, rate);
+
+        _releaseRGB(cap, BURN_ID);
+        vm.warp(block.timestamp + 1); // one second later
+
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), rate, 'only refillRate accrued, not a fresh cap');
+        vm.expectPartialRevert(RateLimiter.TokenRateLimitReached.selector);
+        _releaseRGB(cap, BURN_ID + 1);
+    }
+
+    function test_outflow_perChainIsolation() public {
+        uint256 other = 888;
+        vm.prank(deployer);
+        routeRegistry.setRoute(other, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+        vm.prank(multisig);
+        bridge.setOutflowLimit(other, 50 ether, uint256(50 ether) / 1 days);
+
+        _seedRGB(1000 ether);
+        _setRGBBucket(100 ether, uint256(100 ether) / 1 days);
+        _releaseRGB(100 ether, BURN_ID); // drain RGB bucket to 0
+
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 0, 'RGB drained');
+        assertEq(bridge.availableOutflow(other), 50 ether, 'other chain bucket untouched');
+    }
+
+    function test_outflow_globalBucketBoundsAggregate() public {
+        // Per-chain RGB stays large (1M from setUp); tighten only the global bucket.
+        vm.prank(multisig);
+        bridge.setGlobalOutflowLimit(100 ether, uint256(100 ether) / 1 days);
+
+        _seedRGB(1000 ether);
+        _releaseRGB(100 ether, BURN_ID); // consumes the whole global allowance
+        assertEq(bridge.availableGlobalOutflow(), 0, 'global drained');
+
+        // The per-chain bucket still has room, but the global aggregate trips.
+        vm.expectPartialRevert(RateLimiter.AggregateValueRateLimitReached.selector);
+        _releaseRGB(1, BURN_ID + 1);
+    }
+
+    function test_outflow_reconfigPreservesAvailableNoGift() public {
+        _seedRGB(1000 ether);
+        _setRGBBucket(100 ether, uint256(100 ether) / 1 days);
+        _releaseRGB(60 ether, BURN_ID); // available 40 ether
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 40 ether, 'pre');
+
+        // Raising capacity must NOT gift a fresh full bucket.
+        _setRGBBucket(200 ether, uint256(200 ether) / 1 days);
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 40 ether, 'available preserved, not gifted');
+    }
+
+    function test_outflow_reconfigClampsOnDecrease() public {
+        _setRGBBucket(100 ether, uint256(100 ether) / 1 days); // available 100 ether
+        _setRGBBucket(30 ether,  uint256(30 ether) / 1 days);  // clamp down
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 30 ether, 'clamped to new capacity');
+    }
+
+    function test_outflow_failsClosedWhenChainBucketUnconfigured() public {
+        uint256 unconfigured = 999;
+        vm.prank(deployer);
+        routeRegistry.setRoute(SOURCE_CHAIN_ID, unconfigured, true, address(rgbVerifier), address(rgbModule));
+        vm.prank(deployer);
+        routeRegistry.setRoute(unconfigured, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+
+        // Fund the unconfigured chain's isolated liquidity so only the missing
+        // (disabled) bucket blocks the release.
+        vm.prank(user);
+        bridge.fundsIn(100 ether, unconfigured, DST_ADDR, SEED_TX, '');
+
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = SEED_TX;
+        vm.expectRevert(RateLimiter.RateLimitDisabled.selector);
+        vm.prank(multisig);
+        _fundsOut(recipient, 100 ether, BURN_ID, unconfigured, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), abi.encode(ids));
+    }
+
+    function test_outflow_downstreamRevertRestoresBuckets() public {
+        _seedRGB(1000 ether);
+        _setRGBBucket(100 ether, uint256(100 ether) / 1 days);
+
+        uint256 globalBefore = bridge.availableGlobalOutflow();
+        bytes memory badProof = abi.encode(uint256(999_999), keccak256('unknown'));
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = SEED_TX;
+
+        vm.expectRevert();
+        vm.prank(multisig);
+        _fundsOut(recipient, 50 ether, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, badProof, abi.encode(ids));
+
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 100 ether, 'per-chain restored');
+        assertEq(bridge.availableGlobalOutflow(), globalBefore, 'global restored');
+    }
+
+    function test_setOutflowLimit_revertsOnZeroChainId() public {
+        vm.prank(multisig);
+        vm.expectRevert(IBridge.InvalidOutflowLimit.selector);
+        bridge.setOutflowLimit(0, 100 ether, uint256(100 ether) / 1 days);
+    }
+
+    function test_setOutflowLimit_revertsOnInvalidRate() public {
+        // Library validation requires 0 < rate < capacity.
+        vm.startPrank(multisig);
+        vm.expectRevert(abi.encodeWithSelector(RateLimiter.InvalidRateLimitRate.selector,
+            RateLimiter.Config({ isEnabled: true, capacity: uint128(100 ether), rate: uint128(100 ether) })));
+        bridge.setOutflowLimit(RGB_CHAIN_ID, 100 ether, 100 ether); // rate == capacity
+        vm.stopPrank();
+    }
+
+    function test_setOutflowLimit_onlyOwner() public {
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        bridge.setOutflowLimit(RGB_CHAIN_ID, 100 ether, 1);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        bridge.setGlobalOutflowLimit(100 ether, 1);
+    }
+
+    function test_setOutflowLimit_emitsEvent() public {
+        uint256 cap = 100 ether;
+        uint256 rate = cap / 1 days;
+        // RGB already configured in setUp (full at 1M); reconfig down clamps
+        // available to the new capacity.
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit OutflowLimitUpdated(RGB_CHAIN_ID, cap, rate, cap);
+        vm.prank(multisig);
+        bridge.setOutflowLimit(RGB_CHAIN_ID, cap, rate);
+    }
+
+    /// @dev Fuzz the refill formula end-to-end through the live preview: reconfig
+    ///      RGB to a fuzzed (capacity, rate), drain a fuzzed amount, warp a fuzzed
+    ///      time, and assert availableOutflow matches an independent recomputation
+    ///      of the library's min(capacity, tokens + elapsed*rate).
+    function testFuzz_outflow_previewMatchesRefillFormula(
+        uint256 capacity,
+        uint256 rate,
+        uint256 drain,
+        uint256 elapsed
+    ) public {
+        capacity = bound(capacity, 2, 1_000_000 ether);     // <= setUp's 1M so reconfig-down clamps to full
+        rate     = bound(rate, 1, capacity - 1);            // library requires 0 < rate < capacity
+        drain    = bound(drain, 1, capacity < 1000 ether ? capacity : 1000 ether);
+        elapsed  = bound(elapsed, 0, 4_000 days);
+
+        _seedRGB(drain);
+        _setRGBBucket(capacity, rate); // available == capacity (clamp down from 1M)
+        _releaseRGB(drain, BURN_ID);   // available == capacity - drain
+
+        vm.warp(block.timestamp + elapsed);
+
+        uint256 tokensAfter = capacity - drain;
+        uint256 expected = tokensAfter + elapsed * rate;
+        if (expected > capacity) expected = capacity;
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), expected, 'preview matches library refill');
+        assertLe(bridge.availableOutflow(RGB_CHAIN_ID), capacity, 'never exceeds capacity');
+    }
+
+    /// @dev A release within the live allowance debits exactly that amount.
+    function testFuzz_outflow_releaseDebitsAvailable(uint256 capacity, uint256 amount) public {
+        capacity = bound(capacity, 1 ether, 1_000_000 ether); // >= 1e18 so capacity/1day >= 1 (valid rate)
+        amount   = bound(amount, 1, capacity < 1000 ether ? capacity : 1000 ether);
+
+        _seedRGB(1000 ether);
+        _setRGBBucket(capacity, capacity / 1 days);
+
+        uint256 available = bridge.availableOutflow(RGB_CHAIN_ID); // == capacity
+        _releaseRGB(amount, BURN_ID);
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), available - amount, 'debited exactly');
     }
 
     // ========================================================================
