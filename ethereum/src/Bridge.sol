@@ -10,6 +10,7 @@ import { IBridge }            from './interfaces/IBridge.sol';
 import { ICommissionManager } from './interfaces/ICommissionManager.sol';
 import { IRouteRegistry }     from './interfaces/IRouteRegistry.sol';
 import { FundsInContext, FundsOutContext } from './interfaces/RouteTypes.sol';
+import { RateLimiter }     from './libraries/RateLimiter.sol';
 
 /// @title Bridge
 /// @notice Production bridge for locking USDT0 on Arbitrum and unlocking it
@@ -35,6 +36,7 @@ import { FundsInContext, FundsOutContext } from './interfaces/RouteTypes.sol';
 ///        deployments without redeploying the Bridge.
 contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using RateLimiter for RateLimiter.TokenBucket;
 
     // =========================================================================
     // State
@@ -81,13 +83,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
     /// @notice Per-source-chain outflow rate limiter. Bounds
     ///         how fast `fundsOut` can drain a single chain's liquidity.
-    mapping(uint256 chainId => TokenBucket) public chainBuckets;
+    mapping(uint256 chainId => RateLimiter.TokenBucket) public chainBuckets;
 
     /// @notice Global (aggregate) outflow rate limiter. Bounds
     ///         total `fundsOut` across all source chains, since a compromised
     ///         shared TEE could otherwise drain every chain's per-chain bucket
     ///         in the same window (aggregate = sum of per-chain caps).
-    TokenBucket public globalBucket;
+    RateLimiter.TokenBucket public globalBucket;
 
     /// @inheritdoc IBridge
     /// @dev Always non-zero (validated at the constructor and setter). Mutable
@@ -182,9 +184,10 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         onlyOwner
     {
         if (chainId == 0) revert InvalidOutflowLimit();
-        TokenBucket storage bucket = chainBuckets[chainId];
-        _configureBucket(bucket, capacity, refillRate);
-        emit OutflowLimitUpdated(chainId, capacity, refillRate, bucket.available);
+        RateLimiter.Config memory cfg = _buildOutflowConfig(capacity, refillRate);
+        RateLimiter._validateTokenBucketConfig(cfg, false);
+        chainBuckets[chainId]._setConfigPrimed(cfg);
+        emit OutflowLimitUpdated(chainId, capacity, refillRate, chainBuckets[chainId].tokens);
     }
 
     /// @inheritdoc IBridge
@@ -194,18 +197,20 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         override
         onlyOwner
     {
-        _configureBucket(globalBucket, capacity, refillRate);
-        emit GlobalOutflowLimitUpdated(capacity, refillRate, globalBucket.available);
+        RateLimiter.Config memory cfg = _buildOutflowConfig(capacity, refillRate);
+        RateLimiter._validateTokenBucketConfig(cfg, false);
+        globalBucket._setConfigPrimed(cfg);
+        emit GlobalOutflowLimitUpdated(capacity, refillRate, globalBucket.tokens);
     }
 
     /// @inheritdoc IBridge
     function availableOutflow(uint256 chainId) external view override returns (uint256) {
-        return _previewAvailable(chainBuckets[chainId]);
+        return RateLimiter._currentTokenBucketState(chainBuckets[chainId]).tokens;
     }
 
     /// @inheritdoc IBridge
     function availableGlobalOutflow() external view override returns (uint256) {
-        return _previewAvailable(globalBucket);
+        return RateLimiter._currentTokenBucketState(globalBucket).tokens;
     }
 
     // =========================================================================
@@ -294,8 +299,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // bucket and the global aggregate bucket; either being short reverts the
         // whole call (and rolls back the consume above). Both are debited before
         // any external interaction, so a downstream revert restores them too.
-        _consumeOutflow(chainBuckets[fundsOutParams.sourceChainId], fundsOutParams.amount, fundsOutParams.sourceChainId);
-        _consumeOutflow(globalBucket, fundsOutParams.amount, 0);
+        // Per-source-chain bucket (token-scoped errors), then the global
+        // aggregate bucket (aggregate-scoped errors via the address(0) sentinel).
+        // `_consume` is fail-closed: an unconfigured chain reverts RateLimitDisabled.
+        chainBuckets[fundsOutParams.sourceChainId]._consume(fundsOutParams.amount, TOKEN);
+        globalBucket._consume(fundsOutParams.amount, address(0));
 
         // Quote commission. NATIVE on fundsOut is unrepresentable: the
         // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
@@ -363,87 +371,21 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // Internal
     // =========================================================================
 
-    /// @dev Overflow-safe refill math, shared by the storage refill and the
-    ///      preview view. Returns `available` accrued over `elapsed` seconds,
-    ///      clamped to `capacity`.
-    ///
-    ///      Overflow cannot occur for ANY configuration (even a fat-fingered,
-    ///      astronomically large `refillRate`): `secondsToFull` is computed by
-    ///      division (never overflows), and the only multiplication runs in the
-    ///      branch where `refillRate * elapsed < missing <= capacity`, so the
-    ///      product is bounded by `capacity` and fits in uint256.
-    function _refilledAmount(
-        uint256 available,
-        uint256 capacity,
-        uint256 refillRate,
-        uint256 elapsed
-    ) private pure returns (uint256) {
-        if (elapsed == 0 || available >= capacity || refillRate == 0) return available;
-
-        uint256 missing = capacity - available;
-        uint256 secondsToFull = missing / refillRate;
-        if (missing % refillRate != 0) secondsToFull += 1;
-
-        if (elapsed >= secondsToFull) return capacity;
-        return available + refillRate * elapsed;
-    }
-
-    /// @dev Accrue the time-based refill into `bucket.available`. Caller must
-    ///      ensure the bucket is initialized.
-    function _refill(TokenBucket storage bucket) private {
-        uint256 elapsed = block.timestamp - bucket.lastRefill;
-        if (elapsed == 0) return;
-        bucket.available  = _refilledAmount(bucket.available, bucket.capacity, bucket.refillRate, elapsed);
-        bucket.lastRefill = block.timestamp;
-    }
-
-    /// @dev Current spendable allowance including the not-yet-materialized
-    ///      refill (read-only; does not mutate state). Returns 0 for an
-    ///      unconfigured bucket.
-    function _previewAvailable(TokenBucket storage bucket) private view returns (uint256) {
-        if (!bucket.initialized) return 0;
-        return _refilledAmount(
-            bucket.available,
-            bucket.capacity,
-            bucket.refillRate,
-            block.timestamp - bucket.lastRefill
-        );
-    }
-
-    /// @dev Refill then spend `amount` from `bucket`. Fail-closed if the bucket
-    ///      was never configured, so a release on an unlimited (unconfigured)
-    ///      source chain is rejected rather than allowed. `scopeId` is the
-    ///      source chain id for a per-chain bucket, or `0` for the global one;
-    ///      it is surfaced in the revert for diagnostics.
-    function _consumeOutflow(TokenBucket storage bucket, uint256 amount, uint256 scopeId) private {
-        if (!bucket.initialized) revert OutflowLimitNotConfigured();
-        _refill(bucket);
-        uint256 available = bucket.available;
-        if (amount > available) revert OutflowRateLimitExceeded(scopeId, amount, available);
-        bucket.available = available - amount;
-    }
-
-    /// @dev Configure or reconfigure a bucket. On reconfiguration it first
-    ///      accrues the pending refill under the OLD settings, then preserves
-    ///      the accrued `available` (clamped to the new capacity). It never
-    ///      gifts a fresh full burst on a capacity increase. First-time config
-    ///      starts the bucket full (`available == capacity`): `capacity` is by
-    ///      definition the allowed instant burst, and at genesis `lockedLiquidity`
-    ///      is zero so no release is possible until real deposits arrive anyway.
-    function _configureBucket(TokenBucket storage bucket, uint256 capacity, uint256 refillRate) private {
-        if (capacity == 0) revert InvalidOutflowLimit();
-
-        if (bucket.initialized) {
-            _refill(bucket); // accrue under the old configuration first
-        } else {
-            bucket.initialized = true;
-            bucket.available   = capacity; // start full — capacity is the allowed instant burst
-        }
-
-        bucket.capacity   = capacity;
-        bucket.refillRate = refillRate;
-        if (bucket.available > capacity) bucket.available = capacity; // clamp on decrease
-        bucket.lastRefill = block.timestamp;
+    /// @dev Build an enabled `RateLimiter.Config` from uint256 inputs, safely
+    ///      narrowing to the library's uint128 fields. USDT0 amounts fit in
+    ///      uint128; a value above that is a misconfiguration and reverts.
+    ///      `_validateTokenBucketConfig` then enforces `0 < rate < capacity`.
+    function _buildOutflowConfig(uint256 capacity, uint256 refillRate)
+        private
+        pure
+        returns (RateLimiter.Config memory)
+    {
+        if (capacity > type(uint128).max || refillRate > type(uint128).max) revert InvalidOutflowLimit();
+        return RateLimiter.Config({
+            isEnabled: true,
+            capacity:  uint128(capacity),
+            rate:      uint128(refillRate)
+        });
     }
 
     /// @dev Shared body for both `fundsIn` overloads.
