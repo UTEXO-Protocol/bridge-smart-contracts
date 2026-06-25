@@ -14,9 +14,7 @@ interface IBridge {
     error InvalidMinFundsInAmount();
     error AddressTooLong(uint256 length, uint256 maxLength);
     error ProofTooLong(uint256 length, uint256 maxLength);
-    error InsufficientChainLiquidity(uint256 chainId, uint256 requested, uint256 available);
-    error OutflowRateLimitExceeded(uint256 chainId, uint256 amount, uint256 available);
-    error OutflowLimitNotConfigured();
+    error InsufficientChainLiquidity(uint256 chainId, uint256 requested, uint256 available);    
     error InvalidOutflowLimit();
     error InvalidRouteRegistryAddress();
     error InvalidCommissionManagerAddress();
@@ -165,20 +163,10 @@ interface IBridge {
 
     /// @notice Release tokens to a recipient. Only callable by owner
     ///         (`MultisigProxy`). Parameters are bundled in `FundsOutParams`.
+    /// @dev Per-chain / global outflow rate limiting uses the `RateLimiter`
+    ///      token-bucket library; bucket state is exposed via the `chainBuckets`
+    ///      / `globalBucket` getters and the `availableOutflow` previews.
     function fundsOut(FundsOutParams calldata params) external;
-
-    /// @notice Per-chain / global outflow rate limiter state.
-    /// @dev A continuously-refilling "token bucket": `available` is the spendable
-    ///      allowance right now, refilling toward `capacity` at `refillRate`
-    ///      token units per second. `initialized` distinguishes "never
-    ///      configured" (fail-closed) from a real zero allowance.
-    struct TokenBucket {
-        uint256 capacity;
-        uint256 available;
-        uint256 refillRate;
-        uint256 lastRefill;
-        bool    initialized;
-    }
 
     // =========================================================================
     // External — admin (called via MultisigProxy)
