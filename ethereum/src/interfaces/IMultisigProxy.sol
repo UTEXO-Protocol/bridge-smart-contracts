@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
+import { IBridge } from './IBridge.sol';
+
 /// @title IMultisigProxy
 /// @notice Two-level ECDSA multisig proxy that owns the Bridge and the CommissionManager.
 ///
 /// @dev ENCLAVE SIGNERS (TEE / Nitro Enclave)
-///      Authorise routine value-transfer operations via `execute()` (single call to
-///      Bridge) or `executeBatch()` (atomic multi-call to any allowlisted target,
-///      e.g. Bridge.fundsOut + LZAdapter.sendOut for outbound RGB → non-Arbitrum).
-///      Restricted to a configurable per-(target, selector) allowlist.
-///      Uses per-selector nonces for `execute()` and a sequential `batchNonce` for
-///      `executeBatch()`.
+///      Authorise releases through two purpose-built, typed methods — there is
+///      no generic call dispatch, so the enclave path can never reach a
+///      privileged setter:
+///        - `fundsOutCall`   — a single `Bridge.fundsOut` (RGB → Arbitrum);
+///        - `lzFundsOutCall`  — `Bridge.fundsOut` to the LZ adapter then
+///          `adapter.sendOut`, with the two legs bound on-chain (RGB → non-Arbitrum).
+///      Both share a single sequential `teeNonce` for replay protection.
 ///
 ///      FEDERATION SIGNERS (governance / admin nodes)
 ///      All administrative operations go through a two-phase timelock:
@@ -69,6 +72,7 @@ interface IMultisigProxy {
     error UnknownOperationType();
     error ZeroRecipient();
     error ZeroTarget();
+    error LZAdapterNotSet();
     error BatchEmpty();
     error BatchLengthMismatch();
     error BatchTooLarge();
@@ -80,25 +84,41 @@ interface IMultisigProxy {
 
     enum OperationType {
         AdminExecute,                    // 0  — generic call into Bridge
-        UpdateEnclaveSigners,            // 1
-        UpdateFederationSigners,         // 2
-        UpdateBridge,                    // 3
-        SetCommissionRecipient,          // 4
-        SetTeeAllowedCall,               // 5  — (target, selector, allowed) entry in TEE allowlist
-        SetTimelockDuration,             // 6
-        AdminExecuteCommissionManager,   // 7  — generic call into CommissionManager
-        WithdrawTokenCommissionCM,       // 8  — CM.withdrawTokenCommission -> commissionRecipient
-        WithdrawNativeCommissionCM,      // 9  — CM.withdrawNativeCommission -> commissionRecipient
-        UpdateCommissionManager,         // 10 — migrate to a new CommissionManager address
-        AdminExecuteAdapter,             // 11 — generic call into LZAdapter (setTrustedEntrypoint, refundStuckFunds, …)
-        UpdateLZAdapter,                 // 12 — rotate the routing target for AdminExecuteAdapter
-        SetRoute,                        // 13 — RouteRegistry.setRoute(src, dst, enabled, verifier, module)
-        UpdateRouteRegistry,             // 14 — Bridge.setRouteRegistry(newRouteRegistry)
-        PauseInflow,                     // 15 — Bridge.pauseInflow()  (planned inflow-only freeze, timelocked)
-        UnpauseInflow                    // 16 — Bridge.unpauseInflow()
+        UpdateEnclaveSigners,            // 1  — replace the enclave signer set + threshold
+        UpdateFederationSigners,         // 2  — replace the federation signer set + threshold
+        UpdateBridge,                    // 3  — repoint the owned Bridge address
+        SetCommissionRecipient,          // 4  — set the pinned commission payout recipient
+        SetTimelockDuration,             // 5  — change the governance timelock (>= MIN_TIMELOCK)
+        AdminExecuteCommissionManager,   // 6  — generic call into CommissionManager
+        WithdrawTokenCommissionCM,       // 7  — CM.withdrawTokenCommission -> commissionRecipient
+        WithdrawNativeCommissionCM,      // 8  — CM.withdrawNativeCommission -> commissionRecipient
+        UpdateCommissionManager,         // 9  — migrate to a new CommissionManager address
+        AdminExecuteAdapter,             // 10 — generic call into LZAdapter (setTrustedEntrypoint, refundStuckFunds, …)
+        UpdateLZAdapter,                 // 11 — rotate the routing target for AdminExecuteAdapter
+        SetRoute,                        // 12 — RouteRegistry.setRoute(src, dst, enabled, verifier, module)
+        UpdateRouteRegistry,             // 13 — Bridge.setRouteRegistry(newRouteRegistry)
+        PauseInflow,                     // 14 — Bridge.pauseInflow()  (planned inflow-only freeze, timelocked)
+        UnpauseInflow                    // 15 — Bridge.unpauseInflow()
     }
 
     enum ProposalStatus { None, Pending, Executed, Cancelled }
+
+    /// @notice Business parameters for `lzFundsOut`, bundled to keep the call
+    ///         within stack limits. Signed as the EIP-712 `TeeLzFundsOut` struct
+    ///         (these fields plus `nonce` and `deadline`).
+    struct LzFundsOutParams {
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string  sourceAddress;
+        bytes   proof;
+        bytes   settlementData;
+        uint32  dstEid;
+        bytes32 recipient;
+        uint256 minAmountLD;
+        bytes   extraOptions;
+    }
 
     struct Proposal {
         bytes32 dataHash;
@@ -113,9 +133,15 @@ interface IMultisigProxy {
     // Events
     // =========================================================================
 
-    // TEE
-    event Executed(bytes4 indexed selector, uint256 nonce, uint256 enclaveBitmap);
-    event BatchExecuted(uint256 indexed nonce, uint256 enclaveBitmap, address[] targets, bytes4[] selectors);
+    // TEE — typed enclave releases
+    event FundsOutExecuted(uint256 indexed nonce, uint256 enclaveBitmap);
+    event LzFundsOutExecuted(
+        uint256 indexed nonce,
+        uint256 enclaveBitmap,
+        uint32  dstEid,
+        bytes32 recipient,
+        uint256 amount
+    );
 
     // Federation proposals
     event ProposalCreated(
@@ -140,7 +166,6 @@ interface IMultisigProxy {
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
     event CommissionRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
-    event TeeAllowedCallUpdated(address indexed target, bytes4 indexed selector, bool allowed);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
     event NativeCommissionWithdrawn(uint256 amount, address indexed recipient);
     event TimelockDurationUpdated(uint256 newDuration);
@@ -149,25 +174,25 @@ interface IMultisigProxy {
     // TEE-authorized
     // =========================================================================
 
-    /// @notice Execute a Bridge call authorised by M-of-N enclave signatures.
-    ///         Selector must be in the TEE allowlist for the Bridge target. Per-selector nonces.
-    function execute(
-        bytes calldata callData,
+    /// @notice Typed enclave release: authorise `Bridge.fundsOut` with M-of-N
+    ///         enclave signatures over the release parameters. The only call this
+    ///         makes is `Bridge.fundsOut` — there is no generic dispatch, so the
+    ///         enclave path can never reach a privileged setter.
+    function fundsOutCall(
+        IBridge.FundsOutParams calldata params,
         uint256 nonce,
         uint256 deadline,
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external;
 
-    /// @notice Execute multiple calls atomically, authorised by a single set of M-of-N
-    ///         enclave signatures over the whole batch.
-    /// @dev Each `(targets[i], selector(callDatas[i]))` must be in the TEE allowlist.
-    ///      `sum(values) == msg.value`. Either all succeed or the batch reverts.
-    ///      Uses sequential `batchNonce` for replay protection.
-    function executeBatch(
-        address[] calldata targets,
-        bytes[] calldata callDatas,
-        uint256[] calldata values,
+    /// @notice Typed Flow-4 enclave release: release to the LZ adapter and bridge
+    ///         onward in one signed operation. The Bridge recipient is forced to
+    ///         `lzAdapter` and the amount sent out equals the balance the adapter
+    ///         actually received, so the release and the cross-chain send are
+    ///         bound on-chain. `msg.value` funds the LayerZero native fee.
+    function lzFundsOutCall(
+        LzFundsOutParams calldata params,
         uint256 nonce,
         uint256 deadline,
         uint256 enclaveBitmap,
@@ -251,17 +276,6 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose adding/removing a TEE-allowed (target, selector) pair.
-    /// @dev opData = abi.encode(address target, bytes4 selector, bool allowed)
-    function proposeSetTeeAllowedCall(
-        address target,
-        bytes4 selector,
-        bool allowed,
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32);
 
     /// @notice Propose changing the timelock duration.
     /// @dev opData = abi.encode(uint256 newDuration)
@@ -431,7 +445,7 @@ interface IMultisigProxy {
         uint256 signerIndex
     ) external view returns (bool);
 
-    function getNonce(bytes4 selector) external view returns (uint256);
+    function teeNonce() external view returns (uint256);
     function bridge() external view returns (address);
     function commissionManager() external view returns (address);
     function lzAdapter() external view returns (address);
@@ -440,8 +454,6 @@ interface IMultisigProxy {
     function getFederationSigners() external view returns (address[] memory);
     function federationThreshold() external view returns (uint256);
     function commissionRecipient() external view returns (address);
-    function teeAllowedCalls(address target, bytes4 selector) external view returns (bool);
-    function batchNonce() external view returns (uint256);
     function DOMAIN_SEPARATOR() external view returns (bytes32);
     function proposalNonce() external view returns (uint256);
     function timelockDuration() external view returns (uint256);
