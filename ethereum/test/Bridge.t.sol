@@ -1787,16 +1787,14 @@ contract BridgeTest is Test {
 
     // fundsIn — fuzz/property rollback coverage
 
-    // Any selected fundsIn failure path must leave token/native balances,
-    // commission pools, and RGB accounting unchanged. Feed failures
-    // are pre-pull quote reverts; route/module/commission failures exercise
-    // post-pull atomic rollback.
+    // All selected failure paths must leave balances, commission pools, and RGB
+    // accounting unchanged. Feed failures are pre-pull; route/module/commission
+    // failures exercise post-pull rollback.
     function testFuzz_fundsIn_revertPathsLeaveStateUnchanged(
         uint128 amountSeed,
         uint128 operationSalt
     ) public {
-        // Keep the fee strictly positive so the intended commission/feed
-        // failure mode is reached instead of short-circuiting on a zero quote.
+        // Lower bound keeps commission/native fee nonzero so intended reverts fire.
         uint256 amount = bound(uint256(amountSeed), 100, AMOUNT);
 
         for (uint8 failureMode = 0; failureMode < 5; failureMode++) {
@@ -1970,14 +1968,10 @@ contract BridgeTest is Test {
         assertEq(rgbModule.fundsInRecords(operationId), netAmount, 'duplicate record unchanged');
     }
 
-    // Current behavior: a 100% token commission stores a zero RGB record, so
-    // the settlement-module duplicate guard still treats the operationId as
-    // unused and allows another deposit with the same id.
+    // Current behavior: a positive gross deposit with zero net leaves the
+    // operationId reusable because the RGB duplicate guard is value-based.
     function test_fundsIn_zeroNetDepositLeavesOperationIdReusable_currentBehavior() public {
-        // Boundary config: stablePercent == multiplier^2, so the token fee
-        // equals the gross amount for any positive amount while still passing
-        // the strict-greater guard. A fuzzed amount does not change this edge,
-        // so representative values make the current behavior clearer.
+        // stablePercent == multiplier^2 makes tokenCommission == amount.
         vm.prank(deployer);
         cm.setCommissionRule(
             SOURCE_CHAIN_ID,
