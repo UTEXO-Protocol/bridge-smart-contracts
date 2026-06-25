@@ -1793,15 +1793,28 @@ contract BridgeTest is Test {
     // post-pull atomic rollback.
     function testFuzz_fundsIn_revertPathsLeaveStateUnchanged(
         uint128 amountSeed,
-        uint8 failureModeSeed,
         uint128 operationSalt
     ) public {
         // Keep the fee strictly positive so the intended commission/feed
         // failure mode is reached instead of short-circuiting on a zero quote.
         uint256 amount = bound(uint256(amountSeed), 100, AMOUNT);
-        uint8 failureMode = uint8(bound(uint256(failureModeSeed), 0, 4));
-        uint256 operationId = TX_ID + 30_000 + uint256(operationSalt);
 
+        for (uint8 failureMode = 0; failureMode < 5; failureMode++) {
+            uint256 snapshotId = vm.snapshotState();
+            _assertFundsInRevertPathLeavesStateUnchanged(
+                amount,
+                TX_ID + 30_000 + uint256(operationSalt) + failureMode,
+                failureMode
+            );
+            assertTrue(vm.revertToStateAndDelete(snapshotId), 'scenario snapshot restored');
+        }
+    }
+
+    function _assertFundsInRevertPathLeavesStateUnchanged(
+        uint256 amount,
+        uint256 operationId,
+        uint8 failureMode
+    ) internal {
         bytes memory expectedRevert;
         MockSettlementModule revertingModule;
 
@@ -1960,15 +1973,11 @@ contract BridgeTest is Test {
     // Current behavior: a 100% token commission stores a zero RGB record, so
     // the settlement-module duplicate guard still treats the operationId as
     // unused and allows another deposit with the same id.
-    function testFuzz_fundsIn_zeroNetDepositLeavesOperationIdReusable_currentBehavior(
-        uint128 amountSeed,
-        uint128 operationSalt
-    ) public {
-        uint256 amount = bound(uint256(amountSeed), 1, AMOUNT);
-        uint256 operationId = TX_ID + 50_000 + uint256(operationSalt);
-
+    function test_fundsIn_zeroNetDepositLeavesOperationIdReusable_currentBehavior() public {
         // Boundary config: stablePercent == multiplier^2, so the token fee
-        // equals the gross amount while still passing the strict-greater guard.
+        // equals the gross amount for any positive amount while still passing
+        // the strict-greater guard. A fuzzed amount does not change this edge,
+        // so representative values make the current behavior clearer.
         vm.prank(deployer);
         cm.setCommissionRule(
             SOURCE_CHAIN_ID,
@@ -1983,6 +1992,15 @@ contract BridgeTest is Test {
             })
         );
 
+        _assertZeroNetDepositLeavesOperationIdReusable(1, TX_ID + 50_001);
+        _assertZeroNetDepositLeavesOperationIdReusable(AMOUNT / 2, TX_ID + 50_002);
+        _assertZeroNetDepositLeavesOperationIdReusable(AMOUNT, TX_ID + 50_003);
+    }
+
+    function _assertZeroNetDepositLeavesOperationIdReusable(
+        uint256 amount,
+        uint256 operationId
+    ) internal {
         (uint256 tokenCommission,, uint256 netAmount) =
             cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
 
