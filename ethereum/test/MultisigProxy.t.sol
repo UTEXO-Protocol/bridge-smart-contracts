@@ -279,6 +279,20 @@ contract MultisigProxyTest is Test {
         ids[0] = TX_ID;
     }
 
+    /// @dev Build `settlementData` for the reworked RgbSettlementModule, which
+    ///      expects `(uint256[] operationIds, uint256[] amounts)` and checks
+    ///      each id exists with an EXACTLY matching amount (no consumption).
+    ///      The amount is derived from the on-chain mint record so an exact
+    ///      match is guaranteed for the common path; ids with no record resolve
+    ///      to amount 0 (the module then reverts FundsInNotFound first).
+    function _settlement(uint256[] memory ids) internal view returns (bytes memory) {
+        uint256[] memory amounts = new uint256[](ids.length);
+        for (uint256 i = 0; i < ids.length; i++) {
+            amounts[i] = rgbModule.fundsInRecords(ids[i]);
+        }
+        return abi.encode(ids, amounts);
+    }
+
     /// @dev Valid strict-majority signer sets (2-of-2) used as filler in
     ///      constructor-revert tests that target a non-threshold revert.
     function _validEnc() internal view returns (address[] memory a) {
@@ -311,7 +325,7 @@ contract MultisigProxyTest is Test {
             destinationChainId: SOURCE_CHAIN_ID,
             sourceAddress:      SRC_ADDR,
             proof:              abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH),
-            settlementData:     abi.encode(_fundsInIds())
+            settlementData:     _settlement(_fundsInIds())
         });
     }
 
@@ -330,7 +344,7 @@ contract MultisigProxyTest is Test {
             destinationChainId: SOURCE_CHAIN_ID,
             sourceAddress:      SRC_ADDR,
             proof:              abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH),
-            settlementData:     abi.encode(ids),
+            settlementData:     _settlement(ids),
             dstEid:             DST_EID,
             recipient:          LZ_RECIPIENT,
             minAmountLD:        0,
@@ -1881,7 +1895,7 @@ contract MultisigProxyTest is Test {
             'cm pool delta'
         );
         assertEq(cm.nativeCommissionPool(),        nativePoolBefore,             'native pool unchanged');
-        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore - AMOUNT,        'record consumed');
+        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore,                 'record unchanged (proof-of-mint permanent)');
 
         // The signed Bridge gross debit splits into recipient net payout and CM token commission.
         assertEq(
@@ -1973,7 +1987,7 @@ contract MultisigProxyTest is Test {
         assertEq(token.balanceOf(address(bridge)),  bridgeBefore - AMOUNT,          'bridge gross debit');
         assertEq(token.balanceOf(address(cm)),      cmBefore + tokenCommission,     'cm fee delta');
         assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore + tokenCommission, 'cm pool delta');
-        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore - AMOUNT,          'record consumed');
+        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore,                   'record unchanged (proof-of-mint permanent)');
         assertEq(token.balanceOf(address(adapter)), adapterBefore,                  'adapter no residue');
         assertEq(token.balanceOf(mockOft),          oftBefore + netAmount,          'oft receives net');
         assertEq(address(proxy).balance,            proxyEthBefore,                 'proxy native no residue');
@@ -2176,8 +2190,10 @@ contract MultisigProxyTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
 
-        // The duplicate id is only safe in this shape because the first entry is
-        // partially consumed and the settlement loop breaks before reading it again.
+        // Duplicate ids are harmless under the reworked module: the check is a
+        // pure read, so referencing the same id twice with its (correct) amount
+        // simply passes both times. Solvency is the Bridge's concern, not the
+        // module's.
         uint256 bridgeBefore     = token.balanceOf(address(bridge));
         uint256 adapterBefore    = token.balanceOf(address(adapter));
         uint256 oftBefore        = token.balanceOf(mockOft);
@@ -2195,7 +2211,7 @@ contract MultisigProxyTest is Test {
         assertEq(cmBefore,         0,          'pre cm token');
         assertEq(cmPoolBefore,     0,          'pre cm pool');
         assertEq(nativePoolBefore, 0,          'pre native pool');
-        assertEq(recordBefore,     AMOUNT * 5, 'pre record allows partial consume');
+        assertEq(recordBefore,     AMOUNT * 5, 'pre record');
         assertEq(adapter.sendOutCalls(), 0,    'pre adapter calls');
         assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
 
@@ -2229,14 +2245,14 @@ contract MultisigProxyTest is Test {
         assertEq(token.balanceOf(address(cm)),      cmBefore + tokenCommission, 'cm token delta');
         assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore + tokenCommission, 'cm pool delta');
         assertEq(cm.nativeCommissionPool(),         nativePoolBefore,  'native pool unchanged');
-        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore - AMOUNT, 'record consumed once');
+        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore, 'record unchanged (proof-of-mint permanent)');
         assertEq(address(proxy).balance,            proxyEthBefore,  'proxy native unchanged');
         assertEq(address(adapter).balance,          adapterEthBefore, 'adapter native unchanged');
         assertEq(mockOft.balance,                   oftEthBefore + LZ_NATIVE_FEE, 'oft native fee');
     }
 
-    // Flow-4 success coverage for duplicate RGB settlement ids when the first
-    // occurrence fully satisfies the Bridge fundsOut amount.
+    // Flow-4 success coverage for duplicate RGB settlement ids: the reworked
+    // module verifies each (id, amount) pair by pure read, so duplicates pass.
     function test_lzFundsOutCall_duplicateSettlementIdsFullConsume_succeedsAndIgnoresDuplicate() public {
         uint256 duplicateRecordId = TX_ID + 1;
         uint256 burnId = BURN_ID + 1;
@@ -2278,8 +2294,8 @@ contract MultisigProxyTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
 
-        // Exact full consumption triggers the module's remaining == 0 break.
-        // Without that break, the duplicate id would be read after delete.
+        // The reworked module never consumes records, so a duplicated id is just
+        // verified twice against the same (intact) record and passes.
         uint256 bridgeBefore     = token.balanceOf(address(bridge));
         uint256 adapterBefore    = token.balanceOf(address(adapter));
         uint256 oftBefore        = token.balanceOf(mockOft);
@@ -2331,7 +2347,7 @@ contract MultisigProxyTest is Test {
         assertEq(token.balanceOf(address(cm)),      cmBefore + tokenCommission, 'cm token delta');
         assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore + tokenCommission, 'cm pool delta');
         assertEq(rgbModule.fundsInRecords(TX_ID),   originalRecordBefore, 'original record untouched');
-        assertEq(rgbModule.fundsInRecords(duplicateRecordId), 0,     'duplicate record consumed once');
+        assertEq(rgbModule.fundsInRecords(duplicateRecordId), duplicateRecordBefore, 'duplicate record unchanged');
         assertEq(address(proxy).balance,            proxyEthBefore,  'proxy native unchanged');
         assertEq(address(adapter).balance,          adapterEthBefore, 'adapter native unchanged');
         assertEq(mockOft.balance,                   oftEthBefore + LZ_NATIVE_FEE, 'oft native fee');
@@ -2484,7 +2500,7 @@ contract MultisigProxyTest is Test {
         assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
         assertEq(token.balanceOf(address(bridge)), 0, 'bridge pool drained');
         assertEq(token.balanceOf(drainRecipient), recipientBefore + bridgeBefore, 'recipient got full pool');
-        assertEq(rgbModule.fundsInRecords(TX_ID), 0, 'record fully consumed');
+        assertEq(rgbModule.fundsInRecords(TX_ID), recordBefore, 'record unchanged (proof-of-mint permanent)');
     }
 
     function test_governanceCanRotateEnclaveToUnattestedEOA_currentBehavior() public {
