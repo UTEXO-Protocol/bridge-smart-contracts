@@ -44,6 +44,7 @@ contract CommissionManagerTest is Test {
         CommissionCurrency currency
     );
     event EthUsdFeedUpdated(address indexed feed, uint256 heartbeat);
+    event TokenCommissionReceived(address indexed token, uint256 amount);
 
     function setUp() public {
         // Anvil starts at timestamp 1; warp past the heartbeat so staleness
@@ -141,6 +142,18 @@ contract CommissionManagerTest is Test {
     function test_convertTokenFeeToNative_revertsIfTokenDecimalsTooLarge() public {
         vm.expectRevert(ICommissionManager.TokenDecimalsTooLarge.selector);
         cm.convertTokenFeeToNative(1, 19);
+    }
+
+    // Current behavior: native quote validation only requires a fresh positive
+    // Chainlink answer. There is no sequencer uptime feed or min/max bound, so
+    // a fresh outlier price is still used for conversion.
+    function test_nativeQuoteDoesNotCheckSequencerUptime_currentBehavior() public {
+        ethUsdFeed.setAnswer(1);
+        ethUsdFeed.setUpdatedAt(block.timestamp);
+
+        uint256 nativeFee = cm.convertTokenFeeToNative(1e18, 18);
+
+        assertEq(nativeFee, 1e26, 'fresh positive outlier accepted');
     }
 
     function test_buildRouteKey_matchesEncodeHash() public view {
@@ -701,6 +714,34 @@ contract CommissionManagerTest is Test {
         vm.expectRevert(ICommissionManager.NothingReceived.selector);
         cm.receiveTokenCommission(address(token));
         vm.stopPrank();
+    }
+
+    // Current behavior: token commission accounting records the whole balance
+    // delta since the last pool update, so unsolicited tokens already sitting
+    // in the CommissionManager are credited with the next bridge commission.
+    function test_unsolicitedTokenBalanceIncludedInNextCommissionCredit_currentBehavior() public {
+        uint256 unsolicitedAmount = 3 ether;
+        uint256 legitimateAmount  = 7 ether;
+        uint256 expectedCredit    = unsolicitedAmount + legitimateAmount;
+
+        token.mint(user, unsolicitedAmount);
+        vm.prank(user);
+        token.transfer(address(cm), unsolicitedAmount);
+
+        token.mint(BRIDGE, legitimateAmount);
+        vm.prank(BRIDGE);
+        token.transfer(address(cm), legitimateAmount);
+
+        assertEq(token.balanceOf(address(cm)), expectedCredit, 'pre cm token balance');
+        assertEq(cm.tokenCommissionPool(address(token)), 0, 'pre cm pool');
+
+        vm.expectEmit(true, false, false, true, address(cm));
+        emit TokenCommissionReceived(address(token), expectedCredit);
+
+        vm.prank(BRIDGE);
+        cm.receiveTokenCommission(address(token));
+
+        assertEq(cm.tokenCommissionPool(address(token)), expectedCredit, 'pool includes unsolicited balance');
     }
 
     function test_withdrawTokenCommission_transfersAndUpdatesPool() public {

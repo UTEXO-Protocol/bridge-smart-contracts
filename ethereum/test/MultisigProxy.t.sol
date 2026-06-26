@@ -2,6 +2,7 @@
 pragma solidity 0.8.35;
 
 import { Test } from 'forge-std/Test.sol';
+import { Ownable } from '@openzeppelin/contracts/access/Ownable.sol';
 
 import { MultisigProxy }  from '../src/MultisigProxy.sol';
 import { IMultisigProxy } from '../src/interfaces/IMultisigProxy.sol';
@@ -96,6 +97,8 @@ contract MultisigProxyTest is Test {
     event TokenCommissionWithdrawn(address indexed token, address indexed to, uint256 amount);
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event BatchExecuted(uint256 indexed nonce, uint256 enclaveBitmap, address[] targets, bytes4[] selectors);
     event SendOut(bytes32 indexed guid, uint32 dstEid, bytes32 recipient, uint256 amountLD);
     event BridgeFundsOut(
         address indexed recipient,
@@ -2574,6 +2577,111 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.bridge(), newBridge, 'snapshotted proposal executes despite the live timelock raise');
     }
 
+    // Current behavior: emergency actions and regular proposals share
+    // proposalNonce, so an emergency pause can stale an already signed regular
+    // proposal before it is submitted on-chain.
+    function test_emergencyAndRegularProposalNonceCollide_currentBehavior() public {
+        address newBridge = makeAddr('nonceCollisionBridge');
+        uint256 regularNonce = proxy.proposalNonce();
+        uint256 regularDeadline = block.timestamp + 1 days;
+
+        bytes32 regularDigest = MultisigHelper.digestProposeUpdateBridge(
+            domainSep, newBridge, regularNonce, regularDeadline
+        );
+        (uint256[] memory regularPks, uint256 regularBitmap) = _fedSigSet2of3();
+        bytes[] memory regularSigs = MultisigHelper.signAll(vm, regularDigest, regularPks);
+
+        uint256 emergencyDeadline = block.timestamp + 1 hours;
+        bytes32 emergencyDigest = MultisigHelper.digestEmergencyPause(domainSep, regularNonce, emergencyDeadline);
+        (uint256[] memory emergencyPks, uint256 emergencyBitmap) = _fedSigSet2of3();
+        bytes[] memory emergencySigs = MultisigHelper.signAll(vm, emergencyDigest, emergencyPks);
+
+        assertFalse(bridge.paused(), 'pre bridge active');
+        assertEq(proxy.proposalNonce(), regularNonce, 'pre proposal nonce');
+        assertEq(proxy.bridge(), address(bridge), 'pre bridge target');
+
+        vm.expectEmit(false, false, false, true, address(proxy));
+        emit EmergencyPaused(regularNonce, emergencyBitmap);
+
+        proxy.emergencyPause(regularNonce, emergencyDeadline, emergencyBitmap, emergencySigs);
+
+        assertTrue(bridge.paused(), 'bridge paused by emergency action');
+        assertEq(proxy.proposalNonce(), regularNonce + 1, 'emergency consumed proposal nonce');
+
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.proposeUpdateBridge(newBridge, regularNonce, regularDeadline, regularBitmap, regularSigs);
+
+        assertEq(proxy.proposalNonce(), regularNonce + 1, 'stale proposal leaves nonce unchanged');
+        assertEq(proxy.bridge(), address(bridge), 'stale proposal leaves bridge unchanged');
+    }
+
+    // Current behavior: generic Bridge admin execution can call standard
+    // Ownable transferOwnership directly. A wrong nonzero owner leaves the
+    // proxy unable to execute future Bridge owner-only operations.
+    function test_singleStepOwnershipTransferCanOrphanGovernance_currentBehavior() public {
+        address wrongOwner = makeAddr('wrongBridgeOwner');
+        uint256 startTime = block.timestamp;
+
+        bytes memory transferCallData = abi.encodeWithSignature('transferOwnership(address)', wrongOwner);
+        uint256 transferNonce = proxy.proposalNonce();
+        uint256 transferDeadline = startTime + 1 days;
+        bytes32 transferDigest = MultisigHelper.digestProposeAdminExecute(
+            domainSep,
+            bytes4(transferCallData),
+            transferCallData,
+            transferNonce,
+            transferDeadline
+        );
+        (uint256[] memory transferPks, uint256 transferBitmap) = _fedSigSet2of3();
+        bytes[] memory transferSigs = MultisigHelper.signAll(vm, transferDigest, transferPks);
+
+        address routeRegistryBefore = bridge.routeRegistry();
+
+        assertEq(bridge.owner(), address(proxy), 'pre bridge owner');
+        assertFalse(bridge.paused(), 'pre bridge active');
+        assertEq(routeRegistryBefore, address(routeRegistry), 'pre route registry');
+
+        bytes32 transferProposalId =
+            proxy.proposeAdminExecute(transferCallData, transferNonce, transferDeadline, transferBitmap, transferSigs);
+
+        uint256 transferReadyAt = startTime + TIMELOCK + 1;
+        vm.warp(transferReadyAt);
+
+        vm.expectEmit(true, true, false, true, address(bridge));
+        emit OwnershipTransferred(address(proxy), wrongOwner);
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit ProposalExecuted(transferProposalId, IMultisigProxy.OperationType.AdminExecute);
+
+        proxy.executeProposal(transferProposalId, transferCallData);
+
+        assertEq(bridge.owner(), wrongOwner, 'bridge owner moved away from proxy');
+
+        address replacementRegistry = makeAddr('replacementRouteRegistry');
+        bytes memory registryCallData = abi.encodeWithSignature('setRouteRegistry(address)', replacementRegistry);
+        uint256 registryNonce = proxy.proposalNonce();
+        uint256 registryDeadline = transferReadyAt + 1 days;
+        bytes32 registryDigest = MultisigHelper.digestProposeAdminExecute(
+            domainSep,
+            bytes4(registryCallData),
+            registryCallData,
+            registryNonce,
+            registryDeadline
+        );
+        (uint256[] memory registryPks, uint256 registryBitmap) = _fedSigSet2of3();
+        bytes[] memory registrySigs = MultisigHelper.signAll(vm, registryDigest, registryPks);
+
+        bytes32 registryProposalId =
+            proxy.proposeAdminExecute(registryCallData, registryNonce, registryDeadline, registryBitmap, registrySigs);
+
+        vm.warp(transferReadyAt + TIMELOCK + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(proxy)));
+        proxy.executeProposal(registryProposalId, registryCallData);
+
+        assertEq(bridge.owner(), wrongOwner, 'wrong owner remains');
+        assertEq(bridge.routeRegistry(), routeRegistryBefore, 'proxy cannot update bridge config');
+    }
+
     // The typed commission-withdraw path pins the recipient to
     // commissionRecipient, while generic CM admin execution forwards arbitrary
     // calldata and lets the encoded withdrawal recipient win.
@@ -2645,5 +2753,121 @@ contract MultisigProxyTest is Test {
             'arbitrary recipient credited'
         );
     }
+    
+    // Current behavior: executeBatch validates signatures, allowlisted calls,
+    // and total native value, but it does not bind the Bridge payout amount to
+    // the adapter send amount. A smaller send leaves the remainder on the adapter.
+    function test_executeBatchAcceptsUnpairedFundsOutAndSendOut_currentBehavior() public {
+        uint256 percent = 500; // 5%
+        vm.prank(address(proxy));
+        cm.setCommissionRule(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            CommissionConfig({
+                stablePercent: percent,
+                multiplier: 100,
+                side: CommissionSide.FUNDS_OUT,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
 
+        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
+        uint256 adapterSendAmount = netAmount - 1e18;
+        assertGt(tokenCommission, 0, 'token fee quoted');
+        assertEq(nativeCommission, 0, 'native fee is zero');
+        assertLt(adapterSendAmount, netAmount, 'send amount smaller than bridge payout');
+
+        address mockOft = makeAddr('mismatchMockOft');
+        MockOutboundLZAdapter adapter =
+            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
+        bytes4 sendOutSelector = MockOutboundLZAdapter.sendOut.selector;
+        _allowTeeCall(address(adapter), sendOutSelector);
+
+        bytes memory bridgeCallData = _fundsOutCalldata(address(adapter), AMOUNT, BURN_ID + 88);
+        bytes memory adapterCallData = abi.encodeWithSelector(
+            sendOutSelector,
+            DST_EID,
+            LZ_RECIPIENT,
+            adapterSendAmount,
+            adapterSendAmount,
+            bytes('')
+        );
+
+        address[] memory targets = new address[](2);
+        bytes[] memory callDatas = new bytes[](2);
+        uint256[] memory values = new uint256[](2);
+        targets[0] = address(bridge);
+        targets[1] = address(adapter);
+        callDatas[0] = bridgeCallData;
+        callDatas[1] = adapterCallData;
+        values[0] = 0;
+        values[1] = LZ_NATIVE_FEE;
+
+        uint256 nonce = proxy.batchNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
+            domainSep, targets, callDatas, values, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        uint256 bridgeBefore = token.balanceOf(address(bridge));
+        uint256 adapterBefore = token.balanceOf(address(adapter));
+        uint256 oftBefore = token.balanceOf(mockOft);
+        uint256 cmBefore = token.balanceOf(address(cm));
+        uint256 cmPoolBefore = cm.tokenCommissionPool(address(token));
+        uint256 recordBefore = rgbModule.fundsInRecords(TX_ID);
+
+        assertEq(bridgeBefore, AMOUNT * 5, 'pre bridge pool');
+        assertEq(adapterBefore, 0, 'pre adapter token');
+        assertEq(oftBefore, 0, 'pre oft token');
+        assertEq(recordBefore, AMOUNT * 5, 'pre record');
+
+        bytes4[] memory selectors = new bytes4[](2);
+        selectors[0] = FUNDS_OUT_SELECTOR;
+        selectors[1] = sendOutSelector;
+        bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, adapterSendAmount));
+
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsOut(
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            BURN_ID + 88,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR
+        );
+        vm.expectEmit(true, false, false, true, address(adapter));
+        emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, adapterSendAmount);
+        vm.expectEmit(true, false, false, true, address(proxy));
+        emit BatchExecuted(nonce, bitmap, targets, selectors);
+
+        vm.deal(address(this), LZ_NATIVE_FEE);
+        proxy.executeBatch{ value: LZ_NATIVE_FEE }(targets, callDatas, values, nonce, deadline, bitmap, sigs);
+
+        assertEq(proxy.batchNonce(), nonce + 1, 'batch nonce incremented');
+        assertTrue(bridge.consumedBurnIds(BURN_ID + 88), 'burn id consumed');
+        assertEq(token.balanceOf(address(bridge)), bridgeBefore - AMOUNT, 'bridge gross debit');
+        assertEq(token.balanceOf(address(cm)), cmBefore + tokenCommission, 'cm fee delta');
+        assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore + tokenCommission, 'cm pool delta');
+        assertEq(rgbModule.fundsInRecords(TX_ID), recordBefore - AMOUNT, 'record consumed');
+        assertEq(token.balanceOf(mockOft), oftBefore + adapterSendAmount, 'oft receives smaller send');
+        assertEq(
+            token.balanceOf(address(adapter)),
+            adapterBefore + (netAmount - adapterSendAmount),
+            'adapter keeps unpaired remainder'
+        );
+        assertEq(
+            (token.balanceOf(address(cm)) - cmBefore) +
+            (token.balanceOf(mockOft) - oftBefore) +
+            (token.balanceOf(address(adapter)) - adapterBefore),
+            AMOUNT,
+            'gross batch payout conserved'
+        );
+    }
 }
