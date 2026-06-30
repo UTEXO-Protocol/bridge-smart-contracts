@@ -69,10 +69,10 @@ library OutflowRateLimiter {
     }
 
     /// @notice Return bucket state including refill accrued up to this block.
-    function currentState(Bucket memory bucket) internal view returns (Bucket memory) {
-        bucket.tokens = _asUint128(_preview(bucket));
-        bucket.lastUpdated = uint32(block.timestamp);
-        return bucket;
+    function currentState(Bucket memory bucket) internal view returns (Bucket memory updated) {
+        updated = bucket;
+        updated.tokens = _asUint128(_preview(bucket));
+        updated.lastUpdated = uint32(block.timestamp);
     }
 
     /// @notice Apply new settings while carrying over accrued allowance.
@@ -125,7 +125,7 @@ library OutflowRateLimiter {
         return left < right ? left : right;
     }
 
-    function _asUint128(uint256 value) private pure returns (uint128) {
+    function _asUint128(uint256 value) internal pure returns (uint128) {
         if (value > type(uint128).max) revert AmountExceedsUint128(value);
         // forge-lint: disable-next-line(unsafe-typecast)
         return uint128(value);
