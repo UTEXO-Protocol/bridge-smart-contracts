@@ -161,8 +161,40 @@ contract BridgeTest is Test {
         return abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
     }
 
+    /// @dev Build `settlementData` for the reworked RgbSettlementModule, which
+    ///      expects `(uint256[] operationIds, uint256[] amounts)` and checks
+    ///      each id exists with an EXACTLY matching amount (no consumption).
+    ///
+    ///      This convenience encodes `AMOUNT` for every id — the standard
+    ///      deposit size used across these tests (`TX_ID` is funded with
+    ///      `AMOUNT`). It is intentionally `pure`: it must NOT make an external
+    ///      call, because it is frequently passed inline as a `fundsOut`
+    ///      argument right after `vm.prank`/`vm.expectRevert`, and a staticcall
+    ///      there would consume the cheatcode. Tests whose records differ from
+    ///      `AMOUNT` (seeded liquidity, multi-amount, fuzz, deliberate
+    ///      mismatch) use `_settlementWithAmounts` with explicit values.
     function _settlement(uint256[] memory ids) internal pure returns (bytes memory) {
-        return abi.encode(ids);
+        uint256[] memory amounts = new uint256[](ids.length);
+        for (uint256 i = 0; i < ids.length; i++) {
+            amounts[i] = AMOUNT;
+        }
+        return abi.encode(ids, amounts);
+    }
+
+    /// @dev Explicit `(ids, amounts)` encoding for records that are not `AMOUNT`
+    ///      (seeded liquidity, multi-amount, fuzz) and for mismatch/length tests.
+    function _settlementWithAmounts(uint256[] memory ids, uint256[] memory amounts)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encode(ids, amounts);
+    }
+
+    /// @dev Single-element `uint256[]` (used for explicit amount arrays).
+    function _one(uint256 value) internal pure returns (uint256[] memory arr) {
+        arr = new uint256[](1);
+        arr[0] = value;
     }
 
     /// @dev Wrap the former 8 positional `fundsOut` args into the typed struct
@@ -745,7 +777,7 @@ contract BridgeTest is Test {
         assertEq(usdt0.balanceOf(address(bridge)), 0);
     }
 
-    function test_fundsOut_consumesRecord() public {
+    function test_fundsOut_keepsRecordAfterRelease() public {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
@@ -756,7 +788,8 @@ contract BridgeTest is Test {
             _proof(), _settlement(_singleFundsInId())
         );
 
-        assertEq(rgbModule.fundsInRecords(TX_ID), 0);
+        // The mint ledger is permanent (proof-of-mint), not a consumable balance.
+        assertEq(rgbModule.fundsInRecords(TX_ID), AMOUNT, 'record unchanged after release');
     }
 
     function test_fundsOut_multipleFundsInIds() public {
@@ -773,17 +806,21 @@ contract BridgeTest is Test {
         uint256[] memory ids = new uint256[](2);
         ids[0] = txId1;
         ids[1] = txId2;
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = amount1;
+        amounts[1] = amount2;
 
         vm.prank(multisig);
         _fundsOut(
             recipient, amount1 + amount2, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            _proof(), _settlement(ids)
+            _proof(), _settlementWithAmounts(ids, amounts)
         );
 
         assertEq(usdt0.balanceOf(recipient), amount1 + amount2);
-        assertEq(rgbModule.fundsInRecords(txId1), 0);
-        assertEq(rgbModule.fundsInRecords(txId2), 0);
+        // Records are a permanent proof-of-mint ledger — not consumed on release.
+        assertEq(rgbModule.fundsInRecords(txId1), amount1, 'record 1 unchanged');
+        assertEq(rgbModule.fundsInRecords(txId2), amount2, 'record 2 unchanged');
     }
 
     // ========================================================================
@@ -827,23 +864,25 @@ contract BridgeTest is Test {
         );
     }
 
-    function test_fundsOut_revertsOnAmountExceedsFundsIn() public {
+    function test_fundsOut_revertsOnAmountMismatch() public {
+        // Record a mint of 50e18 under txId1, then claim it for a different
+        // amount in settlementData. The module binds operationId → exact mint
+        // amount, so the mismatch must revert (surfaced through the Bridge).
         uint256 txId1 = 100;
-        uint256 txId2 = 101;
         vm.prank(user);
         bridge.fundsIn(50e18, RGB_CHAIN_ID, DST_ADDR, txId1, '');
-        vm.prank(user);
-        bridge.fundsIn(50e18, RGB_CHAIN_ID, DST_ADDR, txId2, '');
 
-        uint256[] memory ids = new uint256[](1);
-        ids[0] = txId1;
+        uint256[] memory ids     = new uint256[](1); ids[0] = txId1;
+        uint256[] memory amounts = new uint256[](1); amounts[0] = 60e18; // != recorded 50e18
 
-        vm.expectRevert(RgbSettlementModule.FundsOutAmountExceedsFundsIn.selector);
+        vm.expectRevert(abi.encodeWithSelector(
+            RgbSettlementModule.AmountMismatch.selector, txId1, uint256(60e18), uint256(50e18)
+        ));
         vm.prank(multisig);
         _fundsOut(
-            recipient, 60e18, BURN_ID,
+            recipient, 50e18, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            _proof(), _settlement(ids)
+            _proof(), _settlementWithAmounts(ids, amounts)
         );
     }
 
@@ -895,8 +934,9 @@ contract BridgeTest is Test {
 
         // Isolated liquidity (R-C-01 level 1): the first release drained the RGB
         // bucket to zero, and a direct mint does not credit it (only fundsIn
-        // does). So the liquidity guard rejects the double-spend before the
-        // settlement module's FundsInNotFound — an earlier, stronger backstop.
+        // does). The settlement module no longer consumes records (the mint
+        // proof is permanent and would still pass), so the liquidity guard is
+        // now the sole backstop against re-releasing a spent deposit.
         vm.expectRevert(abi.encodeWithSelector(
             IBridge.InsufficientChainLiquidity.selector, RGB_CHAIN_ID, AMOUNT, uint256(0)
         ));
@@ -1016,7 +1056,7 @@ contract BridgeTest is Test {
         _fundsOut(
             recipient, amount + 1, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            _proof(), _settlement(_singleFundsInId())
+            _proof(), _settlementWithAmounts(_singleFundsInId(), _one(amount))
         );
 
         // Exactly the locked amount succeeds and zeroes the bucket.
@@ -1024,7 +1064,7 @@ contract BridgeTest is Test {
         _fundsOut(
             recipient, amount, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            _proof(), _settlement(_singleFundsInId())
+            _proof(), _settlementWithAmounts(_singleFundsInId(), _one(amount))
         );
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 0, 'fully debited');
     }
@@ -1036,14 +1076,21 @@ contract BridgeTest is Test {
     // global bucket (aggregate-scoped errors). setUp configures both RGB and
     // global to 1_000_000 ether and primes them full; tests reconfigure RGB down
     // (clamp makes available == new capacity) to exercise tight limits. SEED_TX
-    // seeds ample isolated liquidity + a consumable settlement record, so the
-    // token bucket is the only limiter. Rate-limit reverts are matched by
+    // seeds ample isolated liquidity + a settlement record (proof-of-mint), so
+    // the token bucket is the only limiter. Rate-limit reverts are matched by
     // selector (the library's minWait is an implementation detail).
     // ========================================================================
 
     uint256 constant SEED_TX = 5_000;
 
+    /// @dev The net amount recorded under `SEED_TX` by the last `_seedRGB`, so
+    ///      `_releaseRGB` can build a settlement whose amount matches the record
+    ///      (the reworked module requires an exact match). Read internally only
+    ///      — no external call — so inline use after a cheatcode is safe.
+    uint256 _seedAmt;
+
     function _seedRGB(uint256 amount) internal {
+        _seedAmt = amount; // no fundsIn commission in this suite → net == gross
         vm.prank(user);
         bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, SEED_TX, '');
     }
@@ -1052,7 +1099,10 @@ contract BridgeTest is Test {
         uint256[] memory ids = new uint256[](1);
         ids[0] = SEED_TX;
         vm.prank(multisig);
-        _fundsOut(recipient, amount, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), abi.encode(ids));
+        _fundsOut(
+            recipient, amount, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), _settlementWithAmounts(ids, _one(_seedAmt))
+        );
     }
 
     function _setRGBBucket(uint256 cap, uint256 rate) internal {
@@ -1175,7 +1225,7 @@ contract BridgeTest is Test {
         ids[0] = SEED_TX;
         vm.expectRevert(OutflowRateLimiter.LimitNotConfigured.selector);
         vm.prank(multisig);
-        _fundsOut(recipient, 100 ether, BURN_ID, unconfigured, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), abi.encode(ids));
+        _fundsOut(recipient, 100 ether, BURN_ID, unconfigured, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), _settlementWithAmounts(ids, _one(100 ether)));
     }
 
     function test_outflow_downstreamRevertRestoresBuckets() public {
@@ -1189,7 +1239,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert();
         vm.prank(multisig);
-        _fundsOut(recipient, 50 ether, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, badProof, abi.encode(ids));
+        _fundsOut(recipient, 50 ether, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, badProof, _settlementWithAmounts(ids, _one(_seedAmt)));
 
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 100 ether, 'per-chain restored');
         assertEq(bridge.availableGlobalOutflow(), globalBefore, 'global restored');
@@ -1636,7 +1686,7 @@ contract BridgeTest is Test {
     // fundsOut — full-flow state snapshots
     // ========================================================================
 
-    function test_fundsOut_snapshot_tokenCommission_partialConsume() public {
+    function test_fundsOut_snapshot_tokenCommission_partialRelease() public {
         uint256 releaseAmount = 60e18;
         uint256 percent = 500; // 5%
 
@@ -1681,7 +1731,10 @@ contract BridgeTest is Test {
             SRC_ADDR
         );
 
-        // Release only part of the RGB record; the module should preserve the residual.
+        // Release less than the recorded mint. The settlement module no longer
+        // consumes records (the proof-of-mint ledger is permanent), so the
+        // record is left intact regardless of the release amount; solvency for
+        // the partial release is enforced by Bridge.lockedLiquidity.
         vm.prank(multisig);
         _fundsOut(
             recipient,
@@ -1704,7 +1757,7 @@ contract BridgeTest is Test {
             'cm pool delta'
         );
         assertEq(cm.nativeCommissionPool(),        nativePoolBefore,             'native pool unchanged');
-        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore - releaseAmount, 'record residual');
+        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore, 'record unchanged (proof-of-mint permanent)');
 
         // The gross Bridge debit splits into recipient net payout and CM token commission.
         assertEq(
@@ -1857,15 +1910,18 @@ contract BridgeTest is Test {
         uint256 txId2 = 101;
         uint256 amount1 = 50e18;
         uint256 amount2 = 50e18;
-        uint256 releaseAmount = 60e18;
+        uint256 releaseAmount = 50e18;
 
         vm.prank(user);
         bridge.fundsIn(amount1, RGB_CHAIN_ID, DST_ADDR, txId1, '');
         vm.prank(user);
         bridge.fundsIn(amount2, RGB_CHAIN_ID, DST_ADDR, txId2, '');
 
-        uint256[] memory ids = new uint256[](1);
-        ids[0] = txId1;
+        // Reference txId1 with a deliberately wrong amount so the settlement
+        // module reverts (AmountMismatch) after the Bridge has already marked
+        // the burn id and debited liquidity — exercising the rollback.
+        uint256[] memory ids        = new uint256[](1); ids[0] = txId1;
+        uint256[] memory badAmounts = new uint256[](1); badAmounts[0] = amount1 + 1;
 
         uint256 bridgeBefore     = usdt0.balanceOf(address(bridge));
         uint256 recipientBefore  = usdt0.balanceOf(recipient);
@@ -1884,9 +1940,12 @@ contract BridgeTest is Test {
         assertEq(record1Before, amount1, 'pre record 1');
         assertEq(record2Before, amount2, 'pre record 2');
 
-        // The first record is deleted before the module discovers the release
-        // is underfunded; the revert must restore that consumed record too.
-        vm.expectRevert(RgbSettlementModule.FundsOutAmountExceedsFundsIn.selector);
+        // The module reverts on the amount mismatch; the surrounding fundsOut
+        // must atomically roll back the burn-id mark and the liquidity debit.
+        // (Records are view-only now, so they are trivially unchanged.)
+        vm.expectRevert(abi.encodeWithSelector(
+            RgbSettlementModule.AmountMismatch.selector, txId1, amount1 + 1, amount1
+        ));
         vm.prank(multisig);
         _fundsOut(
             recipient,
@@ -1896,7 +1955,7 @@ contract BridgeTest is Test {
             SOURCE_CHAIN_ID,
             SRC_ADDR,
             _proof(),
-            _settlement(ids)
+            _settlementWithAmounts(ids, badAmounts)
         );
 
         assertFalse(bridge.consumedBurnIds(BURN_ID), 'burn id unchanged');
@@ -1905,7 +1964,7 @@ contract BridgeTest is Test {
         assertEq(usdt0.balanceOf(address(cm)),     cmBefore, 'cm token unchanged');
         assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, 'cm pool unchanged');
         assertEq(cm.nativeCommissionPool(),        nativePoolBefore, 'native pool unchanged');
-        assertEq(rgbModule.fundsInRecords(txId1),  record1Before, 'record 1 rolled back');
+        assertEq(rgbModule.fundsInRecords(txId1),  record1Before, 'record 1 unchanged');
         assertEq(rgbModule.fundsInRecords(txId2),  record2Before, 'record 2 unchanged');
     }
 
@@ -1948,8 +2007,8 @@ contract BridgeTest is Test {
 
         // Current behavior: this is still an authorized fundsOut call, but the
         // RGBVerifier checks only the encoded BTC block commitment proof. The
-        // record was created on the default route and is consumed on this
-        // alternate enabled route because the proof is not bound to release
+        // record was created on the default route and the release is accepted on
+        // this alternate enabled route because the proof is not bound to release
         // context on-chain. If that binding is enforced later, invert this to
         // expect a revert.
         vm.expectEmit(true, false, false, true, address(bridge));
@@ -1979,7 +2038,7 @@ contract BridgeTest is Test {
         assertTrue(bridge.consumedBurnIds(alternateBurnId), 'burn id consumed');
         assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore - releaseAmount, 'bridge debit');
         assertEq(usdt0.balanceOf(alternateRecipient), recipientBefore + releaseAmount, 'recipient credited');
-        assertEq(rgbModule.fundsInRecords(TX_ID), recordBefore - releaseAmount, 'record residual');
+        assertEq(rgbModule.fundsInRecords(TX_ID), recordBefore, 'record unchanged (proof-of-mint permanent)');
     }
 
     function test_operationIdPreemptionBlocksVictimRgbDeposit_currentBehavior() public {
