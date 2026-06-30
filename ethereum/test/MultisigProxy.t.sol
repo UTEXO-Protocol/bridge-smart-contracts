@@ -6,6 +6,7 @@ import { Ownable } from '@openzeppelin/contracts/access/Ownable.sol';
 
 import { MultisigProxy }  from '../src/MultisigProxy.sol';
 import { IMultisigProxy } from '../src/interfaces/IMultisigProxy.sol';
+import { IBridge }        from '../src/interfaces/IBridge.sol';
 import { Bridge }              from '../src/Bridge.sol';
 import { BridgeBase }          from '../src/BridgeBase.sol';
 import { Pausable }            from '@openzeppelin/contracts/utils/Pausable.sol';
@@ -67,7 +68,14 @@ contract MultisigProxyTest is Test {
     using MultisigHelper for bytes32;
 
     // ---- Re-declared events ------------------------------------------------
-    event Executed(bytes4 indexed selector, uint256 nonce, uint256 enclaveBitmap);
+    event FundsOutExecuted(uint256 indexed nonce, uint256 enclaveBitmap);
+    event LzFundsOutExecuted(
+        uint256 indexed nonce,
+        uint256 enclaveBitmap,
+        uint32  dstEid,
+        bytes32 recipient,
+        uint256 amount
+    );
     event EmergencyPaused(uint256 nonce, uint256 fedBitmap);
     event EmergencyUnpaused(uint256 nonce, uint256 fedBitmap);
     event ProposalCreated(
@@ -84,7 +92,6 @@ contract MultisigProxyTest is Test {
     event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
-    event TeeAllowedCallUpdated(address indexed target, bytes4 indexed selector, bool allowed);
     event TimelockDurationUpdated(uint256 newDuration);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
     event TokenCommissionWithdrawn(address indexed token, address indexed to, uint256 amount);
@@ -162,14 +169,6 @@ contract MultisigProxyTest is Test {
     uint256 constant BLOCK_HEIGHT      = 850_000;
     bytes32 constant COMMITMENT_HASH   = keccak256('test-btc-block-commitment');
     uint256 constant BTC_CONFIRMATIONS = 6;
-
-    /// @dev 8-arg fundsOut selector:
-    ///        fundsOut(address recipient, uint256 amount, uint256 burnId,
-    ///                 uint256 sourceChainId, uint256 destinationChainId,
-    ///                 string sourceAddress, bytes proof, bytes settlementData)
-    bytes4  constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)'
-    ));
 
     function setUp() public {
         encA1 = vm.addr(encPk1);
@@ -291,38 +290,76 @@ contract MultisigProxyTest is Test {
         a[1] = fedA2;
     }
 
-    function _fundsOutCalldata() internal view returns (bytes memory) {
-        bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
-        bytes memory settlementData = abi.encode(_fundsInIds());
-        return abi.encodeWithSelector(
-            FUNDS_OUT_SELECTOR,
-            recipient, AMOUNT, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            proof, settlementData
-        );
+    /// @dev Standard single-release params (recipient = `recipient`, AMOUNT, BURN_ID).
+    function _fundsOutParams() internal view returns (IBridge.FundsOutParams memory) {
+        return _fundsOutParams(recipient, AMOUNT, BURN_ID);
     }
 
-    function _fundsOutCalldata(address payoutRecipient, uint256 amount, uint256 burnId) internal pure returns (bytes memory) {
-        bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
-        bytes memory settlementData = abi.encode(_fundsInIds());
-        return abi.encodeWithSelector(
-            FUNDS_OUT_SELECTOR,
-            payoutRecipient, amount, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            proof, settlementData
-        );
+    function _fundsOutParams(address payoutRecipient, uint256 amount, uint256 burnId)
+        internal
+        view
+        returns (IBridge.FundsOutParams memory)
+    {
+        return IBridge.FundsOutParams({
+            recipient:          payoutRecipient,
+            amount:             amount,
+            burnId:             burnId,
+            sourceChainId:      RGB_CHAIN_ID,
+            destinationChainId: SOURCE_CHAIN_ID,
+            sourceAddress:      SRC_ADDR,
+            proof:              abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH),
+            settlementData:     abi.encode(_fundsInIds())
+        });
     }
 
-    function _allowTeeCall(address target, bytes4 selector) internal {
-        uint256 nonce = proxy.proposalNonce();
+    /// @dev Flow-4 LZ release params. The Bridge recipient is forced to the
+    ///      adapter on-chain, so it is not part of these params; `recipient`
+    ///      here is the bytes32 destination on the far chain.
+    function _lzFundsOutParams(uint256 amount, uint256 burnId, uint256[] memory ids)
+        internal
+        view
+        returns (IMultisigProxy.LzFundsOutParams memory)
+    {
+        return IMultisigProxy.LzFundsOutParams({
+            amount:             amount,
+            burnId:             burnId,
+            sourceChainId:      RGB_CHAIN_ID,
+            destinationChainId: SOURCE_CHAIN_ID,
+            sourceAddress:      SRC_ADDR,
+            proof:              abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH),
+            settlementData:     abi.encode(ids),
+            dstEid:             DST_EID,
+            recipient:          LZ_RECIPIENT,
+            minAmountLD:        0,
+            extraOptions:       hex'0003010011010000000000000000000000000000ea60'
+        });
+    }
+
+    /// @dev Sign an lz release with the 2-of-3 enclave set at the live teeNonce.
+    ///      Returns the nonce/bitmap/sigs so the heavy snapshot tests keep fewer
+    ///      locals live (avoids via_ir stack-too-deep with the optimizer off).
+    function _signLzEnclave(IMultisigProxy.LzFundsOutParams memory params, uint256 deadline)
+        internal
+        view
+        returns (uint256 nonce, uint256 bitmap, bytes[] memory sigs)
+    {
+        nonce = proxy.teeNonce();
+        bytes32 digest = MultisigHelper.digestTeeLzFundsOut(domainSep, params, nonce, deadline);
+        uint256[] memory pks;
+        (pks, bitmap) = _encSigSet2of3();
+        sigs = MultisigHelper.signAll(vm, digest, pks);
+    }
+
+    /// @dev Set the proxy's `lzAdapter` via the timelocked governance path so the
+    ///      typed `lzFundsOutCall` flow can run end-to-end.
+    function _setLzAdapter(address adapter) internal {
+        uint256 nonce    = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
-        bytes32 digest = MultisigHelper.digestProposeSetTeeAllowedCall(
-            domainSep, target, selector, true, nonce, deadline
-        );
+        bytes32 digest   = MultisigHelper.digestProposeUpdateLZAdapter(domainSep, adapter, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        bytes32 id = proxy.proposeSetTeeAllowedCall(target, selector, true, nonce, deadline, bitmap, sigs);
+        bytes32 id = proxy.proposeUpdateLZAdapter(adapter, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks));
         vm.warp(block.timestamp + TIMELOCK + 1);
-        proxy.executeProposal(id, abi.encode(target, selector, true));
+        proxy.executeProposal(id, abi.encode(adapter));
     }
 
     // ========================================================================
@@ -337,8 +374,7 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.commissionRecipient(), commissionReceiver);
         assertEq(proxy.timelockDuration(), TIMELOCK);
         assertEq(proxy.proposalNonce(), 0);
-        // Default TEE allowlist uses the new 8-arg fundsOut selector.
-        assertTrue(proxy.teeAllowedCalls(address(bridge), FUNDS_OUT_SELECTOR));
+        assertEq(proxy.teeNonce(),      0);
 
         address[] memory enc = proxy.getEnclaveSigners();
         assertEq(enc.length, 3);
@@ -674,323 +710,197 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // TEE execute — happy path
+    // TEE fundsOutCall — happy path
     // ========================================================================
 
-    function test_execute_fundsOutViaBridge() public {
-        bytes memory callData = _fundsOutCalldata();
-        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+    function test_fundsOutCall_releasesViaBridge() public {
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp + 1 hours;
 
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         vm.expectEmit(true, false, false, true);
-        emit Executed(FUNDS_OUT_SELECTOR, nonce, bitmap);
+        emit FundsOutExecuted(nonce, bitmap);
 
-        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
 
         assertEq(token.balanceOf(recipient), AMOUNT);
-        assertEq(proxy.getNonce(FUNDS_OUT_SELECTOR), nonce + 1);
+        assertEq(proxy.teeNonce(), nonce + 1);
     }
 
-    function test_execute_revertsOnExpired() public {
-        bytes memory callData = _fundsOutCalldata();
-        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+    function test_fundsOutCall_revertsOnExpired() public {
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp - 1;
 
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         vm.expectRevert(IMultisigProxy.Expired.selector);
-        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
     }
 
     // ========================================================================
     // TEE deadline upper bound (R-I-01 / UT-FIX-23)
     //
-    // execute / executeBatch reject a signed deadline further than
+    // fundsOutCall / lzFundsOutCall reject a signed deadline further than
     // MAX_TEE_DEADLINE into the future, so a leaked or pre-signed payload cannot
     // stay executable indefinitely. The boundary (exactly now + MAX_TEE_DEADLINE)
     // is still accepted — the guard is a strict `>`.
     // ========================================================================
 
-    function test_execute_revertsOnDeadlineTooFar() public {
-        bytes memory callData = _fundsOutCalldata();
-        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+    function test_fundsOutCall_revertsOnDeadlineTooFar() public {
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp + proxy.MAX_TEE_DEADLINE() + 1;
 
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         vm.expectRevert(IMultisigProxy.DeadlineTooFar.selector);
-        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
     }
 
-    function test_execute_acceptsDeadlineAtMaxBoundary() public {
-        bytes memory callData = _fundsOutCalldata();
-        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+    function test_fundsOutCall_acceptsDeadlineAtMaxBoundary() public {
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp + proxy.MAX_TEE_DEADLINE(); // exact boundary, strict `>` lets it through
 
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
         assertEq(token.balanceOf(recipient), AMOUNT, 'executes at the exact deadline ceiling');
     }
 
-    function test_executeBatch_revertsOnDeadlineTooFar() public {
-        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
-        uint256 nonce    = proxy.batchNonce();
+    function test_lzFundsOutCall_revertsOnDeadlineTooFar() public {
+        address mockOft = makeAddr('mockOft');
+        MockOutboundLZAdapter adapter =
+            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
+        _setLzAdapter(address(adapter));
+
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, _fundsInIds());
+        uint256 nonce    = proxy.teeNonce();
         uint256 deadline = block.timestamp + proxy.MAX_TEE_DEADLINE() + 1;
 
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(domainSep, targets, callDatas, values, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeLzFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
+        vm.deal(address(this), LZ_NATIVE_FEE);
         vm.expectRevert(IMultisigProxy.DeadlineTooFar.selector);
-        proxy.executeBatch(targets, callDatas, values, nonce, deadline, bitmap, sigs);
+        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
     }
 
-    function test_executeBatch_acceptsDeadlineAtMaxBoundary() public {
-        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
-        uint256 nonce    = proxy.batchNonce();
+    function test_lzFundsOutCall_acceptsDeadlineAtMaxBoundary() public {
+        address mockOft = makeAddr('mockOft');
+        MockOutboundLZAdapter adapter =
+            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
+        _setLzAdapter(address(adapter));
+
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, _fundsInIds());
+        uint256 nonce    = proxy.teeNonce();
         uint256 deadline = block.timestamp + proxy.MAX_TEE_DEADLINE(); // exact boundary
 
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(domainSep, targets, callDatas, values, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeLzFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        proxy.executeBatch(targets, callDatas, values, nonce, deadline, bitmap, sigs);
-        assertEq(token.balanceOf(recipient), AMOUNT,    'batch executes at the exact deadline ceiling');
-        assertEq(proxy.batchNonce(),         nonce + 1, 'batchNonce incremented');
+        vm.deal(address(this), LZ_NATIVE_FEE);
+        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
+        assertEq(token.balanceOf(mockOft), AMOUNT, 'lz release executes at the exact deadline ceiling');
+        assertEq(proxy.teeNonce(),         nonce + 1, 'teeNonce incremented');
     }
 
-    function test_execute_revertsOnWrongNonce() public {
-        bytes memory callData = _fundsOutCalldata();
+    function test_fundsOutCall_revertsOnWrongNonce() public {
+        IBridge.FundsOutParams memory params = _fundsOutParams();
         uint256 nonce = 99;
         uint256 deadline = block.timestamp + 1 hours;
 
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
-        proxy.execute(callData, nonce, deadline, bitmap, sigs);
-    }
-
-    function test_execute_revertsOnDisallowedSelector() public {
-        bytes memory callData = abi.encodeWithSignature('pauseInflow()');
-        uint256 nonce = 0;
-        uint256 deadline = block.timestamp + 1 hours;
-
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, bytes4(callData), callData, nonce, deadline);
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        vm.expectRevert(abi.encodeWithSelector(
-            IMultisigProxy.CallNotAllowed.selector, address(bridge), bytes4(callData)
-        ));
-        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
     }
 
     // ========================================================================
-    // executeBatch
+    // TEE fundsOutCall — signature / bitmap reverts
     // ========================================================================
 
-    /// @dev Helper: build a single-element batch around the standard fundsOut call.
-    function _singleFundsOutBatch() internal view returns (
-        address[] memory targets,
-        bytes[]   memory callDatas,
-        uint256[] memory values
-    ) {
-        targets = new address[](1);
-        callDatas = new bytes[](1);
-        values = new uint256[](1);
-        targets[0]   = address(bridge);
-        callDatas[0] = _fundsOutCalldata();
-        values[0]    = 0;
-    }
-
-    function test_executeBatch_singleFundsOut_happyPath() public {
-        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
-
-        uint256 nonce    = proxy.batchNonce();
+    function test_fundsOutCall_revertsOnBelowThreshold() public {
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp + 1 hours;
 
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
-            domainSep, targets, callDatas, values, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        proxy.executeBatch(targets, callDatas, values, nonce, deadline, bitmap, sigs);
-
-        assertEq(token.balanceOf(recipient), AMOUNT,    'fundsOut delivered');
-        assertEq(proxy.batchNonce(),         nonce + 1, 'batchNonce incremented');
-    }
-
-    function test_executeBatch_revertsOnEmpty() public {
-        address[] memory targets = new address[](0);
-        bytes[]   memory callDatas = new bytes[](0);
-        uint256[] memory values = new uint256[](0);
-
-        bytes[] memory sigs = new bytes[](2);
-
-        vm.expectRevert(IMultisigProxy.BatchEmpty.selector);
-        proxy.executeBatch(targets, callDatas, values, 0, block.timestamp + 1 hours, 0x3, sigs);
-    }
-
-    function test_executeBatch_revertsOnLengthMismatch() public {
-        address[] memory targets   = new address[](2);
-        bytes[]   memory callDatas = new bytes[](1);
-        uint256[] memory values    = new uint256[](2);
-        targets[0] = address(bridge); targets[1] = address(bridge);
-        callDatas[0] = _fundsOutCalldata();
-
-        bytes[] memory sigs = new bytes[](2);
-
-        vm.expectRevert(IMultisigProxy.BatchLengthMismatch.selector);
-        proxy.executeBatch(targets, callDatas, values, 0, block.timestamp + 1 hours, 0x3, sigs);
-    }
-
-    function test_executeBatch_revertsOnDisallowedTargetSelector() public {
-        address[] memory targets   = new address[](1);
-        bytes[]   memory callDatas = new bytes[](1);
-        uint256[] memory values    = new uint256[](1);
-        targets[0]   = makeAddr('random-target');
-        callDatas[0] = abi.encodeWithSignature('pauseInflow()');
-
-        uint256 nonce    = proxy.batchNonce();
-        uint256 deadline = block.timestamp + 1 hours;
-
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
-            domainSep, targets, callDatas, values, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        vm.expectRevert(abi.encodeWithSelector(
-            IMultisigProxy.CallNotAllowed.selector, targets[0], bytes4(callDatas[0])
-        ));
-        proxy.executeBatch(targets, callDatas, values, nonce, deadline, bitmap, sigs);
-    }
-
-    function test_executeBatch_revertsOnValueMismatch() public {
-        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
-        values[0] = 1 ether;
-
-        uint256 nonce    = proxy.batchNonce();
-        uint256 deadline = block.timestamp + 1 hours;
-
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
-            domainSep, targets, callDatas, values, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        vm.expectRevert(IMultisigProxy.BatchValueMismatch.selector);
-        proxy.executeBatch{ value: 0 }(targets, callDatas, values, nonce, deadline, bitmap, sigs);
-    }
-
-    function test_executeBatch_revertsOnTooLarge() public {
-        uint256 size = proxy.MAX_BATCH_SIZE() + 1;
-        address[] memory targets   = new address[](size);
-        bytes[]   memory callDatas = new bytes[](size);
-        uint256[] memory values    = new uint256[](size);
-
-        bytes[] memory sigs = new bytes[](2);
-        vm.expectRevert(IMultisigProxy.BatchTooLarge.selector);
-        proxy.executeBatch(targets, callDatas, values, 0, block.timestamp + 1 hours, 0x3, sigs);
-    }
-
-    function test_executeBatch_revertsOnExpired() public {
-        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
-
-        bytes[] memory sigs = new bytes[](2);
-        vm.expectRevert(IMultisigProxy.Expired.selector);
-        proxy.executeBatch(targets, callDatas, values, 0, block.timestamp - 1, 0x3, sigs);
-    }
-
-    function test_executeBatch_revertsOnWrongNonce() public {
-        (address[] memory targets, bytes[] memory callDatas, uint256[] memory values) = _singleFundsOutBatch();
-
-        uint256 wrongNonce = 99;
-        uint256 deadline   = block.timestamp + 1 hours;
-
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
-            domainSep, targets, callDatas, values, wrongNonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
-        proxy.executeBatch(targets, callDatas, values, wrongNonce, deadline, bitmap, sigs);
-    }
-
-    function test_execute_revertsOnCallDataTooShort() public {
-        bytes memory callData = hex'aabb';
-        vm.expectRevert(IMultisigProxy.CallDataTooShort.selector);
-        proxy.execute(callData, 0, block.timestamp + 1 hours, 0x3, new bytes[](2));
-    }
-
-    function test_execute_revertsOnBelowThreshold() public {
-        bytes memory callData = _fundsOutCalldata();
-        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
-        uint256 deadline = block.timestamp + 1 hours;
-
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         uint256[] memory pks = new uint256[](1); pks[0] = encPk1;
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         vm.expectRevert(IMultisigProxy.BelowThreshold.selector);
-        proxy.execute(callData, nonce, deadline, 0x1, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, 0x1, sigs);
     }
 
-    function test_execute_revertsOnBadSignature() public {
-        bytes memory callData = _fundsOutCalldata();
-        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+    function test_fundsOutCall_revertsOnBadSignature() public {
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp + 1 hours;
 
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         uint256[] memory pks = new uint256[](2);
         pks[0] = encPk1;
         pks[1] = 0xBADBAD;
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
-        proxy.execute(callData, nonce, deadline, 0x3, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, 0x3, sigs);
     }
 
-    function test_execute_revertsOnSigCountMismatch() public {
-        bytes memory callData = _fundsOutCalldata();
-        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+    function test_fundsOutCall_revertsOnSigCountMismatch() public {
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp + 1 hours;
 
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         uint256[] memory pks = new uint256[](3);
         pks[0] = encPk1; pks[1] = encPk2; pks[2] = encPk3;
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         vm.expectRevert(IMultisigProxy.SigCountMismatch.selector);
-        proxy.execute(callData, nonce, deadline, 0x3, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, 0x3, sigs);
     }
 
-    function test_execute_revertsOnBitmapOutOfRange() public {
-        bytes memory callData = _fundsOutCalldata();
-        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+    function test_fundsOutCall_revertsOnBitmapOutOfRange() public {
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp + 1 hours;
 
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks,) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         vm.expectRevert(IMultisigProxy.BitmapOutOfRange.selector);
-        proxy.execute(callData, nonce, deadline, 0x100, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, 0x100, sigs);
+    }
+
+    function test_lzFundsOutCall_revertsIfAdapterUnset() public {
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, _fundsInIds());
+        uint256 nonce    = proxy.teeNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestTeeLzFundsOut(domainSep, params, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.LZAdapterNotSet.selector);
+        proxy.lzFundsOutCall(params, nonce, deadline, bitmap, sigs);
     }
 
     // ========================================================================
@@ -1081,15 +991,15 @@ contract MultisigProxyTest is Test {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID + 1, '');
 
         // Enclave-signed release is frozen too — the revert propagates from
-        // Bridge.fundsOut through proxy.execute.
-        bytes memory callData = _fundsOutCalldata();
-        uint256 encNonce      = proxy.getNonce(FUNDS_OUT_SELECTOR);
-        bytes32 encDigest     = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, encNonce, deadline);
+        // Bridge.fundsOut through proxy.fundsOutCall.
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 encNonce      = proxy.teeNonce();
+        bytes32 encDigest     = MultisigHelper.digestTeeFundsOut(domainSep, params, encNonce, deadline);
         (uint256[] memory epks, uint256 ebitmap) = _encSigSet2of3();
         bytes[] memory esigs   = MultisigHelper.signAll(vm, encDigest, epks);
 
         vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
-        proxy.execute(callData, encNonce, deadline, ebitmap, esigs);
+        proxy.fundsOutCall(params, encNonce, deadline, ebitmap, esigs);
     }
 
     /// @dev The planned inflow-only pause runs through the timelocked
@@ -1118,13 +1028,13 @@ contract MultisigProxyTest is Test {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID + 1, '');
 
         // ...but the enclave release still executes.
-        bytes memory callData = _fundsOutCalldata();
-        uint256 encNonce      = proxy.getNonce(FUNDS_OUT_SELECTOR);
-        bytes32 encDigest     = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, encNonce, t + 1 days);
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 encNonce      = proxy.teeNonce();
+        bytes32 encDigest     = MultisigHelper.digestTeeFundsOut(domainSep, params, encNonce, t + 1 days);
         (uint256[] memory epks, uint256 ebitmap) = _encSigSet2of3();
         bytes[] memory esigs   = MultisigHelper.signAll(vm, encDigest, epks);
 
-        proxy.execute(callData, encNonce, t + 1 days, ebitmap, esigs);
+        proxy.fundsOutCall(params, encNonce, t + 1 days, ebitmap, esigs);
         assertEq(token.balanceOf(recipient), AMOUNT, 'withdrawal succeeded while inflow paused');
     }
 
@@ -1256,33 +1166,6 @@ contract MultisigProxyTest is Test {
         assertEq(after_.length, 2);
         assertEq(after_[1], newSigner);
         assertEq(proxy.enclaveThreshold(), newThreshold);
-    }
-
-    // ========================================================================
-    // Propose + Execute — SetTeeAllowedCall
-    // ========================================================================
-
-    function test_proposeSetTeeAllowedCall_execute() public {
-        address target = makeAddr('lzAdapter');
-        bytes4  sel    = bytes4(0xdeadbeef);
-        uint256 nonce  = proxy.proposalNonce();
-        uint256 deadline = block.timestamp + 1 days;
-
-        bytes32 digest = MultisigHelper.digestProposeSetTeeAllowedCall(
-            domainSep, target, sel, true, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        bytes32 id = proxy.proposeSetTeeAllowedCall(target, sel, true, nonce, deadline, bitmap, sigs);
-
-        vm.warp(block.timestamp + TIMELOCK + 1);
-
-        vm.expectEmit(true, true, false, true);
-        emit TeeAllowedCallUpdated(target, sel, true);
-
-        proxy.executeProposal(id, abi.encode(target, sel, true));
-        assertTrue(proxy.teeAllowedCalls(target, sel));
     }
 
     // ========================================================================
@@ -1880,6 +1763,46 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
+    // Domain separator rebuild on chain-id change (R-W-13 / UT-FIX-15)
+    //
+    // The separator is cached at deploy with the chain id. After a chain-id
+    // change (e.g. a hard fork) it is rebuilt, so a signature made before the
+    // fork no longer verifies on the forked chain (no cross-fork replay).
+    // ========================================================================
+
+    function test_domainSeparator_rebuiltOnChainIdChange_afterFix() public {
+        uint256 originalChainId = block.chainid;
+        bytes32 dsBefore = proxy.DOMAIN_SEPARATOR();
+        assertEq(dsBefore, MultisigHelper.domainSeparator(address(proxy), originalChainId), 'cached on original chain');
+
+        uint256 forkedChainId = originalChainId + 1;
+        vm.chainId(forkedChainId);
+
+        bytes32 dsAfter = proxy.DOMAIN_SEPARATOR();
+        assertTrue(dsAfter != dsBefore, 'separator rebuilt after chain-id change');
+        assertEq(dsAfter, MultisigHelper.domainSeparator(address(proxy), forkedChainId), 'rebuilt over new chain id');
+    }
+
+    function test_fundsOutCallSignatureNotReplayableAfterChainIdChange_afterFix() public {
+        // Sign a valid TEE fundsOut on the original chain (domainSep was cached
+        // at setUp for block.chainid).
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        // Simulate a hard fork: same state/nonces, different chain id. The
+        // domain separator is rebuilt, so the pre-fork signatures recover to the
+        // wrong addresses and verification fails — the release cannot be replayed.
+        vm.chainId(block.chainid + 1);
+        vm.expectRevert();
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
+    }
+
+    // ========================================================================
     // TEE execute — full-flow state snapshots
     // ========================================================================
 
@@ -1906,10 +1829,10 @@ contract MultisigProxyTest is Test {
         assertEq(netAmount, AMOUNT - tokenCommission, 'net recipient amount');
 
         // Prepare signed TEE execution and snapshot proxy + Bridge accounting.
-        bytes memory callData = _fundsOutCalldata();
-        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
@@ -1940,11 +1863,11 @@ contract MultisigProxyTest is Test {
             SRC_ADDR
         );
         vm.expectEmit(true, false, false, true);
-        emit Executed(FUNDS_OUT_SELECTOR, nonce, bitmap);
+        emit FundsOutExecuted(nonce, bitmap);
 
-        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(proxy.getNonce(FUNDS_OUT_SELECTOR), nonce + 1, 'nonce incremented');
+        assertEq(proxy.teeNonce(), nonce + 1, 'nonce incremented');
         assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
         assertEq(token.balanceOf(address(bridge)), bridgeBefore - AMOUNT,        'bridge gross debit');
         assertEq(token.balanceOf(recipient),       recipientBefore + netAmount, 'recipient net delta');
@@ -1966,9 +1889,10 @@ contract MultisigProxyTest is Test {
         );
     }
 
-    // Batch coverage for Bridge fundsOut followed by an outbound adapter send.
+    // Flow-4 coverage for the typed lzFundsOutCall: Bridge fundsOut to the
+    // adapter, then adapter.sendOut of the net delivered amount, in one signed op.
     // Real UtexoLZAdapter + OFT coverage belongs in a cross-repo integration test.
-    function test_executeBatch_bridgeFundsOutThenAdapterSendOut_snapshot() public {
+    function test_lzFundsOutCall_bridgeFundsOutThenAdapterSendOut_snapshot() public {
         uint256 percent = 500; // 5%
         vm.prank(address(proxy));
         cm.setCommissionRule(
@@ -1993,38 +1917,12 @@ contract MultisigProxyTest is Test {
         address mockOft = makeAddr('mockOft');
         MockOutboundLZAdapter adapter =
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        bytes4 sendOutSelector = MockOutboundLZAdapter.sendOut.selector;
-        _allowTeeCall(address(adapter), sendOutSelector);
-        assertTrue(proxy.teeAllowedCalls(address(adapter), sendOutSelector), 'adapter sendOut allowed');
+        _setLzAdapter(address(adapter));
 
-        bytes memory bridgeCallData = _fundsOutCalldata(address(adapter), AMOUNT, BURN_ID);
-        bytes memory extraOptions = hex'0003010011010000000000000000000000000000ea60';
-        bytes memory adapterCallData = abi.encodeWithSelector(
-            sendOutSelector,
-            DST_EID,
-            LZ_RECIPIENT,
-            netAmount,
-            netAmount,
-            extraOptions
-        );
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, _fundsInIds());
 
-        address[] memory targets = new address[](2);
-        bytes[] memory callDatas = new bytes[](2);
-        uint256[] memory values = new uint256[](2);
-        targets[0] = address(bridge);
-        targets[1] = address(adapter);
-        callDatas[0] = bridgeCallData;
-        callDatas[1] = adapterCallData;
-        values[0] = 0;
-        values[1] = LZ_NATIVE_FEE;
-
-        uint256 nonce = proxy.batchNonce();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
-            domainSep, targets, callDatas, values, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
 
         uint256 bridgeBefore    = token.balanceOf(address(bridge));
         uint256 adapterBefore   = token.balanceOf(address(adapter));
@@ -2046,9 +1944,6 @@ contract MultisigProxyTest is Test {
         assertEq(oftEthBefore,     0,        'pre oft native');
         assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
 
-        bytes4[] memory selectors = new bytes4[](2);
-        selectors[0] = FUNDS_OUT_SELECTOR;
-        selectors[1] = sendOutSelector;
         bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
 
         vm.expectEmit(true, false, false, true, address(bridge));
@@ -2065,12 +1960,12 @@ contract MultisigProxyTest is Test {
         vm.expectEmit(true, false, false, true, address(adapter));
         emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
         vm.expectEmit(true, false, false, true, address(proxy));
-        emit BatchExecuted(nonce, bitmap, targets, selectors);
+        emit LzFundsOutExecuted(nonce, bitmap, DST_EID, LZ_RECIPIENT, netAmount);
 
         vm.deal(address(this), LZ_NATIVE_FEE);
-        proxy.executeBatch{ value: LZ_NATIVE_FEE }(targets, callDatas, values, nonce, deadline, bitmap, sigs);
+        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(proxy.batchNonce(), nonce + 1, 'batch nonce incremented');
+        assertEq(proxy.teeNonce(), nonce + 1, 'tee nonce incremented');
         assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
         assertEq(token.balanceOf(address(bridge)),  bridgeBefore - AMOUNT,          'bridge gross debit');
         assertEq(token.balanceOf(address(cm)),      cmBefore + tokenCommission,     'cm fee delta');
@@ -2089,9 +1984,10 @@ contract MultisigProxyTest is Test {
         );
     }
 
-    // Batch rollback coverage for Bridge fundsOut followed by an outbound adapter send.
-    // Real UtexoLZAdapter insufficient-fee rollback belongs in a cross-repo integration test.
-    function test_executeBatch_sendOutInsufficientNativeFee_rollsBackBridgeState() public {
+    // Flow-4 rollback coverage: an insufficient LayerZero native fee reverts in
+    // adapter.sendOut, after Bridge.fundsOut ran in the same lzFundsOutCall, so
+    // the whole release rolls back.
+    function test_lzFundsOutCall_sendOutInsufficientNativeFee_rollsBackBridgeState() public {
         uint256 percent = 500; // 5%
         vm.prank(address(proxy));
         cm.setCommissionRule(
@@ -2107,7 +2003,7 @@ contract MultisigProxyTest is Test {
             })
         );
 
-        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+        (uint256 tokenCommission, uint256 nativeCommission,) =
             cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
         assertGt(tokenCommission, 0, 'token fee quoted');
         assertEq(nativeCommission, 0, 'native fee is zero');
@@ -2115,36 +2011,12 @@ contract MultisigProxyTest is Test {
         address mockOft = makeAddr('mockOft');
         MockOutboundLZAdapter adapter =
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        bytes4 sendOutSelector = MockOutboundLZAdapter.sendOut.selector;
-        _allowTeeCall(address(adapter), sendOutSelector);
+        _setLzAdapter(address(adapter));
 
-        bytes memory bridgeCallData = _fundsOutCalldata(address(adapter), AMOUNT, BURN_ID);
-        bytes memory adapterCallData = abi.encodeWithSelector(
-            sendOutSelector,
-            DST_EID,
-            LZ_RECIPIENT,
-            netAmount,
-            netAmount,
-            hex'0003010011010000000000000000000000000000ea60'
-        );
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, _fundsInIds());
 
-        address[] memory targets = new address[](2);
-        bytes[] memory callDatas = new bytes[](2);
-        uint256[] memory values = new uint256[](2);
-        targets[0] = address(bridge);
-        targets[1] = address(adapter);
-        callDatas[0] = bridgeCallData;
-        callDatas[1] = adapterCallData;
-        values[0] = 0;
-        values[1] = LZ_NATIVE_FEE - 1;
-
-        uint256 nonce = proxy.batchNonce();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
-            domainSep, targets, callDatas, values, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
 
         // Snapshot all state touched by the first Bridge leg and the failed adapter leg.
         uint256 bridgeBefore     = token.balanceOf(address(bridge));
@@ -2167,21 +2039,13 @@ contract MultisigProxyTest is Test {
         assertEq(recordBefore,     AMOUNT * 5, 'pre record');
         assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
 
-        // msg.value matches the batch values sum, so the revert happens in sendOut,
-        // after Bridge.fundsOut already ran inside the same batch transaction.
+        // An underfunded native fee reverts in sendOut, after Bridge.fundsOut
+        // already ran inside the same lzFundsOutCall transaction.
         vm.deal(address(this), LZ_NATIVE_FEE - 1);
         vm.expectRevert(bytes('native fee'));
-        proxy.executeBatch{ value: LZ_NATIVE_FEE - 1 }(
-            targets,
-            callDatas,
-            values,
-            nonce,
-            deadline,
-            bitmap,
-            sigs
-        );
+        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE - 1 }(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(proxy.batchNonce(),              nonce,            'batch nonce unchanged');
+        assertEq(proxy.teeNonce(),                nonce,            'tee nonce unchanged');
         assertFalse(bridge.consumedBurnIds(BURN_ID),                'burn id unchanged');
         assertEq(token.balanceOf(address(bridge)), bridgeBefore,    'bridge token unchanged');
         assertEq(token.balanceOf(address(adapter)), adapterBefore,  'adapter token unchanged');
@@ -2195,9 +2059,9 @@ contract MultisigProxyTest is Test {
         assertEq(mockOft.balance,                   oftEthBefore,      'oft native unchanged');
     }
 
-    // Batch rollback coverage when the Bridge fundsOut leg fails before adapter send.
+    // Flow-4 rollback coverage when the Bridge fundsOut leg fails before adapter send.
     // Real UtexoLZAdapter call-skipping coverage belongs in a cross-repo integration test.
-    function test_executeBatch_bridgeVerifierFailure_doesNotCallAdapter() public {
+    function test_lzFundsOutCall_bridgeVerifierFailure_doesNotCallAdapter() public {
         uint256 percent = 500; // 5%
         vm.prank(address(proxy));
         cm.setCommissionRule(
@@ -2221,50 +2085,17 @@ contract MultisigProxyTest is Test {
         address mockOft = makeAddr('mockOft');
         MockOutboundLZAdapter adapter =
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        bytes4 sendOutSelector = MockOutboundLZAdapter.sendOut.selector;
-        _allowTeeCall(address(adapter), sendOutSelector);
+        _setLzAdapter(address(adapter));
 
-        bytes memory badProof = abi.encode(uint256(999_999), keccak256('unknown-block'));
-        bytes memory settlementData = abi.encode(_fundsInIds());
-        bytes memory bridgeCallData = abi.encodeWithSelector(
-            FUNDS_OUT_SELECTOR,
-            address(adapter),
-            AMOUNT,
-            BURN_ID,
-            RGB_CHAIN_ID,
-            SOURCE_CHAIN_ID,
-            SRC_ADDR,
-            badProof,
-            settlementData
-        );
-        bytes memory adapterCallData = abi.encodeWithSelector(
-            sendOutSelector,
-            DST_EID,
-            LZ_RECIPIENT,
-            netAmount,
-            netAmount,
-            hex'0003010011010000000000000000000000000000ea60'
-        );
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, _fundsInIds());
+        // A proof that the verifier rejects, so Bridge.fundsOut reverts before
+        // the adapter send can run.
+        params.proof = abi.encode(uint256(999_999), keccak256('unknown-block'));
 
-        address[] memory targets = new address[](2);
-        bytes[] memory callDatas = new bytes[](2);
-        uint256[] memory values = new uint256[](2);
-        targets[0] = address(bridge);
-        targets[1] = address(adapter);
-        callDatas[0] = bridgeCallData;
-        callDatas[1] = adapterCallData;
-        values[0] = 0;
-        values[1] = LZ_NATIVE_FEE;
-
-        uint256 nonce = proxy.batchNonce();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
-            domainSep, targets, callDatas, values, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
 
-        // The adapter call is valid and funded; only the Bridge verifier failure should stop dispatch.
+        // The adapter is funded; only the Bridge verifier failure should stop dispatch.
         uint256 bridgeBefore     = token.balanceOf(address(bridge));
         uint256 adapterBefore    = token.balanceOf(address(adapter));
         uint256 oftBefore        = token.balanceOf(mockOft);
@@ -2288,17 +2119,9 @@ contract MultisigProxyTest is Test {
 
         vm.deal(address(this), LZ_NATIVE_FEE);
         vm.expectRevert(bytes('verify: block commitment'));
-        proxy.executeBatch{ value: LZ_NATIVE_FEE }(
-            targets,
-            callDatas,
-            values,
-            nonce,
-            deadline,
-            bitmap,
-            sigs
-        );
+        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(proxy.batchNonce(),              nonce,            'batch nonce unchanged');
+        assertEq(proxy.teeNonce(),                nonce,            'tee nonce unchanged');
         assertFalse(bridge.consumedBurnIds(BURN_ID),                'burn id unchanged');
         assertEq(adapter.sendOutCalls(),           0,               'adapter not called');
         assertEq(token.balanceOf(address(bridge)), bridgeBefore,    'bridge token unchanged');
@@ -2313,9 +2136,9 @@ contract MultisigProxyTest is Test {
         assertEq(mockOft.balance,                   oftEthBefore,      'oft native unchanged');
     }
 
-    // Batch success coverage for duplicate RGB settlement ids when the first
+    // Flow-4 success coverage for duplicate RGB settlement ids when the first
     // occurrence partially satisfies the Bridge fundsOut amount.
-    function test_executeBatch_duplicateSettlementIdsPartialConsume_succeedsAndIgnoresDuplicate() public {
+    function test_lzFundsOutCall_duplicateSettlementIdsPartialConsume_succeedsAndIgnoresDuplicate() public {
         uint256 percent = 500; // 5%
         vm.prank(address(proxy));
         cm.setCommissionRule(
@@ -2339,52 +2162,16 @@ contract MultisigProxyTest is Test {
         address mockOft = makeAddr('mockOft');
         MockOutboundLZAdapter adapter =
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        bytes4 sendOutSelector = MockOutboundLZAdapter.sendOut.selector;
-        _allowTeeCall(address(adapter), sendOutSelector);
+        _setLzAdapter(address(adapter));
 
         uint256[] memory duplicateIds = new uint256[](2);
         duplicateIds[0] = TX_ID;
         duplicateIds[1] = TX_ID;
 
-        bytes memory proof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
-        bytes memory settlementData = abi.encode(duplicateIds);
-        bytes memory bridgeCallData = abi.encodeWithSelector(
-            FUNDS_OUT_SELECTOR,
-            address(adapter),
-            AMOUNT,
-            BURN_ID,
-            RGB_CHAIN_ID,
-            SOURCE_CHAIN_ID,
-            SRC_ADDR,
-            proof,
-            settlementData
-        );
-        bytes memory adapterCallData = abi.encodeWithSelector(
-            sendOutSelector,
-            DST_EID,
-            LZ_RECIPIENT,
-            netAmount,
-            netAmount,
-            hex'0003010011010000000000000000000000000000ea60'
-        );
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, duplicateIds);
 
-        address[] memory targets = new address[](2);
-        bytes[] memory callDatas = new bytes[](2);
-        uint256[] memory values = new uint256[](2);
-        targets[0] = address(bridge);
-        targets[1] = address(adapter);
-        callDatas[0] = bridgeCallData;
-        callDatas[1] = adapterCallData;
-        values[0] = 0;
-        values[1] = LZ_NATIVE_FEE;
-
-        uint256 nonce = proxy.batchNonce();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
-            domainSep, targets, callDatas, values, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
 
         // The duplicate id is only safe in this shape because the first entry is
         // partially consumed and the settlement loop breaks before reading it again.
@@ -2409,9 +2196,6 @@ contract MultisigProxyTest is Test {
         assertEq(adapter.sendOutCalls(), 0,    'pre adapter calls');
         assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
 
-        bytes4[] memory selectors = new bytes4[](2);
-        selectors[0] = FUNDS_OUT_SELECTOR;
-        selectors[1] = sendOutSelector;
         bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
 
         vm.expectEmit(true, false, false, true, address(bridge));
@@ -2428,20 +2212,12 @@ contract MultisigProxyTest is Test {
         vm.expectEmit(true, false, false, true, address(adapter));
         emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
         vm.expectEmit(true, false, false, true, address(proxy));
-        emit BatchExecuted(nonce, bitmap, targets, selectors);
+        emit LzFundsOutExecuted(nonce, bitmap, DST_EID, LZ_RECIPIENT, netAmount);
 
         vm.deal(address(this), LZ_NATIVE_FEE);
-        proxy.executeBatch{ value: LZ_NATIVE_FEE }(
-            targets,
-            callDatas,
-            values,
-            nonce,
-            deadline,
-            bitmap,
-            sigs
-        );
+        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(proxy.batchNonce(),              nonce + 1,        'batch nonce incremented');
+        assertEq(proxy.teeNonce(),                nonce + 1,        'tee nonce incremented');
         assertTrue(bridge.consumedBurnIds(BURN_ID),                  'burn id consumed');
         assertEq(adapter.sendOutCalls(),           1,               'adapter called once');
         assertEq(token.balanceOf(address(bridge)), bridgeBefore - AMOUNT, 'bridge token debit');
@@ -2456,9 +2232,9 @@ contract MultisigProxyTest is Test {
         assertEq(mockOft.balance,                   oftEthBefore + LZ_NATIVE_FEE, 'oft native fee');
     }
 
-    // Batch success coverage for duplicate RGB settlement ids when the first
+    // Flow-4 success coverage for duplicate RGB settlement ids when the first
     // occurrence fully satisfies the Bridge fundsOut amount.
-    function test_executeBatch_duplicateSettlementIdsFullConsume_succeedsAndIgnoresDuplicate() public {
+    function test_lzFundsOutCall_duplicateSettlementIdsFullConsume_succeedsAndIgnoresDuplicate() public {
         uint256 duplicateRecordId = TX_ID + 1;
         uint256 burnId = BURN_ID + 1;
 
@@ -2488,52 +2264,16 @@ contract MultisigProxyTest is Test {
         address mockOft = makeAddr('mockOft');
         MockOutboundLZAdapter adapter =
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        bytes4 sendOutSelector = MockOutboundLZAdapter.sendOut.selector;
-        _allowTeeCall(address(adapter), sendOutSelector);
+        _setLzAdapter(address(adapter));
 
         uint256[] memory duplicateIds = new uint256[](2);
         duplicateIds[0] = duplicateRecordId;
         duplicateIds[1] = duplicateRecordId;
 
-        bytes memory proof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
-        bytes memory settlementData = abi.encode(duplicateIds);
-        bytes memory bridgeCallData = abi.encodeWithSelector(
-            FUNDS_OUT_SELECTOR,
-            address(adapter),
-            AMOUNT,
-            burnId,
-            RGB_CHAIN_ID,
-            SOURCE_CHAIN_ID,
-            SRC_ADDR,
-            proof,
-            settlementData
-        );
-        bytes memory adapterCallData = abi.encodeWithSelector(
-            sendOutSelector,
-            DST_EID,
-            LZ_RECIPIENT,
-            netAmount,
-            netAmount,
-            hex'0003010011010000000000000000000000000000ea60'
-        );
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, burnId, duplicateIds);
 
-        address[] memory targets = new address[](2);
-        bytes[] memory callDatas = new bytes[](2);
-        uint256[] memory values = new uint256[](2);
-        targets[0] = address(bridge);
-        targets[1] = address(adapter);
-        callDatas[0] = bridgeCallData;
-        callDatas[1] = adapterCallData;
-        values[0] = 0;
-        values[1] = LZ_NATIVE_FEE;
-
-        uint256 nonce = proxy.batchNonce();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes32 digest = MultisigHelper.digestBridgeBatchOp(
-            domainSep, targets, callDatas, values, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
 
         // Exact full consumption triggers the module's remaining == 0 break.
         // Without that break, the duplicate id would be read after delete.
@@ -2558,9 +2298,6 @@ contract MultisigProxyTest is Test {
         assertEq(adapter.sendOutCalls(),  0,          'pre adapter calls');
         assertFalse(bridge.consumedBurnIds(burnId), 'pre burn id');
 
-        bytes4[] memory selectors = new bytes4[](2);
-        selectors[0] = FUNDS_OUT_SELECTOR;
-        selectors[1] = sendOutSelector;
         bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
 
         vm.expectEmit(true, false, false, true, address(bridge));
@@ -2577,20 +2314,12 @@ contract MultisigProxyTest is Test {
         vm.expectEmit(true, false, false, true, address(adapter));
         emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
         vm.expectEmit(true, false, false, true, address(proxy));
-        emit BatchExecuted(nonce, bitmap, targets, selectors);
+        emit LzFundsOutExecuted(nonce, bitmap, DST_EID, LZ_RECIPIENT, netAmount);
 
         vm.deal(address(this), LZ_NATIVE_FEE);
-        proxy.executeBatch{ value: LZ_NATIVE_FEE }(
-            targets,
-            callDatas,
-            values,
-            nonce,
-            deadline,
-            bitmap,
-            sigs
-        );
+        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(proxy.batchNonce(),              nonce + 1,        'batch nonce incremented');
+        assertEq(proxy.teeNonce(),                nonce + 1,        'tee nonce incremented');
         assertTrue(bridge.consumedBurnIds(burnId),                  'burn id consumed');
         assertEq(adapter.sendOutCalls(),           1,               'adapter called once');
         assertEq(token.balanceOf(address(bridge)), bridgeBefore - AMOUNT, 'bridge token debit');
@@ -2606,14 +2335,114 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
+    // R-M-03 / UT-FIX-05 — typed enclave methods are the only TEE entry points
+    //
+    // The generic enclave `execute`/`executeBatch` + `teeAllowedCalls` allowlist
+    // were removed. The enclave (TEE) quorum can now only trigger Bridge.fundsOut
+    // via fundsOutCall/lzFundsOutCall. Privileged calldata can still be run, but
+    // exclusively through the FEDERATION-gated, timelocked proposeAdminExecute
+    // path. This proves a compromised enclave quorum cannot reach any privileged
+    // function: enclave signatures over an admin-execute proposal are rejected.
+    // ========================================================================
+
+    function test_enclaveKeysCannotDriveAdminExecute_afterFix() public {
+        // A privileged call the TEE quorum might want to smuggle through.
+        bytes memory callData = abi.encodeWithSignature('pauseInflow()');
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        // Same proposal digest the federation would sign...
+        bytes32 digest = MultisigHelper.digestProposeAdminExecute(
+            domainSep, bytes4(callData), callData, nonce, deadline
+        );
+        // ...but signed by the ENCLAVE (TEE) keys instead of the federation.
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        // proposeAdminExecute verifies against the federation signer set, so the
+        // recovered enclave addresses are not authorized: the proposal is never
+        // created and the privileged call never reaches the timelock queue.
+        vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
+        proxy.proposeAdminExecute(callData, nonce, deadline, bitmap, sigs);
+    }
+
+    // ========================================================================
+    // R-W-16 / UT-FIX-18 — lzFundsOutCall binds the release and send-out legs
+    //
+    // Flow-4 release and the cross-chain send are bound on-chain in one signed
+    // operation: the Bridge recipient is forced to the adapter (no params field
+    // for it), and the amount handed to adapter.sendOut is the balance the
+    // adapter ACTUALLY received, measured on-chain — not params.amount. A token
+    // commission makes gross != net, which is what distinguishes the bound
+    // (net delivered) amount from the signed gross amount.
+    // ========================================================================
+
+    function test_lzFundsOutCall_sendsNetDeliveredNotGross_afterFix() public {
+        // 5% FUNDS_OUT token commission so gross (AMOUNT) != net (delivered).
+        vm.prank(address(proxy));
+        cm.setCommissionRule(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            CommissionConfig({
+                stablePercent: 500, // 5%
+                multiplier: 100,
+                side: CommissionSide.FUNDS_OUT,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        (uint256 tokenCommission,, uint256 netAmount) =
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
+        assertGt(tokenCommission, 0,                  'fee makes gross != net');
+        assertEq(netAmount, AMOUNT - tokenCommission, 'net = gross - fee');
+
+        address mockOft = makeAddr('mockOft');
+        MockOutboundLZAdapter adapter =
+            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
+        _setLzAdapter(address(adapter));
+
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, _fundsInIds());
+        uint256 deadline = block.timestamp + 1 hours;
+        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
+
+        // Leg 1: the Bridge recipient is forced to the adapter (not in params).
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsOut(
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            BURN_ID,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR
+        );
+        // Leg 2: sendOut carries the NET delivered amount, not the gross AMOUNT.
+        bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
+        vm.expectEmit(true, false, false, true, address(adapter));
+        emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
+
+        vm.deal(address(this), LZ_NATIVE_FEE);
+        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
+
+        // The send-out amount is bound to what the adapter received: it forwarded
+        // exactly the net (leaving no residue) and that net differs from gross.
+        assertEq(token.balanceOf(address(adapter)), 0,         'adapter forwarded everything it received');
+        assertEq(token.balanceOf(mockOft),          netAmount, 'oft received exactly the net delivered');
+        assertTrue(netAmount != AMOUNT,                        'bound amount is distinct from signed gross');
+    }
+
+    // ========================================================================
     // Current behavior reproduction
     // ========================================================================
 
     function test_enclaveSignedFundsOutCanDrainPool_currentBehavior() public {
         address drainRecipient = makeAddr('drainRecipient');
 
-        // The TEE path checks signatures and allowlist membership, but it does
-        // not impose an on-chain amount cap on the signed Bridge fundsOut.
+        // The TEE path checks signatures, but it does not impose an on-chain
+        // amount cap on the signed Bridge fundsOut.
         uint256 bridgeBefore    = token.balanceOf(address(bridge));
         uint256 recipientBefore = token.balanceOf(drainRecipient);
         uint256 recordBefore    = rgbModule.fundsInRecords(TX_ID);
@@ -2625,10 +2454,10 @@ contract MultisigProxyTest is Test {
 
         // Current behavior: if an on-chain amount cap or rate limit is added
         // later, this test should be inverted to expect a revert.
-        bytes memory callData = _fundsOutCalldata(drainRecipient, bridgeBefore, BURN_ID);
-        uint256 nonce = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        IBridge.FundsOutParams memory params = _fundsOutParams(drainRecipient, bridgeBefore, BURN_ID);
+        uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, FUNDS_OUT_SELECTOR, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
@@ -2644,11 +2473,11 @@ contract MultisigProxyTest is Test {
             SRC_ADDR
         );
         vm.expectEmit(true, false, false, true, address(proxy));
-        emit Executed(FUNDS_OUT_SELECTOR, nonce, bitmap);
+        emit FundsOutExecuted(nonce, bitmap);
 
-        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(proxy.getNonce(FUNDS_OUT_SELECTOR), nonce + 1, 'nonce incremented');
+        assertEq(proxy.teeNonce(), nonce + 1, 'nonce incremented');
         assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
         assertEq(token.balanceOf(address(bridge)), 0, 'bridge pool drained');
         assertEq(token.balanceOf(drainRecipient), recipientBefore + bridgeBefore, 'recipient got full pool');
@@ -2700,128 +2529,52 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.enclaveThreshold(), newThreshold, 'post enclave threshold');
     }
 
-    function test_teeAllowlistCanEnablePrivilegedSetter_currentBehavior() public {
-        address newAdapter = makeAddr('teeSetAdapter');
-        bytes4 selector = Bridge.setLZAdapter.selector;
-
-        assertFalse(proxy.teeAllowedCalls(address(bridge), selector), 'pre setter disallowed');
-        assertEq(bridge.lzAdapter(), address(0), 'pre bridge adapter');
-
-        _allowTeeCall(address(bridge), selector);
-        assertTrue(proxy.teeAllowedCalls(address(bridge), selector), 'setter allowed');
-
-        bytes memory callData = abi.encodeWithSelector(selector, newAdapter);
-        uint256 nonce = proxy.getNonce(selector);
-        uint256 deadline = block.timestamp + 1 hours;
-        bytes32 digest = MultisigHelper.digestBridgeOp(domainSep, selector, callData, nonce, deadline);
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        // Current behavior: federation governance can allowlist an owner-only
-        // Bridge setter, after which the TEE path can execute that setter
-        // directly through the proxy-owned Bridge.
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit LZAdapterUpdated(address(0), newAdapter);
-        vm.expectEmit(true, false, false, true, address(proxy));
-        emit Executed(selector, nonce, bitmap);
-
-        proxy.execute(callData, nonce, deadline, bitmap, sigs);
-
-        assertEq(proxy.getNonce(selector), nonce + 1, 'setter nonce incremented');
-        assertEq(bridge.lzAdapter(), newAdapter, 'bridge adapter updated');
-    }
-
-    function test_timelockCanBeSetToZero_currentBehavior() public {
-        uint256 newDuration = 0;
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = block.timestamp + 1 days;
+    function test_proposalUsesSnapshottedTimelock_afterFix() public {
+        uint256 proposedAt  = block.timestamp;
+        address newBridge   = makeAddr('snapshotTimelockBridge');
+        uint256 newDuration = 2 hours;          // raise above the 1h in force at creation
+        uint256 deadline    = proposedAt + 1 days;
 
         assertEq(proxy.timelockDuration(), TIMELOCK, 'pre timelock');
 
-        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(
-            domainSep, newDuration, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        bytes32 id = proxy.proposeSetTimelockDuration(newDuration, nonce, deadline, bitmap, sigs);
-
-        vm.warp(block.timestamp + TIMELOCK + 1);
-
-        // Current behavior: the update path rejects only durations at or above
-        // MAX_PROPOSAL_LIFETIME, so zero removes the governance observation
-        // delay for future proposals.
-        vm.expectEmit(false, false, false, true, address(proxy));
-        emit TimelockDurationUpdated(newDuration);
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit ProposalExecuted(id, IMultisigProxy.OperationType.SetTimelockDuration);
-
-        proxy.executeProposal(id, abi.encode(newDuration));
-
-        assertEq(proxy.timelockDuration(), 0, 'timelock cleared');
-    }
-
-    // Pending proposals do not snapshot their timelock delay; execution checks
-    // the live timelockDuration, so a later governance update can re-lock an
-    // already mature proposal until the new duration elapses.
-    function test_pendingProposalUsesLiveTimelock_currentBehavior() public {
-        uint256 proposedAt = block.timestamp;
-        address newBridge = makeAddr('liveTimelockBridge');
-        uint256 newDuration = 2 hours;
-        uint256 deadline = proposedAt + 1 days;
-
-        assertEq(proxy.timelockDuration(), TIMELOCK, 'pre timelock');
-
+        // Proposal A — created while timelockDuration == TIMELOCK (1h).
         uint256 bridgeNonce = proxy.proposalNonce();
         bytes32 bridgeDigest = MultisigHelper.digestProposeUpdateBridge(
             domainSep, newBridge, bridgeNonce, deadline
         );
         (uint256[] memory bridgePks, uint256 bridgeBitmap) = _fedSigSet2of3();
         bytes[] memory bridgeSigs = MultisigHelper.signAll(vm, bridgeDigest, bridgePks);
-
         bytes32 bridgeProposalId =
             proxy.proposeUpdateBridge(newBridge, bridgeNonce, deadline, bridgeBitmap, bridgeSigs);
 
+        assertEq(
+            proxy.getProposal(bridgeProposalId).timelockSnapshot,
+            TIMELOCK,
+            'timelock snapshotted at creation'
+        );
+
+        // Raise the live timelock to 2h via its own proposal.
         uint256 timelockNonce = proxy.proposalNonce();
         bytes32 timelockDigest = MultisigHelper.digestProposeSetTimelockDuration(
             domainSep, newDuration, timelockNonce, deadline
         );
         (uint256[] memory timelockPks, uint256 timelockBitmap) = _fedSigSet2of3();
         bytes[] memory timelockSigs = MultisigHelper.signAll(vm, timelockDigest, timelockPks);
-
         bytes32 timelockProposalId = proxy.proposeSetTimelockDuration(
             newDuration, timelockNonce, deadline, timelockBitmap, timelockSigs
         );
 
+        // At proposedAt + 1h + 1: both proposals' creation-time snapshot (1h)
+        // has elapsed. Execute the timelock raise first.
         vm.warp(proposedAt + TIMELOCK + 1);
-
-        vm.expectEmit(false, false, false, true, address(proxy));
-        emit TimelockDurationUpdated(newDuration);
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit ProposalExecuted(timelockProposalId, IMultisigProxy.OperationType.SetTimelockDuration);
-
         proxy.executeProposal(timelockProposalId, abi.encode(newDuration));
+        assertEq(proxy.timelockDuration(), newDuration, 'live timelock raised to 2h');
 
-        assertEq(proxy.timelockDuration(), newDuration, 'live timelock increased');
-
-        // Current behavior: execution compares the frozen proposedAt against
-        // the live timelockDuration, so raising the timelock re-locks this
-        // already mature bridge proposal.
-        vm.expectRevert(IMultisigProxy.TimelockActive.selector);
+        // Proposal A uses its 1h snapshot, so it is mature now and executes —
+        // the raised live timelock (2h) does NOT re-lock it. Under the pre-fix
+        // live-timelock check this would revert TimelockActive.
         proxy.executeProposal(bridgeProposalId, abi.encode(newBridge));
-
-        assertEq(proxy.bridge(), address(bridge), 'bridge unchanged while re-locked');
-
-        vm.warp(proposedAt + newDuration + 1);
-
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit BridgeAddressUpdated(address(bridge), newBridge);
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit ProposalExecuted(bridgeProposalId, IMultisigProxy.OperationType.UpdateBridge);
-
-        proxy.executeProposal(bridgeProposalId, abi.encode(newBridge));
-
-        assertEq(proxy.bridge(), newBridge, 'bridge updated after live timelock');
+        assertEq(proxy.bridge(), newBridge, 'snapshotted proposal executes despite the live timelock raise');
     }
 
     // Current behavior: emergency actions and regular proposals share
@@ -3000,7 +2753,7 @@ contract MultisigProxyTest is Test {
             'arbitrary recipient credited'
         );
     }
-
+    
     // Current behavior: executeBatch validates signatures, allowlisted calls,
     // and total native value, but it does not bind the Bridge payout amount to
     // the adapter send amount. A smaller send leaves the remainder on the adapter.
