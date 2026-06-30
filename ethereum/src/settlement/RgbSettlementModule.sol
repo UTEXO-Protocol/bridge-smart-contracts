@@ -5,27 +5,33 @@ import { ISettlementModule } from '../interfaces/ISettlementModule.sol';
 import { FundsInContext, FundsOutContext } from '../interfaces/RouteTypes.sol';
 
 /// @title RgbSettlementModule
-/// @notice `ISettlementModule` for the RGB → Arbitrum route. Owns the
-///         per-route accounting that lets Bridge release funds against
-///         previously recorded RGB deposits without ever discarding
-///         residual liquidity.
+/// @notice `ISettlementModule` for the RGB → Arbitrum route. Records the
+///         on-chain RGB-mint ledger (`operationId → netAmount`) and, on
+///         release, verifies that the operation ids a burn consignment
+///         references were actually minted on-chain for the claimed amounts.
 ///
 /// @dev Storage layout:
 ///        `fundsInRecords[operationId] = netAmount` — the post-commission
-///        amount that the user actually bridged for that deposit. The
-///        backend keys outbound RGB → Arbitrum redemptions to one or more
-///        of these `operationId`s, supplying them as `bytes settlementData`
-///        on the fundsOut path.
+///        amount minted on the RGB side for that deposit. RGB binds an
+///        `operationId` to an exact mint amount, so the record is the
+///        canonical on-chain proof of "this mint happened, for this amount".
 ///
-///      Sequential, partial consumption: a fundsOut request consumes the
-///      referenced records in supplied order. Each record is either:
-///        - fully consumed and `delete`d, if its remaining balance is
-///          smaller than the amount left to release, or
-///        - partially consumed (decremented), leaving the residual under
-///          the same `operationId` available for future redemptions.
-///      A reverting record (`FundsInNotFound`) shortcuts the loop. A
-///      shortfall after every record has been visited reverts
-///      `FundsOutAmountExceedsFundsIn`.
+///      Release semantics (existence + exact-amount check, no consumption):
+///        On `beforeFundsOut` the TEE supplies the `(operationId, amount)`
+///        pairs extracted from the burn consignment. The module checks that
+///        every operation id EXISTS in `fundsInRecords` and that its recorded
+///        amount EQUALS the supplied amount. It does NOT consume/delete the
+///        records, does NOT sum them, and does NOT tie them to the
+///        `fundsOut` amount — it only proves the referenced mints are real.
+///        This delegates to the contract the check a TEE would otherwise need
+///        an ETH light node for ("does the EVM mint event exist?").
+///
+///        Solvency (no release beyond bridged liquidity) and replay protection
+///        are owned elsewhere: `Bridge.lockedLiquidity` caps total outflow per
+///        source chain, and `Bridge.consumedBurnIds` blocks burn replays. That
+///        is why per-record consumption is unnecessary here, and why duplicate
+///        operation ids in `settlementData` are harmless (the checks are pure
+///        reads).
 ///
 ///      Auth: `onFundsIn` / `beforeFundsOut` are gated on the immutable
 ///      `routeRegistry` address. Re-pointing at a different registry =
@@ -34,11 +40,12 @@ import { FundsInContext, FundsOutContext } from '../interfaces/RouteTypes.sol';
 ///      `settlementData` layout:
 ///        - `onFundsIn`:  ignored (Bridge already supplies the canonical
 ///                        `operationId` / `netAmount` inside `ctx`).
-///        - `beforeFundsOut`: `abi.encode(uint256[] fundsInIds)`.
+///        - `beforeFundsOut`: `abi.encode(uint256[] operationIds, uint256[] amounts)`
+///                        (equal-length parallel arrays).
 ///
-///      This contract owns no tokens. Bridge keeps custody; the module
-///      only mutates its own bookkeeping. Reverts here roll back the
-///      surrounding `Bridge.fundsOut` call atomically.
+///      This contract owns no tokens and mutates
+///      no state on release — `beforeFundsOut` is a pure validation. Reverts
+///      here roll back the surrounding `Bridge.fundsOut` call atomically.
 contract RgbSettlementModule is ISettlementModule {
     // =========================================================================
     // Errors
@@ -55,14 +62,19 @@ contract RgbSettlementModule is ISettlementModule {
     ///         silently overwrite the previous net amount and is rejected.
     error DuplicateOperationId();
 
-    /// @notice A `beforeFundsOut` call referenced an `operationId` whose
-    ///         `fundsInRecords` slot is zero (either never recorded or
-    ///         already fully consumed by a previous release).
+    /// @notice A `beforeFundsOut` call referenced an `operationId` that has no
+    ///         `fundsInRecords` entry (never recorded on-chain).
     error FundsInNotFound(uint256 operationId);
 
-    /// @notice The supplied `fundsInIds` did not cover the requested
-    ///         release amount (sum of remaining records < amount).
-    error FundsOutAmountExceedsFundsIn();
+    /// @notice A `beforeFundsOut` operation id exists, but the amount supplied
+    ///         in `settlementData` does not match the on-chain mint record.
+    ///         RGB binds an operationId to an exact mint amount, so the match
+    ///         must be exact.
+    error AmountMismatch(uint256 operationId, uint256 provided, uint256 recorded);
+
+    /// @notice `beforeFundsOut` `settlementData` decoded to `operationIds` and
+    ///         `amounts` arrays of different lengths.
+    error SettlementDataLengthMismatch();
 
     // =========================================================================
     // Storage
@@ -72,9 +84,10 @@ contract RgbSettlementModule is ISettlementModule {
     ///         The pairing is fixed at deploy time.
     address public immutable routeRegistry;
 
-    /// @notice `operationId → netAmount` ledger of RGB deposits available
-    ///         for release. A zero value means "no liquidity under this
-    ///         id" — either never recorded or already consumed in full.
+    /// @notice `operationId → netAmount` ledger of on-chain RGB mints. A zero
+    ///         value means "never recorded under this id". Records are written
+    ///         once at `onFundsIn` and never cleared — they are a permanent
+    ///         proof-of-mint ledger, not a consumable balance.
     mapping(uint256 operationId => uint256 netAmount) public fundsInRecords;
 
     // =========================================================================
@@ -116,34 +129,24 @@ contract RgbSettlementModule is ISettlementModule {
     }
 
     /// @inheritdoc ISettlementModule
-    /// @dev Decodes `settlementData` as `(uint256[] fundsInIds)` and
-    ///      consumes the referenced records sequentially.
-    function beforeFundsOut(FundsOutContext calldata ctx, bytes calldata settlementData)
+    /// @dev Decodes `settlementData` as `(uint256[] operationIds, uint256[] amounts)`
+    ///      and verifies every referenced mint: each `operationId` must exist
+    ///      and its recorded amount must equal the supplied amount.
+    function beforeFundsOut(FundsOutContext calldata /* ctx */, bytes calldata settlementData)
         external
+        view
         override
         onlyRouteRegistry
     {
-        uint256[] memory fundsInIds = abi.decode(settlementData, (uint256[]));
+        (uint256[] memory operationIds, uint256[] memory amounts) =
+            abi.decode(settlementData, (uint256[], uint256[]));
 
-        uint256 remaining = ctx.amount;
-        for (uint256 i = 0; i < fundsInIds.length; i++) {
-            uint256 recorded = fundsInRecords[fundsInIds[i]];
-            if (recorded == 0) revert FundsInNotFound(fundsInIds[i]);
+        if (operationIds.length != amounts.length) revert SettlementDataLengthMismatch();
 
-            if (recorded > remaining) {
-                // Partial consumption — preserve the residual on the same
-                // operationId for future redemptions.
-                fundsInRecords[fundsInIds[i]] = recorded - remaining;
-                remaining = 0;
-                break;
-            }
-
-            // recorded <= remaining — consume the record fully.
-            delete fundsInRecords[fundsInIds[i]];
-            remaining -= recorded;
-
-            if (remaining == 0) break;
+        for (uint256 i = 0; i < operationIds.length; i++) {
+            uint256 recorded = fundsInRecords[operationIds[i]];
+            if (recorded == 0)          revert FundsInNotFound(operationIds[i]);
+            if (recorded != amounts[i]) revert AmountMismatch(operationIds[i], amounts[i], recorded);
         }
-        if (remaining != 0) revert FundsOutAmountExceedsFundsIn();
     }
 }
