@@ -8,6 +8,7 @@ import { IBridge }             from '../src/interfaces/IBridge.sol';
 import { BridgeBase }          from '../src/BridgeBase.sol';
 import { CommissionManager }   from '../src/CommissionManager.sol';
 import { RouteRegistry }       from '../src/RouteRegistry.sol';
+import { IRouteRegistry }      from '../src/interfaces/IRouteRegistry.sol';
 import { RGBVerifier }         from '../src/verifiers/RGBVerifier.sol';
 import { RgbSettlementModule } from '../src/settlement/RgbSettlementModule.sol';
 import {
@@ -1782,5 +1783,279 @@ contract BridgeTest is Test {
         assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + netAmount, 'final bridge net');
         assertEq(usdt0.balanceOf(address(cm)), cmBefore + tokenCommission, 'cm token delta');
         assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore + tokenCommission, 'cm pool delta');
+    }
+
+    // fundsIn — fuzz/property rollback coverage
+
+    // All selected failure paths must leave balances, commission pools, and RGB
+    // accounting unchanged. Feed failures are pre-pull; route/module/commission
+    // failures exercise post-pull rollback.
+    function testFuzz_fundsIn_revertPathsLeaveStateUnchanged(
+        uint128 amountSeed,
+        uint128 operationSalt
+    ) public {
+        // Lower bound keeps commission/native fee nonzero so intended reverts fire.
+        uint256 amount = bound(uint256(amountSeed), 100, AMOUNT);
+
+        for (uint8 failureMode = 0; failureMode < 5; failureMode++) {
+            uint256 snapshotId = vm.snapshotState();
+            _assertFundsInRevertPathLeavesStateUnchanged(
+                amount,
+                TX_ID + 30_000 + uint256(operationSalt) + failureMode,
+                failureMode
+            );
+            assertTrue(vm.revertToStateAndDelete(snapshotId), 'scenario snapshot restored');
+        }
+    }
+
+    function _assertFundsInRevertPathLeavesStateUnchanged(
+        uint256 amount,
+        uint256 operationId,
+        uint8 failureMode
+    ) internal {
+        bytes memory expectedRevert;
+        MockSettlementModule revertingModule;
+
+        if (failureMode == 0) {
+            vm.prank(deployer);
+            routeRegistry.setRoute(
+                SOURCE_CHAIN_ID,
+                RGB_CHAIN_ID,
+                false,
+                address(rgbVerifier),
+                address(rgbModule)
+            );
+            expectedRevert = abi.encodeWithSelector(
+                IRouteRegistry.RouteNotEnabled.selector,
+                SOURCE_CHAIN_ID,
+                RGB_CHAIN_ID
+            );
+        } else if (failureMode == 1) {
+            revertingModule = new MockSettlementModule();
+            revertingModule.setShouldRevertOnFundsIn(true);
+
+            vm.prank(deployer);
+            routeRegistry.setRoute(
+                SOURCE_CHAIN_ID,
+                RGB_CHAIN_ID,
+                true,
+                address(rgbVerifier),
+                address(revertingModule)
+            );
+            expectedRevert = abi.encodeWithSelector(MockSettlementModule.MockModuleForcedRevert.selector);
+        } else if (failureMode == 2) {
+            _setFundsInTokenRule(400); // 4%, positive for the fuzzed amount range.
+            vm.prank(deployer);
+            cm.setBridgeAddress(makeAddr('wrong-bridge-for-fuzz'));
+            expectedRevert = abi.encodeWithSelector(ICommissionManager.OnlyBridge.selector);
+        } else if (failureMode == 3) {
+            _setFundsInNativeRule(100); // Positive native quote for the fuzzed amount range.
+            vm.warp(block.timestamp + 2 hours);
+            ethUsdFeed.setUpdatedAt(block.timestamp - 2 hours);
+            expectedRevert = abi.encodeWithSelector(ICommissionManager.StalePrice.selector);
+        } else {
+            _setFundsInNativeRule(100); // Positive native quote for the fuzzed amount range.
+            ethUsdFeed.setUpdatedAt(block.timestamp);
+            ethUsdFeed.setAnswer(0);
+            expectedRevert = abi.encodeWithSelector(ICommissionManager.InvalidPrice.selector);
+        }
+
+        uint256 userTokenBefore    = usdt0.balanceOf(user);
+        uint256 bridgeTokenBefore  = usdt0.balanceOf(address(bridge));
+        uint256 cmTokenBefore      = usdt0.balanceOf(address(cm));
+        uint256 userNativeBefore   = user.balance;
+        uint256 bridgeNativeBefore = address(bridge).balance;
+        uint256 cmNativeBefore     = address(cm).balance;
+        uint256 cmPoolBefore       = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore   = cm.nativeCommissionPool();
+        uint256 recordBefore       = rgbModule.fundsInRecords(operationId);
+
+        vm.expectRevert(expectedRevert);
+        vm.prank(user);
+        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, operationId, '');
+
+        assertEq(usdt0.balanceOf(user),            userTokenBefore,    'user token unchanged');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeTokenBefore,  'bridge token unchanged');
+        assertEq(usdt0.balanceOf(address(cm)),     cmTokenBefore,      'cm token unchanged');
+        assertEq(user.balance,                     userNativeBefore,   'user native unchanged');
+        assertEq(address(bridge).balance,          bridgeNativeBefore, 'bridge native unchanged');
+        assertEq(address(cm).balance,              cmNativeBefore,     'cm native unchanged');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, 'cm pool unchanged');
+        assertEq(cm.nativeCommissionPool(),        nativePoolBefore,   'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(operationId), recordBefore,  'rgb record unchanged');
+
+        if (failureMode == 1) {
+            assertEq(revertingModule.onFundsInCount(), 0, 'module state unchanged');
+        }
+    }
+
+    // A positive-net RGB deposit must occupy its operationId exactly once; the
+    // duplicate revert happens after token pull, so the second attempt must roll
+    // back without changing balances, pools, or the existing RGB record.
+    function testFuzz_fundsIn_positiveNetDepositCreatesRecordAndRejectsDuplicate(
+        uint128 amountSeed,
+        uint16 percentSeed,
+        uint128 operationSalt
+    ) public {
+        uint256 amount = bound(uint256(amountSeed), 100, AMOUNT);
+        uint256 percent = bound(uint256(percentSeed), 100, 9_000);
+        uint256 operationId = TX_ID + 40_000 + uint256(operationSalt);
+
+        _setFundsInTokenRule(percent);
+
+        (uint256 tokenCommission,, uint256 netAmount) =
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
+
+        assertGt(tokenCommission, 0, 'pre positive token fee');
+        assertGt(netAmount, 0, 'pre positive net');
+        assertEq(rgbModule.fundsInRecords(operationId), 0, 'pre record empty');
+
+        uint256 userBefore = usdt0.balanceOf(user);
+        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
+        uint256 cmBefore = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit FundsIn(user, operationId, netAmount);
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsIn(
+            user,
+            operationId,
+            amount,
+            netAmount,
+            tokenCommission,
+            0,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR
+        );
+
+        vm.prank(user);
+        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, operationId, '');
+
+        assertEq(usdt0.balanceOf(user), userBefore - amount, 'user spent gross once');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + netAmount, 'bridge got net');
+        assertEq(usdt0.balanceOf(address(cm)), cmBefore + tokenCommission, 'cm got fee');
+        assertEq(
+            cm.tokenCommissionPool(address(usdt0)),
+            cmPoolBefore + tokenCommission,
+            'cm pool recorded fee'
+        );
+        assertEq(cm.nativeCommissionPool(), nativePoolBefore, 'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(operationId), netAmount, 'record = net');
+        assertEq(
+            (usdt0.balanceOf(address(bridge)) - bridgeBefore) +
+            (usdt0.balanceOf(address(cm)) - cmBefore),
+            amount,
+            'gross token conserved'
+        );
+
+        uint256 userAfterFirst = usdt0.balanceOf(user);
+        uint256 bridgeAfterFirst = usdt0.balanceOf(address(bridge));
+        uint256 cmAfterFirst = usdt0.balanceOf(address(cm));
+        uint256 cmPoolAfterFirst = cm.tokenCommissionPool(address(usdt0));
+
+        vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
+        vm.prank(user);
+        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, operationId, '');
+
+        assertEq(usdt0.balanceOf(user), userAfterFirst, 'duplicate user unchanged');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeAfterFirst, 'duplicate bridge unchanged');
+        assertEq(usdt0.balanceOf(address(cm)), cmAfterFirst, 'duplicate cm unchanged');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolAfterFirst, 'duplicate pool unchanged');
+        assertEq(cm.nativeCommissionPool(), nativePoolBefore, 'duplicate native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(operationId), netAmount, 'duplicate record unchanged');
+    }
+
+    // Current behavior: a positive gross deposit with zero net leaves the
+    // operationId reusable because the RGB duplicate guard is value-based.
+    function test_fundsIn_zeroNetDepositLeavesOperationIdReusable_currentBehavior() public {
+        // stablePercent == multiplier^2 makes tokenCommission == amount.
+        vm.prank(deployer);
+        cm.setCommissionRule(
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            address(usdt0),
+            CommissionConfig({
+                stablePercent: 8_100,
+                multiplier: 90,
+                side: CommissionSide.FUNDS_IN,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        _assertZeroNetDepositLeavesOperationIdReusable(1, TX_ID + 50_001);
+        _assertZeroNetDepositLeavesOperationIdReusable(AMOUNT / 2, TX_ID + 50_002);
+        _assertZeroNetDepositLeavesOperationIdReusable(AMOUNT, TX_ID + 50_003);
+    }
+
+    function _assertZeroNetDepositLeavesOperationIdReusable(
+        uint256 amount,
+        uint256 operationId
+    ) internal {
+        (uint256 tokenCommission,, uint256 netAmount) =
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
+
+        assertEq(tokenCommission, amount, 'pre fee equals amount');
+        assertEq(netAmount, 0, 'pre zero net');
+        assertEq(rgbModule.fundsInRecords(operationId), 0, 'pre record empty');
+
+        uint256 userBefore = usdt0.balanceOf(user);
+        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
+        uint256 cmBefore = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit FundsIn(user, operationId, 0);
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsIn(
+            user,
+            operationId,
+            amount,
+            0,
+            amount,
+            0,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR
+        );
+
+        vm.prank(user);
+        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, operationId, '');
+
+        assertEq(usdt0.balanceOf(user), userBefore - amount, 'user spent first gross');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, 'bridge keeps no net');
+        assertEq(usdt0.balanceOf(address(cm)), cmBefore + amount, 'cm got first gross');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore + amount, 'cm pool first gross');
+        assertEq(cm.nativeCommissionPool(), nativePoolBefore, 'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(operationId), 0, 'zero record leaves id reusable');
+
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit FundsIn(user, operationId, 0);
+        vm.expectEmit(true, false, false, true, address(bridge));
+        emit BridgeFundsIn(
+            user,
+            operationId,
+            amount,
+            0,
+            amount,
+            0,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR
+        );
+
+        vm.prank(user);
+        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, operationId, '');
+
+        assertEq(usdt0.balanceOf(user), userBefore - (2 * amount), 'user spent duplicate gross');
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, 'bridge still keeps no net');
+        assertEq(usdt0.balanceOf(address(cm)), cmBefore + (2 * amount), 'cm got duplicate gross');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore + (2 * amount), 'cm pool duplicate gross');
+        assertEq(cm.nativeCommissionPool(), nativePoolBefore, 'duplicate native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(operationId), 0, 'duplicate still leaves zero record');
     }
 }
