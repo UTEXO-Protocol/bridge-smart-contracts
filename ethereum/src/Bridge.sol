@@ -10,6 +10,7 @@ import { IBridge }            from './interfaces/IBridge.sol';
 import { ICommissionManager } from './interfaces/ICommissionManager.sol';
 import { IRouteRegistry }     from './interfaces/IRouteRegistry.sol';
 import { FundsInContext, FundsOutContext } from './interfaces/RouteTypes.sol';
+import { OutflowRateLimiter } from './libraries/OutflowRateLimiter.sol';
 
 /// @title Bridge
 /// @notice Production bridge for locking USDT0 on Arbitrum and unlocking it
@@ -35,6 +36,7 @@ import { FundsInContext, FundsOutContext } from './interfaces/RouteTypes.sol';
 ///        deployments without redeploying the Bridge.
 contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using OutflowRateLimiter for OutflowRateLimiter.Bucket;
 
     // =========================================================================
     // State
@@ -70,6 +72,24 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @notice Set of burn identifiers already consumed by a successful
     ///         `fundsOut`.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
+
+    /// @notice Isolated liquidity per non-Arbitrum chain. Tracks the
+    ///         net token amount locked on this chain on behalf of a given
+    ///         remote chain: `fundsIn` credits the deposit's `destinationChainId`
+    ///         bucket, `fundsOut` debits the release's `sourceChainId` bucket.
+    ///         A release can therefore never draw more than was actually
+    ///         bridged toward that chain.
+    mapping(uint256 chainId => uint256 locked) public lockedLiquidity;
+
+    /// @notice Per-source-chain outflow rate limiter. Bounds
+    ///         how fast `fundsOut` can drain a single chain's liquidity.
+    mapping(uint256 chainId => OutflowRateLimiter.Bucket) public chainBuckets;
+
+    /// @notice Global (aggregate) outflow rate limiter. Bounds
+    ///         total `fundsOut` across all source chains, since a compromised
+    ///         shared TEE could otherwise drain every chain's per-chain bucket
+    ///         in the same window (aggregate = sum of per-chain caps).
+    OutflowRateLimiter.Bucket public globalBucket;
 
     /// @inheritdoc IBridge
     /// @dev Always non-zero (validated at the constructor and setter). Mutable
@@ -156,6 +176,43 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         emit MinFundsInAmountUpdated(old, newMinimum);
     }
 
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`; federation gates this on its timelock flow.
+    function setOutflowLimit(uint256 chainId, uint256 capacity, uint256 refillRate)
+        external
+        override
+        onlyOwner
+    {
+        if (chainId == 0) revert InvalidOutflowLimit();
+        OutflowRateLimiter.Settings memory cfg = _buildOutflowConfig(capacity, refillRate);
+        OutflowRateLimiter.validate(cfg, false);
+        chainBuckets[chainId].configurePrimed(cfg);
+        emit OutflowLimitUpdated(chainId, capacity, refillRate, chainBuckets[chainId].tokens);
+    }
+
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`; federation gates this on its timelock flow.
+    function setGlobalOutflowLimit(uint256 capacity, uint256 refillRate)
+        external
+        override
+        onlyOwner
+    {
+        OutflowRateLimiter.Settings memory cfg = _buildOutflowConfig(capacity, refillRate);
+        OutflowRateLimiter.validate(cfg, false);
+        globalBucket.configurePrimed(cfg);
+        emit GlobalOutflowLimitUpdated(capacity, refillRate, globalBucket.tokens);
+    }
+
+    /// @inheritdoc IBridge
+    function availableOutflow(uint256 chainId) external view override returns (uint256) {
+        return OutflowRateLimiter.currentState(chainBuckets[chainId]).tokens;
+    }
+
+    /// @inheritdoc IBridge
+    function availableGlobalOutflow() external view override returns (uint256) {
+        return OutflowRateLimiter.currentState(globalBucket).tokens;
+    }
+
     // =========================================================================
     // External — user-facing
     // =========================================================================
@@ -227,6 +284,28 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (consumedBurnIds[fundsOutParams.burnId]) revert BurnIdAlreadyConsumed(fundsOutParams.burnId);
         consumedBurnIds[fundsOutParams.burnId] = true;
 
+        // Isolated liquidity: a release may only draw from the liquidity
+        // locked for its source chain. Debit before any external interaction so
+        // a downstream revert rolls the debit back with the rest of the call.
+        // `amount` (gross) matches what was minted on the source side, i.e. the
+        // `netAmount` that `_fundsIn` credited to this bucket.
+        uint256 srcLiquidity = lockedLiquidity[fundsOutParams.sourceChainId];
+        if (fundsOutParams.amount > srcLiquidity) {
+            revert InsufficientChainLiquidity(fundsOutParams.sourceChainId, fundsOutParams.amount, srcLiquidity);
+        }
+        lockedLiquidity[fundsOutParams.sourceChainId] = srcLiquidity - fundsOutParams.amount;
+
+        // Outflow rate limit. Consume both the per-source-chain
+        // bucket and the global aggregate bucket; either being short reverts the
+        // whole call (and rolls back the consume above). Both are debited before
+        // any external interaction, so a downstream revert restores them too.
+        // Per-source-chain bucket (token-scoped errors), then the global
+        // aggregate bucket (aggregate-scoped errors via the address(0) sentinel).
+        // The limiter is fail-closed: an unconfigured chain/global bucket
+        // rejects the release instead of falling back to unlimited outflow.
+        chainBuckets[fundsOutParams.sourceChainId].spend(fundsOutParams.amount, TOKEN);
+        globalBucket.spend(fundsOutParams.amount, address(0));
+
         // Quote commission. NATIVE on fundsOut is unrepresentable: the
         // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
         // so `nativeCommission` is always 0 on this path. The value is ignored here.
@@ -293,6 +372,25 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // Internal
     // =========================================================================
 
+    /// @dev Build an enabled outflow-limit config from uint256 inputs, safely
+    ///      narrowing to the library's uint128 fields. USDT0 amounts fit in
+    ///      uint128; a value above that is a misconfiguration and reverts.
+    ///      `OutflowRateLimiter.validate` then enforces `0 < rate < capacity`.
+    function _buildOutflowConfig(uint256 capacity, uint256 refillRate)
+        private
+        pure
+        returns (OutflowRateLimiter.Settings memory)
+    {
+        if (capacity > type(uint128).max || refillRate > type(uint128).max) revert InvalidOutflowLimit();
+        return OutflowRateLimiter.Settings({
+            isEnabled: true,
+            // forge-lint: disable-next-line(unsafe-typecast)
+            capacity:  uint128(capacity),
+            // forge-lint: disable-next-line(unsafe-typecast)
+            rate:      uint128(refillRate)
+        });
+    }
+
     /// @dev Shared body for both `fundsIn` overloads.
     function _fundsIn(
         address          from,
@@ -342,6 +440,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             }),
             settlementData
         );
+
+        // Isolated liquidity: credit the net deposit to its destination
+        // chain's bucket. A later `fundsOut` from that chain can release at most
+        // the accumulated locked liquidity.
+        lockedLiquidity[destinationChainId] += netAmount;
 
         // Forward token commission, if any, to the CommissionManager pool.
         if (tokenCommission != 0) {
