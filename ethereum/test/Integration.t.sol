@@ -181,6 +181,12 @@ contract IntegrationTest is Test {
             MIN_TIMELOCK
         );
 
+        // Outflow rate limits: configure generous buckets while
+        // the deployer still owns the Bridge, so the release path is enabled
+        // before ownership moves to the proxy.
+        bridge.setOutflowLimit(RGB_CHAIN_ID, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+        bridge.setGlobalOutflowLimit(1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+
         cm.transferOwnership(address(proxy));
         bridge.transferOwnership(address(proxy));
         vm.stopPrank();
@@ -276,15 +282,17 @@ contract IntegrationTest is Test {
 
         // -------------------------------------------------------------------------
         // 3. TEE-signed fundsOut — RGBVerifier checks the BtcRelay header, the
-        //    settlement module consumes the recorded deposit, Bridge releases
-        //    `netBridgedIn` from the pool. 1% outbound commission to CM, the
-        //    rest to recipient.
+        //    settlement module verifies the referenced mint exists for the exact
+        //    amount (no consumption), Bridge releases `netBridgedIn` from the
+        //    pool. 1% outbound commission to CM, the rest to recipient.
         // -------------------------------------------------------------------------
-        uint256[] memory fundsInIds = new uint256[](1);
-        fundsInIds[0] = TX_ID_IN;
+        uint256[] memory fundsInIds     = new uint256[](1);
+        fundsInIds[0]     = TX_ID_IN;
+        uint256[] memory fundsInAmounts = new uint256[](1);
+        fundsInAmounts[0] = netBridgedIn;   // must equal the recorded mint amount
 
         bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
-        bytes memory settlementData = abi.encode(fundsInIds);
+        bytes memory settlementData = abi.encode(fundsInIds, fundsInAmounts);
 
         IBridge.FundsOutParams memory params = IBridge.FundsOutParams(
             recipient,
@@ -325,7 +333,7 @@ contract IntegrationTest is Test {
         assertEq(token.balanceOf(recipient),             netOut,                                 'recipient got net');
         assertEq(token.balanceOf(address(cm)),           tokenCommissionIn + tokenCommissionOut, 'cm accrued both fees');
         assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn + tokenCommissionOut, 'cm pool mirrors');
-        assertEq(rgbModule.fundsInRecords(TX_ID_IN),     0,                                      'fundsIn record consumed');
+        assertEq(rgbModule.fundsInRecords(TX_ID_IN),     netBridgedIn,                           'fundsIn record unchanged (permanent)');
         assertTrue(bridge.consumedBurnIds(BURN_ID),                                              'burnId recorded');
 
         // -------------------------------------------------------------------------
