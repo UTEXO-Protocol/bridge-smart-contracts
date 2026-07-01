@@ -632,6 +632,77 @@ contract BridgeTest is Test {
     }
 
     // ========================================================================
+    // Settlement-data length cap
+    //
+    // settlementData is forwarded to the route settlement module, which may
+    // decode and iterate it (RgbSettlementModule.beforeFundsOut walks the
+    // (operationIds, amounts) arrays). It is capped at MAX_SETTLEMENT_DATA_LENGTH
+    // on both fundsOut and fundsIn to keep any settlement loop bounded. One byte
+    // over reverts SettlementDataTooLong; the exact cap clears the guard.
+    // ========================================================================
+
+    function test_fundsOut_revertsOnSettlementDataTooLong() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        bytes memory tooLong = _bytesOfLength(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
+        vm.prank(multisig);
+        _fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), tooLong
+        );
+    }
+
+    function test_fundsOut_acceptsSettlementDataAtMaxLength() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        // settlementData at the exact cap clears the length guard. The arbitrary
+        // blob is not a valid (operationIds, amounts) encoding, so it reverts
+        // later in the settlement module — the guard is isolated by asserting the
+        // revert is NOT SettlementDataTooLong.
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        bytes memory atMax = _bytesOfLength(max);
+
+        vm.prank(multisig);
+        try bridge.fundsOut(IBridge.FundsOutParams(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), atMax
+        )) {
+            // a valid settlement blob would succeed; this one won't, but if it
+            // did the length guard still passed — which is what we assert.
+        } catch (bytes memory reason) {
+            bytes4 sel = bytes4(reason);
+            assertTrue(sel != IBridge.SettlementDataTooLong.selector, 'max-length settlementData must clear the length guard');
+        }
+    }
+
+    function test_fundsIn_revertsOnSettlementDataTooLong() public {
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        bytes memory tooLong = _bytesOfLength(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, tooLong);
+    }
+
+    function test_fundsIn_acceptsSettlementDataAtMaxLength() public {
+        // The RGB inbound module ignores settlementData, so an arbitrary blob at
+        // the exact cap is accepted and the deposit records normally.
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        bytes memory atMax = _bytesOfLength(max);
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, atMax);
+        assertEq(rgbModule.fundsInRecords(TX_ID), AMOUNT, 'deposit at the settlement-data cap is accepted');
+    }
+
+    // ========================================================================
     // fundsIn — adapter overload (`onlyLZAdapter`)
     // ========================================================================
 
