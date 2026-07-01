@@ -3,12 +3,13 @@ pragma solidity 0.8.35;
 
 import { Script, console2 } from 'forge-std/Script.sol';
 import { MultisigProxy } from '../../src/MultisigProxy.sol';
+import { IBridge }       from '../../src/interfaces/IBridge.sol';
 import { MultisigHelper } from '../../test/mocks/MultisigHelper.sol';
 
 /// @title MultisigExecuteFundsOut
-/// @notice Signs a Bridge.fundsOut() call locally with enclave private keys
-///         and submits it via MultisigProxy.execute(). For manual end-to-end
-///         testing before the backend is wired up.
+/// @notice Signs a Bridge.fundsOut() release locally with enclave private keys
+///         and submits it via MultisigProxy.fundsOutCall(). For manual
+///         end-to-end testing before the backend is wired up.
 ///
 /// @dev RGB-route specific: `proof` and `settlementData` are packed for the
 ///      Atomiq BtcRelay + RgbSettlementModule plugins. Other routes will
@@ -32,30 +33,13 @@ import { MultisigHelper } from '../../test/mocks/MultisigHelper.sol';
 ///   ENCLAVE_BITMAP           — bitmap of participating signers (hex/decimal)
 ///   DEADLINE_OFFSET          — seconds from now (e.g. 3600)
 contract MultisigExecuteFundsOut is Script {
-    /// @dev 8-arg fundsOut selector — must match the TEE allowlist entry
-    ///      seeded by `MultisigProxy`'s constructor.
-    bytes4 constant FUNDS_OUT_SELECTOR = bytes4(keccak256(
-        'fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)'
-    ));
-
-    struct Params {
-        address recipient;
-        uint256 amount;
-        uint256 burnId;
-        uint256 sourceChainId;
-        uint256 destChainId;
-        string  sourceAddress;
-        bytes   proof;
-        bytes   settlementData;
-    }
-
-    function _loadParams() internal view returns (Params memory p) {
+    function _loadParams() internal view returns (IBridge.FundsOutParams memory p) {
         p.recipient     = vm.envAddress('RECIPIENT');
         p.amount        = vm.envUint('AMOUNT');
         p.burnId        = vm.envUint('BURN_ID');
-        p.sourceChainId = vm.envUint('SOURCE_CHAIN_ID');
-        p.destChainId   = vm.envUint('DESTINATION_CHAIN_ID');
-        p.sourceAddress = vm.envString('SOURCE_ADDRESS');
+        p.sourceChainId      = vm.envUint('SOURCE_CHAIN_ID');
+        p.destinationChainId = vm.envUint('DESTINATION_CHAIN_ID');
+        p.sourceAddress      = vm.envString('SOURCE_ADDRESS');
 
         // proof = abi.encode(blockHeight, commitmentHash) — RGBVerifier layout.
         p.proof = abi.encode(
@@ -67,42 +51,28 @@ contract MultisigExecuteFundsOut is Script {
         p.settlementData = abi.encode(vm.envUint('FUNDS_IN_IDS', ','));
     }
 
-    function _buildCallData(Params memory p) internal pure returns (bytes memory) {
-        return abi.encodeWithSelector(
-            FUNDS_OUT_SELECTOR,
-            p.recipient,
-            p.amount,
-            p.burnId,
-            p.sourceChainId,
-            p.destChainId,
-            p.sourceAddress,
-            p.proof,
-            p.settlementData
-        );
-    }
-
     function run() external {
         MultisigProxy proxy = MultisigProxy(vm.envAddress('PROXY_ADDRESS'));
 
-        bytes memory callData = _buildCallData(_loadParams());
+        IBridge.FundsOutParams memory params = _loadParams();
 
-        uint256 nonce    = proxy.getNonce(FUNDS_OUT_SELECTOR);
+        uint256 nonce    = proxy.teeNonce();
         uint256 deadline = block.timestamp + vm.envUint('DEADLINE_OFFSET');
         uint256 bitmap   = vm.envUint('ENCLAVE_BITMAP');
 
-        bytes32 digest = MultisigHelper.digestBridgeOp(
-            proxy.DOMAIN_SEPARATOR(), FUNDS_OUT_SELECTOR, callData, nonce, deadline
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(
+            proxy.DOMAIN_SEPARATOR(), params, nonce, deadline
         );
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, vm.envUint('ENCLAVE_PKS', ','));
 
-        console2.log('Submitting execute() with nonce:', nonce);
-        console2.log('Deadline:                       ', deadline);
-        console2.log('Bitmap:                         ', bitmap);
+        console2.log('Submitting fundsOutCall() with nonce:', nonce);
+        console2.log('Deadline:                            ', deadline);
+        console2.log('Bitmap:                              ', bitmap);
 
         vm.startBroadcast(vm.envUint('PRIVATE_KEY'));
-        proxy.execute(callData, nonce, deadline, bitmap, sigs);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
         vm.stopBroadcast();
 
-        console2.log('execute() succeeded. New nonce:', proxy.getNonce(FUNDS_OUT_SELECTOR));
+        console2.log('fundsOutCall() succeeded. New nonce:', proxy.teeNonce());
     }
 }
