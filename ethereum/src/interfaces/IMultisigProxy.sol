@@ -50,7 +50,6 @@ interface IMultisigProxy {
     error InvalidMinTimelock();
     error Expired();
     error CallDataTooShort();
-    error CallNotAllowed(address target, bytes4 selector);
     error InvalidNonce();
     error NotPending();
     error TimelockActive();
@@ -73,10 +72,6 @@ interface IMultisigProxy {
     error ZeroRecipient();
     error ZeroTarget();
     error LZAdapterNotSet();
-    error BatchEmpty();
-    error BatchLengthMismatch();
-    error BatchTooLarge();
-    error BatchValueMismatch();
 
     // =========================================================================
     // Types

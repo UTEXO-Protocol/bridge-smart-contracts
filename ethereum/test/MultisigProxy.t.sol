@@ -105,7 +105,7 @@ contract MultisigProxyTest is Test {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 burnId,
+        uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  sourceAddress
@@ -1871,7 +1871,7 @@ contract MultisigProxyTest is Test {
         assertEq(recordBefore,     AMOUNT * 5, 'pre record');
         assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
             recipient,
             AMOUNT,
@@ -1966,7 +1966,7 @@ contract MultisigProxyTest is Test {
 
         bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
             address(adapter),
             AMOUNT,
@@ -2220,7 +2220,7 @@ contract MultisigProxyTest is Test {
 
         bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
             address(adapter),
             AMOUNT,
@@ -2322,7 +2322,7 @@ contract MultisigProxyTest is Test {
 
         bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
             address(adapter),
             AMOUNT,
@@ -2430,7 +2430,7 @@ contract MultisigProxyTest is Test {
         (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
 
         // Leg 1: the Bridge recipient is forced to the adapter (not in params).
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
             address(adapter),
             AMOUNT,
@@ -2483,7 +2483,7 @@ contract MultisigProxyTest is Test {
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
             drainRecipient,
             bridgeBefore,

@@ -42,7 +42,7 @@ abstract contract BridgeBase is Ownable, Pausable {
     /// @param amount      Amount of tokens locked.
     event FundsIn(
         address indexed sender,
-        uint256 operationId,
+        uint256 indexed operationId,
         uint256 amount
     );
 

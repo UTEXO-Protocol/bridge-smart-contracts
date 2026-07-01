@@ -29,10 +29,10 @@ import { Pausable }  from '@openzeppelin/contracts/utils/Pausable.sol';
 
 contract BridgeTest is Test {
     // Events re-declared locally for vm.expectEmit
-    event FundsIn(address indexed sender, uint256 operationId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 indexed operationId, uint256 amount);
     event BridgeFundsIn(
         address indexed sender,
-        uint256 operationId,
+        uint256 indexed operationId,
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
@@ -46,7 +46,7 @@ contract BridgeTest is Test {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 burnId,
+        uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  sourceAddress
@@ -664,7 +664,7 @@ contract BridgeTest is Test {
 
         // Drop the emitter filter so Forge's expectEmit scans past the token's
         // Transfer event (emitter = usdt0) and matches BridgeFundsIn by topic0.
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsIn(mockAdapter, TX_ID, AMOUNT, AMOUNT, 0, 0, customSrc, RGB_CHAIN_ID, DST_ADDR);
 
         vm.prank(mockAdapter);
@@ -695,9 +695,9 @@ contract BridgeTest is Test {
     }
 
     function test_fundsIn_emitsBothEvents() public {
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, TX_ID, AMOUNT);
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsIn(user, TX_ID, AMOUNT, AMOUNT, 0, 0, SOURCE_CHAIN_ID, RGB_CHAIN_ID, DST_ADDR);
 
         vm.prank(user);
@@ -760,7 +760,7 @@ contract BridgeTest is Test {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
             recipient, AMOUNT, AMOUNT, 0, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
@@ -1577,9 +1577,9 @@ contract BridgeTest is Test {
         assertEq(nativePoolBefore, 0, 'pre native pool');
         assertEq(recordBefore,     0, 'pre record');
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, TX_ID, netAmount);
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsIn(
             user,
             TX_ID,
@@ -1648,9 +1648,9 @@ contract BridgeTest is Test {
         assertEq(nativePoolBefore,  0, 'pre native pool');
         assertEq(recordBefore,      0, 'pre record');
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, TX_ID, netAmount);
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsIn(
             user,
             TX_ID,
@@ -1719,7 +1719,7 @@ contract BridgeTest is Test {
         assertEq(recordBefore,     AMOUNT, 'pre record');
         assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
             recipient,
             releaseAmount,
@@ -2011,7 +2011,7 @@ contract BridgeTest is Test {
         // this alternate enabled route because the proof is not bound to release
         // context on-chain. If that binding is enforced later, invert this to
         // expect a revert.
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
             alternateRecipient,
             releaseAmount,
@@ -2061,9 +2061,9 @@ contract BridgeTest is Test {
         // Current behavior: operationId uniqueness is enforced only by the
         // settlement record. A different address can occupy a predicted id
         // first, but doing so locks that address's own USDT0 in the Bridge.
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(preemptor, predictedOperationId, preemptAmount);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             preemptor,
             predictedOperationId,
@@ -2126,9 +2126,9 @@ contract BridgeTest is Test {
         assertEq(cm.nativeCommissionPool(), nativePoolBefore, 'native pool unchanged');
         assertEq(rgbModule.fundsInRecords(operationId), recordBefore, 'record not created');
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, operationId, AMOUNT);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             operationId,
@@ -2162,9 +2162,9 @@ contract BridgeTest is Test {
         assertEq(bridgeBefore, 0, 'pre bridge token');
         assertEq(recordBefore, 0, 'pre record');
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, operationId, AMOUNT);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             operationId,
@@ -2217,9 +2217,9 @@ contract BridgeTest is Test {
         assertEq(cmBefore, 0, 'pre cm token');
         assertEq(cmPoolBefore, 0, 'pre cm pool');
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, TX_ID + 10_000, netAmount);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             TX_ID + 10_000,
@@ -2378,9 +2378,9 @@ contract BridgeTest is Test {
         uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
         uint256 nativePoolBefore = cm.nativeCommissionPool();
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, operationId, netAmount);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             operationId,
@@ -2470,9 +2470,9 @@ contract BridgeTest is Test {
         uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
         uint256 nativePoolBefore = cm.nativeCommissionPool();
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, operationId, 0);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             operationId,
@@ -2495,9 +2495,9 @@ contract BridgeTest is Test {
         assertEq(cm.nativeCommissionPool(), nativePoolBefore, 'native pool unchanged');
         assertEq(rgbModule.fundsInRecords(operationId), 0, 'zero record leaves id reusable');
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, operationId, 0);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             operationId,

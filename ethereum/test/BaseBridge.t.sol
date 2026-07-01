@@ -10,11 +10,11 @@ import { Pausable }  from '@openzeppelin/contracts/utils/Pausable.sol';
 
 contract BaseBridgeTest is Test {
     // Events re-declared locally for vm.expectEmit
-    event FundsIn(address indexed sender, uint256 operationId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 indexed operationId, uint256 amount);
     event FundsOut(
         address indexed recipient,
         uint256 amount,
-        uint256 operationId,
+        uint256 indexed operationId,
         string  sourceAddress
     );
 
@@ -74,7 +74,7 @@ contract BaseBridgeTest is Test {
     }
 
     function test_fundsIn_emitsFundsIn() public {
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, OPERATION_ID, AMOUNT);
 
         vm.prank(user);
@@ -110,7 +110,7 @@ contract BaseBridgeTest is Test {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, OPERATION_ID);
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
 
         vm.prank(owner);

@@ -104,7 +104,7 @@ contract IntegrationTest is Test {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 burnId,
+        uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  sourceAddress
@@ -315,7 +315,7 @@ contract IntegrationTest is Test {
         uint256 tokenCommissionOut = netBridgedIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
         uint256 netOut             = netBridgedIn - tokenCommissionOut;
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
             recipient,
             netBridgedIn,

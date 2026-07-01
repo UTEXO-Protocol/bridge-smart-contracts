@@ -70,7 +70,7 @@ interface IBridge {
     /// @param destinationAddress Target address on the destination chain.
     event BridgeFundsIn(
         address indexed sender,
-        uint256 operationId,
+        uint256 indexed operationId,
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
@@ -94,7 +94,7 @@ interface IBridge {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 burnId,
+        uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  sourceAddress

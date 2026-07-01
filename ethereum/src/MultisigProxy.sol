@@ -80,15 +80,12 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Maximum allowed time between proposal creation and its deadline.
     uint256 public constant MAX_PROPOSAL_LIFETIME = 30 days;
 
-    /// @notice Maximum allowed lifetime of a TEE-signed `execute` / `executeBatch`
-    ///         deadline. Tighter than `MAX_PROPOSAL_LIFETIME` because enclave
+    /// @notice Maximum allowed lifetime of a TEE-signed `fundsOutCall` /
+    ///         `lzFundsOutCall` deadline. Tighter than `MAX_PROPOSAL_LIFETIME` because enclave
     ///         operations (e.g. `fundsOut`) are meant to be executed promptly
     ///         after signing; a short ceiling limits how long a leaked or
     ///         pre-signed payload stays executable while its nonce is unconsumed.
     uint256 public constant MAX_TEE_DEADLINE = 1 days;
-
-    /// @notice Hard upper bound on `executeBatch` size to keep gas use bounded.
-    uint256 public constant MAX_BATCH_SIZE = 3;
 
     /// @notice Hard upper bound on the size of either signer set. Bounds the
     ///         O(N^2) duplicate/disjointness checks and stays far within the
