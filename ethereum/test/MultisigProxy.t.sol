@@ -556,7 +556,7 @@ contract MultisigProxyTest is Test {
 
     // ---- Signer update (validated at executeProposal) ----
 
-    function test_proposeUpdateEnclaveSigners_rejectsOneOfNAtExecute() public {
+    function test_proposeUpdateEnclaveSigners_rejectsOneOfNAtPropose() public {
         address[] memory newSigners = _signers(3);
         uint256 badThreshold = 1; // 1-of-3
         uint256 nonce    = proxy.proposalNonce();
@@ -568,15 +568,83 @@ contract MultisigProxyTest is Test {
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        // Propose succeeds — threshold validity is enforced on execution.
-        bytes32 id = proxy.proposeUpdateEnclaveSigners(newSigners, badThreshold, nonce, deadline, bitmap, sigs);
-
-        vm.warp(block.timestamp + TIMELOCK + 1);
+        // Threshold validity is now enforced up front, at propose time.
         vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
-        proxy.executeProposal(id, abi.encode(newSigners, badThreshold));
+        proxy.proposeUpdateEnclaveSigners(newSigners, badThreshold, nonce, deadline, bitmap, sigs);
     }
 
-    function test_proposeUpdateFederationSigners_rejectsSubMajorityAtExecute() public {
+    // ---- Intrinsic set validation runs at propose time ----
+    // (empty / zero-address / duplicate paths; threshold and MAX_SIGNERS are
+    //  covered by the *AtPropose tests above. Disjointness stays deferred to
+    //  execute — see the R-W-14 *OverlapWith*AtExecute tests.)
+
+    function test_proposeUpdateEnclaveSigners_rejectsEmptySetAtPropose() public {
+        address[] memory newSigners = new address[](0);
+        uint256 threshold = 2;
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(
+            domainSep, newSigners, threshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.NoSigners.selector);
+        proxy.proposeUpdateEnclaveSigners(newSigners, threshold, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_proposeUpdateEnclaveSigners_rejectsZeroAddressSignerAtPropose() public {
+        address[] memory newSigners = _signers(3);
+        newSigners[1] = address(0);
+        uint256 threshold = 2;
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(
+            domainSep, newSigners, threshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.ZeroAddressSigner.selector);
+        proxy.proposeUpdateEnclaveSigners(newSigners, threshold, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_proposeUpdateEnclaveSigners_rejectsDuplicateSignerAtPropose() public {
+        address[] memory newSigners = _signers(3);
+        newSigners[2] = newSigners[0]; // duplicate
+        uint256 threshold = 2;
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(
+            domainSep, newSigners, threshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.DuplicateSigner.selector);
+        proxy.proposeUpdateEnclaveSigners(newSigners, threshold, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_proposeUpdateFederationSigners_rejectsEmptySetAtPropose() public {
+        address[] memory newSigners = new address[](0);
+        uint256 threshold = 2;
+        uint256 nonce    = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateFederationSigners(
+            domainSep, newSigners, threshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.NoSigners.selector);
+        proxy.proposeUpdateFederationSigners(newSigners, threshold, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_proposeUpdateFederationSigners_rejectsSubMajorityAtPropose() public {
         address[] memory newSigners = _signers(4);
         uint256 badThreshold = 2; // 2-of-4, sub-majority
         uint256 nonce    = proxy.proposalNonce();
@@ -588,11 +656,9 @@ contract MultisigProxyTest is Test {
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        bytes32 id = proxy.proposeUpdateFederationSigners(newSigners, badThreshold, nonce, deadline, bitmap, sigs);
-
-        vm.warp(block.timestamp + TIMELOCK + 1);
+        // Threshold validity is now enforced up front, at propose time.
         vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
-        proxy.executeProposal(id, abi.encode(newSigners, badThreshold));
+        proxy.proposeUpdateFederationSigners(newSigners, badThreshold, nonce, deadline, bitmap, sigs);
     }
 
     function test_proposeUpdateFederationSigners_acceptsStrictMajority() public {
@@ -709,7 +775,7 @@ contract MultisigProxyTest is Test {
         assertEq(p.getFederationSigners().length, max);
     }
 
-    function test_proposeUpdateEnclaveSigners_rejectsTooManySignersAtExecute() public {
+    function test_proposeUpdateEnclaveSigners_rejectsTooManySignersAtPropose() public {
         uint256 max = proxy.MAX_SIGNERS();
         address[] memory newSigners = _signers(max + 1);
         uint256 newThreshold = (max + 1) / 2 + 1; // valid strict majority
@@ -722,11 +788,9 @@ contract MultisigProxyTest is Test {
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        bytes32 id = proxy.proposeUpdateEnclaveSigners(newSigners, newThreshold, nonce, deadline, bitmap, sigs);
-
-        vm.warp(block.timestamp + TIMELOCK + 1);
+        // Signer-set size is now enforced up front, at propose time.
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.TooManySigners.selector, max + 1, max));
-        proxy.executeProposal(id, abi.encode(newSigners, newThreshold));
+        proxy.proposeUpdateEnclaveSigners(newSigners, newThreshold, nonce, deadline, bitmap, sigs);
     }
 
     // ========================================================================
