@@ -460,6 +460,14 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
+        // Validate the proposed set up front so a malformed rotation reverts
+        // here instead of consuming a nonce + timelock slot and failing only at
+        // execution. Disjointness is intentionally left to execute time: it
+        // depends on the live counterpart set, which may change before then.
+        if (newSigners.length == 0) revert NoSigners();
+        _requireValidThreshold(newThreshold, newSigners.length);
+        _validateSigners(newSigners);
+
         bytes32 structHash = keccak256(abi.encode(
             _PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH,
             _hashAddressArray(newSigners), newThreshold, nonce, deadline
@@ -481,6 +489,12 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
+        // Validate up front (see proposeUpdateEnclaveSigners); disjointness is
+        // enforced at execution against the live enclave set.
+        if (newSigners.length == 0) revert NoSigners();
+        _requireValidThreshold(newThreshold, newSigners.length);
+        _validateSigners(newSigners);
+
         bytes32 structHash = keccak256(abi.encode(
             _PROPOSE_UPDATE_FEDERATION_SIGNERS_TYPEHASH,
             _hashAddressArray(newSigners), newThreshold, nonce, deadline
