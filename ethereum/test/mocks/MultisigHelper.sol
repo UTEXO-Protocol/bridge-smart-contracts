@@ -88,6 +88,9 @@ library MultisigHelper {
     bytes32 internal constant PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH = keccak256(
         'ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)'
     );
+    bytes32 internal constant PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH = keccak256(
+        'ProposeDisableLZAdapter(uint256 nonce,uint256 deadline)'
+    );
 
     bytes32 internal constant PROPOSE_SET_ROUTE_TYPEHASH = keccak256(
         'ProposeSetRoute(uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)'
@@ -193,6 +196,10 @@ library MultisigHelper {
 
     function digestProposeUnpauseInflow(bytes32 domainSep, uint256 nonce, uint256 deadline) internal pure returns (bytes32) {
         return toTypedDataHash(domainSep, keccak256(abi.encode(PROPOSE_UNPAUSE_INFLOW_TYPEHASH, nonce, deadline)));
+    }
+
+    function digestProposeDisableLZAdapter(bytes32 domainSep, uint256 nonce, uint256 deadline) internal pure returns (bytes32) {
+        return toTypedDataHash(domainSep, keccak256(abi.encode(PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH, nonce, deadline)));
     }
 
     function digestProposeAdminExecute(
