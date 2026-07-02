@@ -154,6 +154,9 @@ contract MultisigProxy is IMultisigProxy {
     bytes32 private constant _PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH = keccak256(
         'ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)'
     );
+    bytes32 private constant _PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH = keccak256(
+        'ProposeDisableLZAdapter(uint256 nonce,uint256 deadline)'
+    );
 
     // Federation propose — RouteRegistry side
     bytes32 private constant _PROPOSE_SET_ROUTE_TYPEHASH = keccak256(
@@ -697,6 +700,24 @@ contract MultisigProxy is IMultisigProxy {
         );
     }
 
+    /// @inheritdoc IMultisigProxy
+    function proposeDisableLZAdapter(
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.DisableLZAdapter,
+            '',
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
     // =========================================================================
     // Federation propose — RouteRegistry side
     // =========================================================================
@@ -1006,9 +1027,15 @@ contract MultisigProxy is IMultisigProxy {
 
         } else if (opType == OperationType.UpdateLZAdapter) {
             address newAdapter = abi.decode(opData, (address));
+            if (newAdapter == address(0)) revert InvalidLZAdapter();
             address oldAdapter = lzAdapter;
             lzAdapter = newAdapter;
             emit LZAdapterUpdated(oldAdapter, newAdapter);
+
+        } else if (opType == OperationType.DisableLZAdapter) {
+            address oldAdapter = lzAdapter;
+            lzAdapter = address(0);
+            emit LZAdapterDisabled(oldAdapter);
 
         } else if (opType == OperationType.SetRoute) {
             // Forwards to RouteRegistry, looked up dynamically from Bridge to

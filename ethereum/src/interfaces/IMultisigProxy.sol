@@ -72,6 +72,7 @@ interface IMultisigProxy {
     error ZeroRecipient();
     error ZeroTarget();
     error LZAdapterNotSet();
+    error InvalidLZAdapter();
 
     // =========================================================================
     // Types
@@ -93,7 +94,8 @@ interface IMultisigProxy {
         SetRoute,                        // 12 — RouteRegistry.setRoute(src, dst, enabled, verifier, module)
         UpdateRouteRegistry,             // 13 — Bridge.setRouteRegistry(newRouteRegistry)
         PauseInflow,                     // 14 — Bridge.pauseInflow()  (planned inflow-only freeze, timelocked)
-        UnpauseInflow                    // 15 — Bridge.unpauseInflow()
+        UnpauseInflow,                   // 15 — Bridge.unpauseInflow()
+        DisableLZAdapter                 // 16 — clear the routing target (explicit disable, distinct from UpdateLZAdapter rotation)
     }
 
     enum ProposalStatus { None, Pending, Executed, Cancelled }
@@ -160,6 +162,7 @@ interface IMultisigProxy {
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
+    event LZAdapterDisabled(address indexed oldAdapter);
     event CommissionRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
     event NativeCommissionWithdrawn(uint256 amount, address indexed recipient);
@@ -345,10 +348,21 @@ interface IMultisigProxy {
     ) external returns (bytes32);
 
     /// @notice Propose rotating the LZAdapter routing target stored on this proxy.
-    /// @dev opData = abi.encode(address newLZAdapter). `address(0)` is allowed
-    ///      and closes adapter-execute until set again.
+    /// @dev opData = abi.encode(address newLZAdapter). Reverts `InvalidLZAdapter`
+    ///      on `address(0)` — use `proposeDisableLZAdapter` to close the path.
     function proposeUpdateLZAdapter(
         address newLZAdapter,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    /// @notice Propose clearing the LZAdapter routing target stored on this proxy
+    ///         (explicit disable, emits `LZAdapterDisabled` — distinct from a
+    ///         rotation via `proposeUpdateLZAdapter`).
+    /// @dev opData is empty.
+    function proposeDisableLZAdapter(
         uint256 nonce,
         uint256 deadline,
         uint256 fedBitmap,
