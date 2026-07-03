@@ -51,6 +51,12 @@ import { RgbSettlementModule } from '../../src/settlement/RgbSettlementModule.so
 ///                       are live the moment the proxy takes over).
 ///   ETH_USD_HEARTBEAT — Seconds before the feed answer is considered stale.
 ///                       Required when ETH_USD_FEED is provided.
+///   MIN_SOURCE_CONFIRMATIONS (6) — RGBVerifier: min depth of the source
+///                       (RGB burn/lock) block.
+///   MAX_LATEST_CONFIRMATIONS (1) — RGBVerifier: max depth of the latest
+///                       (freshness) block; must be >= 1.
+///   MIN_CONFIRMATION_GAP     (5) — RGBVerifier: min depth gap between the
+///                       source and latest blocks.
 ///
 /// Usage:
 ///   forge script script/deploy/DeployAll.s.sol \
@@ -81,6 +87,9 @@ contract DeployAll is Script {
         address ethUsdFeed     = vm.envOr('ETH_USD_FEED', address(0));
         uint256 ethUsdHb       = vm.envOr('ETH_USD_HEARTBEAT', uint256(0));
         uint256 minFundsIn     = vm.envUint('MIN_FUNDS_IN_AMOUNT');
+        uint256 minSourceConf  = vm.envOr('MIN_SOURCE_CONFIRMATIONS', uint256(6));
+        uint256 maxLatestConf  = vm.envOr('MAX_LATEST_CONFIRMATIONS', uint256(1));
+        uint256 minConfGap     = vm.envOr('MIN_CONFIRMATION_GAP',     uint256(5));
 
         address deployer    = vm.addr(pk);
         uint64  startNonce  = vm.getNonce(deployer);
@@ -108,7 +117,7 @@ contract DeployAll is Script {
         );
 
         // ---- 5. Route plugins (nonce n+3, n+4) ---------------------------
-        rgbVerifier = new RGBVerifier(btcRelay);
+        rgbVerifier = new RGBVerifier(btcRelay, minSourceConf, maxLatestConf, minConfGap);
         rgbModule   = new RgbSettlementModule(address(routeRegistry));
 
         // ---- 6. MultisigProxy (nonce n+5) --------------------------------
@@ -144,6 +153,9 @@ contract DeployAll is Script {
         console2.log('RouteRegistry deployed at:      ', address(routeRegistry));
         console2.log('Bridge deployed at:             ', address(bridge));
         console2.log('RGBVerifier deployed at:        ', address(rgbVerifier));
+        console2.log('  minSourceConfirmations:       ', rgbVerifier.minSourceConfirmations());
+        console2.log('  maxLatestConfirmations:       ', rgbVerifier.maxLatestConfirmations());
+        console2.log('  minConfirmationGap:           ', rgbVerifier.minConfirmationGap());
         console2.log('RgbSettlementModule deployed at:', address(rgbModule));
         console2.log('MultisigProxy deployed at:      ', address(proxy));
         if (ethUsdFeed != address(0)) {
