@@ -166,10 +166,14 @@ contract MultisigProxyTest is Test {
     uint32  constant DST_EID = 30110;
     bytes32 constant LZ_RECIPIENT = bytes32(uint256(uint160(0xBEEF)));
 
-    // BtcRelay test data
-    uint256 constant BLOCK_HEIGHT      = 850_000;
-    bytes32 constant COMMITMENT_HASH   = keccak256('test-btc-block-commitment');
-    uint256 constant BTC_CONFIRMATIONS = 6;
+    // BtcRelay test data. RGB proof = two (height, commit) pairs: a deep
+    // source block (RGB burn/lock) and a fresh latest block. gap = 6 - 1 = 5.
+    uint256 constant BLOCK_HEIGHT         = 850_000;   // source block
+    bytes32 constant COMMITMENT_HASH      = keccak256('test-btc-block-commitment');
+    uint256 constant BTC_CONFIRMATIONS    = 6;         // source confirmations
+    uint256 constant LATEST_HEIGHT        = 850_005;
+    bytes32 constant LATEST_COMMIT        = keccak256('test-btc-latest-commitment');
+    uint256 constant LATEST_CONFIRMATIONS = 1;
 
     function setUp() public {
         encA1 = vm.addr(encPk1);
@@ -182,6 +186,7 @@ contract MultisigProxyTest is Test {
         token    = new MockERC20('Mock USDT0', 'USDT0');
         btcRelay = new MockBtcRelay();
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, BTC_CONFIRMATIONS);
+        btcRelay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, LATEST_CONFIRMATIONS);
 
         // DeployAll-style with predicted Bridge address. Deployer tx order:
         //   nonce n      → CommissionManager (uses predicted Bridge)
@@ -208,7 +213,7 @@ contract MultisigProxyTest is Test {
             1 // minFundsInAmount: smallest non-zero floor for tests
         );
 
-        rgbVerifier = new RGBVerifier(address(btcRelay));
+        rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
         rgbModule   = new RgbSettlementModule(address(routeRegistry));
 
         // Register both directions of the RGB route while deployer still owns
@@ -337,7 +342,7 @@ contract MultisigProxyTest is Test {
             sourceChainId:      RGB_CHAIN_ID,
             destinationChainId: SOURCE_CHAIN_ID,
             sourceAddress:      SRC_ADDR,
-            proof:              abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH),
+            proof:              abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT),
             settlementData:     _settlement(_fundsInIds())
         });
     }
@@ -356,7 +361,7 @@ contract MultisigProxyTest is Test {
             sourceChainId:      RGB_CHAIN_ID,
             destinationChainId: SOURCE_CHAIN_ID,
             sourceAddress:      SRC_ADDR,
-            proof:              abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH),
+            proof:              abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT),
             settlementData:     _settlement(ids),
             dstEid:             DST_EID,
             recipient:          LZ_RECIPIENT,
@@ -2205,9 +2210,9 @@ contract MultisigProxyTest is Test {
         _setLzAdapter(address(adapter));
 
         IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, _fundsInIds());
-        // A proof that the verifier rejects, so Bridge.fundsOut reverts before
-        // the adapter send can run.
-        params.proof = abi.encode(uint256(999_999), keccak256('unknown-block'));
+        // Well-formed two-pair proof whose source block is unknown to the relay,
+        // so Bridge.fundsOut reverts before the adapter send can run.
+        params.proof = abi.encode(uint256(999_999), keccak256('unknown-block'), LATEST_HEIGHT, LATEST_COMMIT);
 
         uint256 deadline = block.timestamp + 1 hours;
         (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);

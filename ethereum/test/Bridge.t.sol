@@ -81,14 +81,20 @@ contract BridgeTest is Test {
     uint256 constant BURN_ID         = 9_001;
 
     // BtcRelay test data
-    uint256 constant BLOCK_HEIGHT     = 850_000;
-    bytes32 constant COMMITMENT_HASH  = keccak256('test-btc-block-commitment');
-    uint256 constant CONFIRMATIONS    = 6;
+    // RGB proof = two (height, commit) pairs. The source block (RGB burn/lock)
+    // is deep; the latest block is fresh (relay head). gap = 6 - 1 = 5.
+    uint256 constant BLOCK_HEIGHT         = 850_000;   // source block
+    bytes32 constant COMMITMENT_HASH      = keccak256('test-btc-block-commitment');
+    uint256 constant CONFIRMATIONS        = 6;         // source confirmations
+    uint256 constant LATEST_HEIGHT        = 850_005;
+    bytes32 constant LATEST_COMMIT        = keccak256('test-btc-latest-commitment');
+    uint256 constant LATEST_CONFIRMATIONS = 1;
 
     function setUp() public {
         usdt0    = new MockERC20('Mock USDT0', 'USDT0');
         btcRelay = new MockBtcRelay();
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, CONFIRMATIONS);
+        btcRelay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, LATEST_CONFIRMATIONS);
 
         // DeployAll-style deploy with predicted Bridge address:
         //   nonce n      → CommissionManager (uses predicted Bridge)
@@ -112,7 +118,7 @@ contract BridgeTest is Test {
             1 // minFundsInAmount: smallest non-zero floor; cases that need a higher floor deploy their own Bridge
         );
 
-        rgbVerifier = new RGBVerifier(address(btcRelay));
+        rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
         rgbModule   = new RgbSettlementModule(address(routeRegistry));
 
         // Both directions of the RGB route share the same verifier + module.
@@ -163,7 +169,7 @@ contract BridgeTest is Test {
     }
 
     function _proof() internal pure returns (bytes memory) {
-        return abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
+        return abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
     }
 
     /// @dev Build `settlementData` for the reworked RgbSettlementModule, which
@@ -854,7 +860,9 @@ contract BridgeTest is Test {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
-        bytes memory badProof = abi.encode(uint256(999_999), keccak256('unknown-block'));
+        // Well-formed two-pair proof, but the source block is unknown to the relay.
+        bytes memory badProof =
+            abi.encode(uint256(999_999), keccak256('unknown-block'), LATEST_HEIGHT, LATEST_COMMIT);
 
         // RGBVerifier → BtcRelay reverts with the relay's string message.
         vm.expectRevert('verify: block commitment');
@@ -1886,7 +1894,9 @@ contract BridgeTest is Test {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
-        bytes memory badProof = abi.encode(uint256(999_999), keccak256('unknown-block'));
+        // Well-formed two-pair proof, but the source block is unknown to the relay.
+        bytes memory badProof =
+            abi.encode(uint256(999_999), keccak256('unknown-block'), LATEST_HEIGHT, LATEST_COMMIT);
 
         uint256 bridgeBefore     = usdt0.balanceOf(address(bridge));
         uint256 recipientBefore  = usdt0.balanceOf(recipient);

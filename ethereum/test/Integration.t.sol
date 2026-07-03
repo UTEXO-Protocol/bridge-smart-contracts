@@ -88,9 +88,14 @@ contract IntegrationTest is Test {
     uint256 constant TX_ID_IN  = 42;
     uint256 constant BURN_ID   = 9_001;
 
-    uint256 constant BLOCK_HEIGHT      = 850_000;
-    bytes32 constant COMMITMENT_HASH   = keccak256('integration-btc-block');
-    uint256 constant BTC_CONFIRMATIONS = 6;
+    // RGB proof = two (height, commit) pairs: a deep source block (RGB
+    // burn/lock) and a fresh latest block (relay head). gap = 6 - 1 = 5.
+    uint256 constant BLOCK_HEIGHT         = 850_000;   // source block
+    bytes32 constant COMMITMENT_HASH      = keccak256('integration-btc-block');
+    uint256 constant BTC_CONFIRMATIONS    = 6;         // source confirmations
+    uint256 constant LATEST_HEIGHT        = 850_005;
+    bytes32 constant LATEST_COMMIT        = keccak256('integration-btc-latest');
+    uint256 constant LATEST_CONFIRMATIONS = 1;
 
     uint256 constant TIMELOCK     = 1 hours;
     uint256 constant MIN_TIMELOCK = 1 hours; // floor passed to the proxy constructor in tests
@@ -123,6 +128,7 @@ contract IntegrationTest is Test {
         token    = new MockERC20('Mock USDT0', 'USDT0');
         btcRelay = new MockBtcRelay();
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, BTC_CONFIRMATIONS);
+        btcRelay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, LATEST_CONFIRMATIONS);
 
         // DeployAll-style deployment. Deployer tx order:
         //   nonce n      → CommissionManager (uses predicted Bridge)
@@ -151,7 +157,7 @@ contract IntegrationTest is Test {
             1 // minFundsInAmount: smallest non-zero floor for tests
         );
 
-        rgbVerifier = new RGBVerifier(address(btcRelay));
+        rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
         rgbModule   = new RgbSettlementModule(address(routeRegistry));
 
         // Register both directions of the RGB route, using the same verifier
@@ -298,7 +304,7 @@ contract IntegrationTest is Test {
         uint256[] memory fundsInAmounts = new uint256[](1);
         fundsInAmounts[0] = netBridgedIn;   // must equal the recorded mint amount
 
-        bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
+        bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
         bytes memory settlementData = abi.encode(fundsInIds, fundsInAmounts);
 
         IBridge.FundsOutParams memory params = IBridge.FundsOutParams(
