@@ -25,9 +25,14 @@ import { RgbSettlementModule } from '../../src/settlement/RgbSettlementModule.so
 ///   n + 4  → RgbSettlementModule (paired with RouteRegistry)
 ///   n + 5  → MultisigProxy
 ///   n + 6  → (optional) CommissionManager.setEthUsdFeed
-///   n + 7  → CommissionManager.transferOwnership → MultisigProxy
-///   n + 8  → Bridge.transferOwnership → MultisigProxy
-///   n + 9  → RouteRegistry.transferOwnership → MultisigProxy
+///   n + 7  → CommissionManager.transferOwnership (starts two-step handoff)
+///   n + 8  → Bridge.transferOwnership (starts two-step handoff)
+///   n + 9  → RouteRegistry.transferOwnership (starts two-step handoff)
+///
+/// Ownership is Ownable2Step: the transferOwnership calls only set
+/// pendingOwner = MultisigProxy. The federation MUST accept post-deploy via
+/// governance (acceptOwnership) — see the post-deploy reminder. Until then,
+/// `deployer` remains the owner.
 ///
 /// Routes are NOT registered here. Federation configures them through
 /// `MultisigProxy.proposeSetRoute(...)` after deploy — this mirrors the
@@ -123,7 +128,11 @@ contract DeployAll is Script {
             cm.setEthUsdFeed(ethUsdFeed, ethUsdHb);
         }
 
-        // ---- 8. Hand over to federation ----------------------------------
+        // ---- 8. Start two-step ownership handover to federation ----------
+        // Ownable2Step: these only set pendingOwner = proxy. The federation
+        // completes the handoff post-deploy by accepting via governance
+        // (AdminExecute / AdminExecuteCommissionManager / AdminExecuteRouteRegistry
+        // -> acceptOwnership). Until then, `deployer` stays the owner.
         cm.transferOwnership(address(proxy));
         bridge.transferOwnership(address(proxy));
         routeRegistry.transferOwnership(address(proxy));
@@ -150,15 +159,26 @@ contract DeployAll is Script {
         require(rgbModule.routeRegistry() == address(routeRegistry), 'RgbSettlementModule.routeRegistry mismatch');
         require(bridge.routeRegistry() == address(routeRegistry),    'Bridge.routeRegistry mismatch');
         require(cm.bridgeAddress() == address(bridge),      'CM.bridgeAddress mismatch');
-        require(bridge.owner() == address(proxy),           'Bridge ownership transfer failed');
-        require(cm.owner()     == address(proxy),           'CM ownership transfer failed');
-        require(routeRegistry.owner() == address(proxy),    'RouteRegistry ownership transfer failed');
+        // Two-step: ownership stays with `deployer` until the federation
+        // accepts; assert the pending transfer to the proxy was initiated.
+        require(bridge.owner() == deployer && bridge.pendingOwner() == address(proxy),
+            'Bridge ownership handoff not initiated');
+        require(cm.owner() == deployer && cm.pendingOwner() == address(proxy),
+            'CM ownership handoff not initiated');
+        require(routeRegistry.owner() == deployer && routeRegistry.pendingOwner() == address(proxy),
+            'RouteRegistry ownership handoff not initiated');
         if (ethUsdFeed != address(0)) {
             require(cm.ethUsdFeed() == ethUsdFeed,          'CM.ethUsdFeed mismatch');
             require(cm.ethUsdHeartbeat() == ethUsdHb,       'CM.ethUsdHeartbeat mismatch');
         }
 
         // ---- 11. Post-deploy reminder -----------------------------------
+        console2.log('');
+        console2.log('Ownership handoff is two-step: deployer still owns Bridge/CM/');
+        console2.log('RouteRegistry until the federation accepts via governance:');
+        console2.log('  AdminExecute                  -> Bridge.acceptOwnership()');
+        console2.log('  AdminExecuteCommissionManager -> CommissionManager.acceptOwnership()');
+        console2.log('  AdminExecuteRouteRegistry     -> RouteRegistry.acceptOwnership()');
         console2.log('');
         console2.log('Next step: federation must register routes via');
         console2.log('  MultisigProxy.proposeSetRoute(src, dst, true, verifier, module)');
