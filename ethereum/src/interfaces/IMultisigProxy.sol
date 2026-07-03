@@ -95,7 +95,8 @@ interface IMultisigProxy {
         UpdateRouteRegistry,             // 13 — Bridge.setRouteRegistry(newRouteRegistry)
         PauseInflow,                     // 14 — Bridge.pauseInflow()  (planned inflow-only freeze, timelocked)
         UnpauseInflow,                   // 15 — Bridge.unpauseInflow()
-        DisableLZAdapter                 // 16 — clear the routing target (explicit disable, distinct from UpdateLZAdapter rotation)
+        DisableLZAdapter,                // 16 — clear the routing target (explicit disable, distinct from UpdateLZAdapter rotation)
+        AdminExecuteRouteRegistry        // 17 — generic call into RouteRegistry (transferOwnership/acceptOwnership, setRoute, …)
     }
 
     enum ProposalStatus { None, Pending, Executed, Cancelled }
@@ -292,6 +293,21 @@ interface IMultisigProxy {
     ///      setMockTokenToNativeRate, setBridgeAddress, transferOwnership, …
     /// @dev opData = raw ABI-encoded CommissionManager callData (selector + args).
     function proposeAdminExecuteCommissionManager(
+        bytes calldata callData,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    // --- RouteRegistry-targeted operations ---
+
+    /// @notice Propose an arbitrary call into the RouteRegistry (resolved from
+    ///         Bridge). Enables ownership migration (`transferOwnership` /
+    ///         `acceptOwnership`) now that RouteRegistry is `Ownable2Step`,
+    ///         alongside the dedicated `SetRoute` op.
+    /// @dev opData = raw ABI-encoded RouteRegistry callData (selector + args).
+    function proposeAdminExecuteRouteRegistry(
         bytes calldata callData,
         uint256 nonce,
         uint256 deadline,
