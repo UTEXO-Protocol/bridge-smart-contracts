@@ -66,13 +66,12 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         'UtexoFundsInOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,uint256 senderNonce,address token,uint256 grossAmount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataHash,uint256 chainId)'
     );
 
-    /// @notice Domain-separated type hash for the `fundsOut` replay key. 
+    /// @notice Domain-separated type hash for the `fundsOut` replay key.
     ///         Binds common release intent fields to this Bridge deployment and
-    ///         formula version. `proof` is deliberately not included because it
-    ///         is verifier evidence, not release intent, and may change as
-    ///         finality evidence is refreshed.
+    ///         formula version, including the exact verifier proof the enclave
+    ///         signed for the release.
     bytes32 public constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
-        'UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash)'
+        'UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)'
     );
 
     /// @notice CommissionManager that receives and custodies protocol fees.
@@ -588,6 +587,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             params.sourceChainId,
             params.destinationChainId,
             params.sourceAddress,
+            params.proof,
             params.settlementData
         );
     }
@@ -598,6 +598,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 sourceChainId,
         uint256 destinationChainId,
         string calldata sourceAddress,
+        bytes calldata proof,
         bytes calldata settlementData
     ) private view returns (uint256) {
         return uint256(
@@ -612,6 +613,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
                     sourceChainId,
                     destinationChainId,
                     _hashCalldataString(sourceAddress),
+                    _hashCalldataBytes(proof),
                     _hashCalldataBytes(settlementData)
                 )
             )

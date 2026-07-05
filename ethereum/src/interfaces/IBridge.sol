@@ -181,7 +181,8 @@ interface IBridge {
     /// @param recipient          Recipient on this chain.
     /// @param amount             Gross amount to release (pre-commission).
     /// @param burnId             Bridge-derived replay guard. Must equal the
-    ///                           Bridge's canonical hash of the release fields.
+    ///                           Bridge's canonical hash of the release fields,
+    ///                           including `proof` and `settlementData`.
     /// @param sourceChainId      Source chain id.
     /// @param destinationChainId Destination chain id; part of the
     ///                           CommissionManager route key.
