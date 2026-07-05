@@ -83,6 +83,9 @@ contract BridgeTest is Test {
     uint256 constant BURN_ID         = 9_001;
     /// @notice Non-zero RGB OpId threaded through the RGB-route settlementData.
     uint256 constant RGB_OP_ID       = 0xABCDEF;
+    bytes32 constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
+        'UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)'
+    );
 
     // BtcRelay test data
     // RGB proof = two (height, commit) pairs. The source block (RGB burn/lock)
@@ -219,6 +222,33 @@ contract BridgeTest is Test {
         return abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
     }
 
+    /// @dev Mirror of `Bridge._deriveBurnId` so tests can build canonical
+    ///      `fundsOut` payloads after.
+    ///      The typehash is an internal formula/domain separator.
+    function _deriveBurnId(
+        address recipient_,
+        uint256 amount,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string memory sourceAddress,
+        bytes memory proof,
+        bytes memory settlementData
+    ) internal view returns (uint256) {
+        return uint256(keccak256(abi.encode(
+            FUNDS_OUT_BURN_ID_TYPEHASH,
+            address(bridge),
+            block.chainid,
+            address(usdt0),
+            recipient_,
+            amount,
+            sourceChainId,
+            destinationChainId,
+            keccak256(bytes(sourceAddress)),
+            keccak256(proof),
+            keccak256(settlementData)
+        )));
+    }
+
     /// @dev Build `settlementData` for the reworked RgbSettlementModule, which
     ///      expects `(uint256[] operationIds, uint256[] amounts)` and checks
     ///      each id exists with an EXACTLY matching amount (no consumption).
@@ -259,6 +289,24 @@ contract BridgeTest is Test {
     ///      and make the external Bridge call. Keeps `vm.prank` / `vm.expectRevert`
     ///      working: the inner `bridge.fundsOut` is the next external call.
     function _fundsOut(
+        address recipient_,
+        uint256 amount,
+        uint256 /* burnId */,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string memory sourceAddress,
+        bytes memory proof,
+        bytes memory settlementData
+    ) internal returns (uint256 burnId) {
+        burnId = _deriveBurnId(
+            recipient_, amount, sourceChainId, destinationChainId, sourceAddress, proof, settlementData
+        );
+        _fundsOutWithBurnId(
+            recipient_, amount, burnId, sourceChainId, destinationChainId, sourceAddress, proof, settlementData
+        );
+    }
+
+    function _fundsOutWithBurnId(
         address recipient_,
         uint256 amount,
         uint256 burnId,
@@ -673,12 +721,16 @@ contract BridgeTest is Test {
         // call reaches the verifier instead.
         uint256 max = bridge.MAX_PROOF_LENGTH();
         bytes memory atMax = _bytesOfLength(max);
+        bytes memory settlementData = _settlement(_ids(opId));
+        uint256 burnId = _deriveBurnId(
+            recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, atMax, settlementData
+        );
 
         vm.prank(multisig);
         try bridge.fundsOut(IBridge.FundsOutParams(
-            recipient, AMOUNT, BURN_ID,
+            recipient, AMOUNT, burnId,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            atMax, _settlement(_ids(opId))
+            atMax, settlementData
         )) {
             // a decodable proof would succeed; this blob won't, so we don't
             // expect to land here — but if a future verifier accepts it, the
@@ -861,17 +913,23 @@ contract BridgeTest is Test {
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlement(_ids(opId));
+        uint256 burnId = _deriveBurnId(
+            recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData
+        );
+
         vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
-            recipient, AMOUNT, AMOUNT, 0, BURN_ID,
+            recipient, AMOUNT, AMOUNT, 0, burnId,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
         );
 
         vm.prank(multisig);
         _fundsOut(
-            recipient, AMOUNT, BURN_ID,
+            recipient, AMOUNT, burnId,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            _proof(), _settlement(_ids(opId))
+            proof, settlementData
         );
 
         assertEq(usdt0.balanceOf(recipient),       AMOUNT);
@@ -993,26 +1051,130 @@ contract BridgeTest is Test {
         bytes32 opId2 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
 
         bytes32[] memory ids1 = _ids(opId1);
-        bytes32[] memory ids2 = _ids(opId2);
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlement(ids1);
+        uint256 burnId = _deriveBurnId(
+            recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData
+        );
 
         vm.prank(multisig);
         _fundsOut(
-            recipient, AMOUNT, BURN_ID,
+            recipient, AMOUNT, burnId,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            _proof(), _settlement(ids1)
+            proof, settlementData
         );
-        assertTrue(bridge.consumedBurnIds(BURN_ID), 'burnId recorded');
+        assertTrue(bridge.consumedBurnIds(burnId), 'burnId recorded');
 
         // Second fundsOut with the same burnId — must revert before any
         // module mutation, leaving the second record untouched.
-        vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, BURN_ID));
+        vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, burnId));
         vm.prank(multisig);
         _fundsOut(
-            recipient, AMOUNT, BURN_ID,
+            recipient, AMOUNT, burnId,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            _proof(), _settlement(ids2)
+            proof, settlementData
         );
         assertEq(rgbModule.fundsInRecords(opId2), AMOUNT, 'second fundsIn record preserved');
+    }
+
+    function test_fundsOut_revertsOnInvalidDerivedBurnId() public {
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlement(_ids(opId));
+        uint256 expectedBurnId = _deriveBurnId(
+            recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData
+        );
+        uint256 invalidBurnId = expectedBurnId ^ 1;
+
+        vm.expectRevert(abi.encodeWithSelector(
+            IBridge.InvalidBurnId.selector, invalidBurnId, expectedBurnId
+        ));
+        vm.prank(multisig);
+        _fundsOutWithBurnId(
+            recipient,
+            AMOUNT,
+            invalidBurnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            proof,
+            settlementData
+        );
+
+        assertFalse(bridge.consumedBurnIds(expectedBurnId), 'expected burn id unchanged');
+        assertFalse(bridge.consumedBurnIds(invalidBurnId), 'invalid burn id unchanged');
+    }
+
+    function test_fundsOut_revertsWhenProofChangesAfterBurnIdDerivation() public {
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        bytes memory signedProof = _proof();
+        bytes memory settlementData = _settlement(_ids(opId));
+        uint256 signedBurnId = _deriveBurnId(
+            recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, signedProof, settlementData
+        );
+
+        bytes memory changedProof =
+            abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, keccak256('changed-proof'));
+        uint256 expectedBurnId = _deriveBurnId(
+            recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, changedProof, settlementData
+        );
+
+        vm.expectRevert(abi.encodeWithSelector(
+            IBridge.InvalidBurnId.selector, signedBurnId, expectedBurnId
+        ));
+        vm.prank(multisig);
+        _fundsOutWithBurnId(
+            recipient,
+            AMOUNT,
+            signedBurnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            changedProof,
+            settlementData
+        );
+
+        assertFalse(bridge.consumedBurnIds(signedBurnId), 'signed burn id unchanged');
+    }
+
+    function test_fundsOut_revertsWhenSettlementDataChangesAfterBurnIdDerivation() public {
+        vm.prank(user);
+        bytes32 opId1 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
+        vm.prank(user);
+        bytes32 opId2 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
+
+        bytes memory proof = _proof();
+        bytes memory signedSettlementData = _settlement(_ids(opId1));
+        bytes memory changedSettlementData = _settlement(_ids(opId2));
+        uint256 signedBurnId = _deriveBurnId(
+            recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, signedSettlementData
+        );
+        uint256 expectedBurnId = _deriveBurnId(
+            recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, changedSettlementData
+        );
+
+        vm.expectRevert(abi.encodeWithSelector(
+            IBridge.InvalidBurnId.selector, signedBurnId, expectedBurnId
+        ));
+        vm.prank(multisig);
+        _fundsOutWithBurnId(
+            recipient,
+            AMOUNT,
+            signedBurnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            proof,
+            changedSettlementData
+        );
+
+        assertFalse(bridge.consumedBurnIds(signedBurnId), 'signed burn id unchanged');
+        assertEq(rgbModule.fundsInRecords(opId1), AMOUNT, 'first record unchanged');
+        assertEq(rgbModule.fundsInRecords(opId2), AMOUNT, 'second record unchanged');
     }
 
     function test_fundsOut_revertsOnDoubleSpendsConsumedFundsIn() public {
@@ -1035,6 +1197,10 @@ contract BridgeTest is Test {
         // does). The settlement module no longer consumes records (the mint
         // proof is permanent and would still pass), so the liquidity guard is
         // now the sole backstop against re-releasing a spent deposit.
+        bytes32 altLatestCommit = keccak256('test-btc-alt-latest-commitment');
+        btcRelay.setBlock(LATEST_HEIGHT + 1, altLatestCommit, LATEST_CONFIRMATIONS);
+        bytes memory altProof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT + 1, altLatestCommit);
+
         vm.expectRevert(abi.encodeWithSelector(
             IBridge.InsufficientChainLiquidity.selector, RGB_CHAIN_ID, AMOUNT, uint256(0)
         ));
@@ -1042,7 +1208,7 @@ contract BridgeTest is Test {
         _fundsOut(
             recipient, AMOUNT, BURN_ID + 1,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
-            _proof(), _settlement(_ids(opId))
+            altProof, _settlement(_ids(opId))
         );
     }
 
@@ -1261,8 +1427,18 @@ contract BridgeTest is Test {
         vm.warp(block.timestamp + 1); // one second later
 
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), rate, 'only refillRate accrued, not a fresh cap');
+        bytes32 altLatestCommit = keccak256('test-btc-short-gap-latest-commitment');
+        btcRelay.setBlock(LATEST_HEIGHT + 1, altLatestCommit, LATEST_CONFIRMATIONS);
+        bytes memory altProof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT + 1, altLatestCommit);
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = _seedOpId;
+
         vm.expectPartialRevert(OutflowRateLimiter.TokenOutflowThrottled.selector);
-        _releaseRGB(cap, BURN_ID + 1);
+        vm.prank(multisig);
+        _fundsOut(
+            recipient, cap, BURN_ID + 1, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            altProof, _settlementWithAmounts(ids, _one(_seedAmt))
+        );
     }
 
     function test_outflow_perChainIsolation() public {
@@ -1833,7 +2009,13 @@ contract BridgeTest is Test {
         assertEq(cmPoolBefore,     0,      'pre cm pool');
         assertEq(nativePoolBefore, 0,      'pre native pool');
         assertEq(recordBefore,     AMOUNT, 'pre record');
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlement(ids);
+        uint256 burnId = _deriveBurnId(
+            recipient, releaseAmount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData
+        );
+        assertFalse(bridge.consumedBurnIds(burnId), 'pre burn id');
 
         vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
@@ -1841,7 +2023,7 @@ contract BridgeTest is Test {
             releaseAmount,
             netAmount,
             tokenCommission,
-            BURN_ID,
+            burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR
@@ -1855,15 +2037,15 @@ contract BridgeTest is Test {
         _fundsOut(
             recipient,
             releaseAmount,
-            BURN_ID,
+            burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR,
-            _proof(),
-            _settlement(ids)
+            proof,
+            settlementData
         );
 
-        assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
+        assertTrue(bridge.consumedBurnIds(burnId), 'burn id consumed');
         assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore - releaseAmount, 'bridge gross debit');
         assertEq(usdt0.balanceOf(recipient),       recipientBefore + netAmount,  'recipient net delta');
         assertEq(usdt0.balanceOf(address(cm)),     cmBefore + tokenCommission,   'cm fee delta');
@@ -1995,8 +2177,12 @@ contract BridgeTest is Test {
         uint256 cmPoolBefore     = cm.tokenCommissionPool(address(usdt0));
         uint256 nativePoolBefore = cm.nativeCommissionPool();
         uint256 recordBefore     = rgbModule.fundsInRecords(opId);
+        bytes memory settlementData = _settlement(_ids(opId));
+        uint256 burnId = _deriveBurnId(
+            recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, badProof, settlementData
+        );
 
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+        assertFalse(bridge.consumedBurnIds(burnId), 'pre burn id');
         assertEq(bridgeBefore, AMOUNT, 'pre bridge pool');
         assertEq(recipientBefore, 0, 'pre recipient token');
         assertEq(cmBefore, 0, 'pre cm token');
@@ -2012,15 +2198,15 @@ contract BridgeTest is Test {
         _fundsOut(
             recipient,
             AMOUNT,
-            BURN_ID,
+            burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR,
             badProof,
-            _settlement(_ids(opId))
+            settlementData
         );
 
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'burn id unchanged');
+        assertFalse(bridge.consumedBurnIds(burnId), 'burn id unchanged');
         assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, 'bridge token unchanged');
         assertEq(usdt0.balanceOf(recipient),       recipientBefore, 'recipient token unchanged');
         assertEq(usdt0.balanceOf(address(cm)),     cmBefore, 'cm token unchanged');
@@ -2052,8 +2238,13 @@ contract BridgeTest is Test {
         uint256 nativePoolBefore = cm.nativeCommissionPool();
         uint256 record1Before    = rgbModule.fundsInRecords(opId1);
         uint256 record2Before    = rgbModule.fundsInRecords(opId2);
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlementWithAmounts(ids, badAmounts);
+        uint256 burnId = _deriveBurnId(
+            recipient, releaseAmount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData
+        );
 
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+        assertFalse(bridge.consumedBurnIds(burnId), 'pre burn id');
         assertEq(bridgeBefore, amount1 + amount2, 'pre bridge pool');
         assertEq(recipientBefore, 0, 'pre recipient token');
         assertEq(cmBefore, 0, 'pre cm token');
@@ -2072,15 +2263,15 @@ contract BridgeTest is Test {
         _fundsOut(
             recipient,
             releaseAmount,
-            BURN_ID,
+            burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR,
-            _proof(),
-            _settlementWithAmounts(ids, badAmounts)
+            proof,
+            settlementData
         );
 
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'burn id unchanged');
+        assertFalse(bridge.consumedBurnIds(burnId), 'burn id unchanged');
         assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, 'bridge token unchanged');
         assertEq(usdt0.balanceOf(recipient),       recipientBefore, 'recipient token unchanged');
         assertEq(usdt0.balanceOf(address(cm)),     cmBefore, 'cm token unchanged');
@@ -2093,15 +2284,15 @@ contract BridgeTest is Test {
     // Current behavior reproduction
     // ========================================================================
 
-    function test_fundsOutAcceptsProofNotBoundToReleaseContext_currentBehavior() public {
+    function test_fundsOutVerifierProofStillNotRouteContextAware_currentBehavior() public {
         address alternateRecipient = makeAddr('alternateRecipient');
         uint256 releaseAmount = 37e18;
-        uint256 alternateBurnId = BURN_ID + 777;
         // R-C-01 (isolated liquidity + outflow limit) gates the `sourceChainId`
         // dimension: a release can only draw from a funded + rate-limited source
-        // chain. So this reproduction keeps the source on the funded RGB chain
-        // and shows the *remaining* unbound dimensions — recipient, amount,
-        // burnId and destinationChainId are still not bound to the verifier proof.
+        // chain. So this reproduction keeps the source on the funded RGB chain.
+        // R-M-01 now binds the release intent and exact proof into burnId, but
+        // RGBVerifier itself still validates only BTC block commitments; it does
+        // not parse route/business context from the proof.
         uint256 alternateSourceChainId = RGB_CHAIN_ID;
         uint256 alternateDestinationChainId = SOURCE_CHAIN_ID + 77;
         string memory alternateSourceAddress = 'rgb:unbound/source/utxo999';
@@ -2125,21 +2316,30 @@ contract BridgeTest is Test {
         assertEq(bridgeBefore, AMOUNT, 'pre bridge pool');
         assertEq(recipientBefore, 0, 'pre recipient token');
         assertEq(recordBefore, AMOUNT, 'pre record');
-        assertFalse(bridge.consumedBurnIds(alternateBurnId), 'pre burn id');
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlement(_ids(opId));
+        uint256 burnId = _deriveBurnId(
+            alternateRecipient,
+            releaseAmount,
+            alternateSourceChainId,
+            alternateDestinationChainId,
+            alternateSourceAddress,
+            proof,
+            settlementData
+        );
+        assertFalse(bridge.consumedBurnIds(burnId), 'pre burn id');
 
-        // Current behavior: this is still an authorized fundsOut call, but the
-        // RGBVerifier checks only the encoded BTC block commitment proof. The
-        // record was created on the default route and the release is accepted on
-        // this alternate enabled route because the proof is not bound to release
-        // context on-chain. If that binding is enforced later, invert this to
-        // expect a revert.
+        // Current verifier behavior: this is an authorized fundsOut call with a
+        // matching Bridge-derived burnId, but RGBVerifier checks only the encoded
+        // BTC block commitments. If the RGB proof later carries enough context
+        // for verifier-level binding, invert this to expect a verifier revert.
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
             alternateRecipient,
             releaseAmount,
             releaseAmount,
             0,
-            alternateBurnId,
+            burnId,
             alternateSourceChainId,
             alternateDestinationChainId,
             alternateSourceAddress
@@ -2149,15 +2349,15 @@ contract BridgeTest is Test {
         _fundsOut(
             alternateRecipient,
             releaseAmount,
-            alternateBurnId,
+            burnId,
             alternateSourceChainId,
             alternateDestinationChainId,
             alternateSourceAddress,
-            _proof(),
-            _settlement(_ids(opId))
+            proof,
+            settlementData
         );
 
-        assertTrue(bridge.consumedBurnIds(alternateBurnId), 'burn id consumed');
+        assertTrue(bridge.consumedBurnIds(burnId), 'burn id consumed');
         assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore - releaseAmount, 'bridge debit');
         assertEq(usdt0.balanceOf(alternateRecipient), recipientBefore + releaseAmount, 'recipient credited');
         assertEq(rgbModule.fundsInRecords(opId), recordBefore, 'record unchanged (proof-of-mint permanent)');

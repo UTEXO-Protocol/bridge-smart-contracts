@@ -166,6 +166,9 @@ contract MultisigProxyTest is Test {
     uint256 constant TX_ID   = 42;
     uint256 constant RGB_OP_ID = 0xABCDEF;
     uint256 constant BURN_ID = 9_001;
+    bytes32 constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
+        'UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)'
+    );
     uint256 constant LZ_NATIVE_FEE = 0.01 ether;
     uint32  constant DST_EID = 30110;
     bytes32 constant LZ_RECIPIENT = bytes32(uint256(uint160(0xBEEF)));
@@ -315,6 +318,30 @@ contract MultisigProxyTest is Test {
         return abi.encode(ids, amounts);
     }
 
+    function _deriveBurnId(
+        address bridgeRecipient,
+        uint256 amount,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string memory sourceAddress,
+        bytes memory proof,
+        bytes memory settlementData
+    ) internal view returns (uint256) {
+        return uint256(keccak256(abi.encode(
+            FUNDS_OUT_BURN_ID_TYPEHASH,
+            address(bridge),
+            block.chainid,
+            address(token),
+            bridgeRecipient,
+            amount,
+            sourceChainId,
+            destinationChainId,
+            keccak256(bytes(sourceAddress)),
+            keccak256(proof),
+            keccak256(settlementData)
+        )));
+    }
+
     /// @dev Valid strict-majority signer sets (2-of-2) used as filler in
     ///      constructor-revert tests that target a non-threshold revert.
     function _validEnc() internal view returns (address[] memory a) {
@@ -329,44 +356,56 @@ contract MultisigProxyTest is Test {
         a[1] = fedA2;
     }
 
-    /// @dev Standard single-release params (recipient = `recipient`, AMOUNT, BURN_ID).
+    /// @dev Standard single-release params (recipient = `recipient`, AMOUNT, canonical burnId).
     function _fundsOutParams() internal view returns (IBridge.FundsOutParams memory) {
         return _fundsOutParams(recipient, AMOUNT, BURN_ID);
     }
 
-    function _fundsOutParams(address payoutRecipient, uint256 amount, uint256 burnId)
+    function _fundsOutParams(address payoutRecipient, uint256 amount, uint256 /* burnId */)
         internal
         view
         returns (IBridge.FundsOutParams memory)
     {
+        bytes memory proof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
+        bytes memory settlementData = _settlement(_fundsInIds());
+        uint256 derivedBurnId = _deriveBurnId(
+            payoutRecipient, amount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData
+        );
+
         return IBridge.FundsOutParams({
             recipient:          payoutRecipient,
             amount:             amount,
-            burnId:             burnId,
+            burnId:             derivedBurnId,
             sourceChainId:      RGB_CHAIN_ID,
             destinationChainId: SOURCE_CHAIN_ID,
             sourceAddress:      SRC_ADDR,
-            proof:              abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT),
-            settlementData:     _settlement(_fundsInIds())
+            proof:              proof,
+            settlementData:     settlementData
         });
     }
 
     /// @dev Flow-4 LZ release params. The Bridge recipient is forced to the
     ///      adapter on-chain, so it is not part of these params; `recipient`
     ///      here is the bytes32 destination on the far chain.
-    function _lzFundsOutParams(uint256 amount, uint256 burnId, bytes32[] memory ids)
+    function _lzFundsOutParams(uint256 amount, uint256 /* burnId */, bytes32[] memory ids)
         internal
         view
         returns (IMultisigProxy.LzFundsOutParams memory)
     {
+        bytes memory proof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
+        bytes memory settlementData = _settlement(ids);
+        uint256 derivedBurnId = _deriveBurnId(
+            proxy.lzAdapter(), amount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData
+        );
+
         return IMultisigProxy.LzFundsOutParams({
             amount:             amount,
-            burnId:             burnId,
+            burnId:             derivedBurnId,
             sourceChainId:      RGB_CHAIN_ID,
             destinationChainId: SOURCE_CHAIN_ID,
             sourceAddress:      SRC_ADDR,
-            proof:              abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT),
-            settlementData:     _settlement(ids),
+            proof:              proof,
+            settlementData:     settlementData,
             dstEid:             DST_EID,
             recipient:          LZ_RECIPIENT,
             minAmountLD:        0,
@@ -1975,7 +2014,7 @@ contract MultisigProxyTest is Test {
         assertEq(cmPoolBefore,     0,          'pre cm pool');
         assertEq(nativePoolBefore, 0,          'pre native pool');
         assertEq(recordBefore,     AMOUNT * 5, 'pre record');
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+        assertFalse(bridge.consumedBurnIds(params.burnId), 'pre burn id');
 
         vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
@@ -1983,7 +2022,7 @@ contract MultisigProxyTest is Test {
             AMOUNT,
             netAmount,
             tokenCommission,
-            BURN_ID,
+            params.burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR
@@ -1994,7 +2033,7 @@ contract MultisigProxyTest is Test {
         proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
 
         assertEq(proxy.teeNonce(), nonce + 1, 'nonce incremented');
-        assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
+        assertTrue(bridge.consumedBurnIds(params.burnId), 'burn id consumed');
         assertEq(token.balanceOf(address(bridge)), bridgeBefore - AMOUNT,        'bridge gross debit');
         assertEq(token.balanceOf(recipient),       recipientBefore + netAmount, 'recipient net delta');
         assertEq(token.balanceOf(address(cm)),     cmBefore + tokenCommission,  'cm fee delta');
@@ -2068,7 +2107,7 @@ contract MultisigProxyTest is Test {
         assertEq(recordBefore,   AMOUNT * 5, 'pre record');
         assertEq(adapterEthBefore, 0,        'pre adapter native');
         assertEq(oftEthBefore,     0,        'pre oft native');
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+        assertFalse(bridge.consumedBurnIds(params.burnId), 'pre burn id');
 
         bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
 
@@ -2078,7 +2117,7 @@ contract MultisigProxyTest is Test {
             AMOUNT,
             netAmount,
             tokenCommission,
-            BURN_ID,
+            params.burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR
@@ -2092,7 +2131,7 @@ contract MultisigProxyTest is Test {
         proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
 
         assertEq(proxy.teeNonce(), nonce + 1, 'tee nonce incremented');
-        assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
+        assertTrue(bridge.consumedBurnIds(params.burnId), 'burn id consumed');
         assertEq(token.balanceOf(address(bridge)),  bridgeBefore - AMOUNT,          'bridge gross debit');
         assertEq(token.balanceOf(address(cm)),      cmBefore + tokenCommission,     'cm fee delta');
         assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore + tokenCommission, 'cm pool delta');
@@ -2163,7 +2202,7 @@ contract MultisigProxyTest is Test {
         assertEq(cmPoolBefore,     0,          'pre cm pool');
         assertEq(nativePoolBefore, 0,          'pre native pool');
         assertEq(recordBefore,     AMOUNT * 5, 'pre record');
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+        assertFalse(bridge.consumedBurnIds(params.burnId), 'pre burn id');
 
         // An underfunded native fee reverts in sendOut, after Bridge.fundsOut
         // already ran inside the same lzFundsOutCall transaction.
@@ -2172,7 +2211,7 @@ contract MultisigProxyTest is Test {
         proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE - 1 }(params, nonce, deadline, bitmap, sigs);
 
         assertEq(proxy.teeNonce(),                nonce,            'tee nonce unchanged');
-        assertFalse(bridge.consumedBurnIds(BURN_ID),                'burn id unchanged');
+        assertFalse(bridge.consumedBurnIds(params.burnId),          'burn id unchanged');
         assertEq(token.balanceOf(address(bridge)), bridgeBefore,    'bridge token unchanged');
         assertEq(token.balanceOf(address(adapter)), adapterBefore,  'adapter token unchanged');
         assertEq(token.balanceOf(mockOft),          oftBefore,      'oft token unchanged');
@@ -2203,7 +2242,7 @@ contract MultisigProxyTest is Test {
             })
         );
 
-        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+        (uint256 tokenCommission, uint256 nativeCommission,) =
             cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
         assertGt(tokenCommission, 0, 'token fee quoted');
         assertEq(nativeCommission, 0, 'native fee is zero');
@@ -2217,6 +2256,15 @@ contract MultisigProxyTest is Test {
         // Well-formed two-pair proof whose source block is unknown to the relay,
         // so Bridge.fundsOut reverts before the adapter send can run.
         params.proof = abi.encode(uint256(999_999), keccak256('unknown-block'), LATEST_HEIGHT, LATEST_COMMIT);
+        params.burnId = _deriveBurnId(
+            address(adapter),
+            params.amount,
+            params.sourceChainId,
+            params.destinationChainId,
+            params.sourceAddress,
+            params.proof,
+            params.settlementData
+        );
 
         uint256 deadline = block.timestamp + 1 hours;
         (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
@@ -2241,14 +2289,14 @@ contract MultisigProxyTest is Test {
         assertEq(nativePoolBefore, 0,          'pre native pool');
         assertEq(recordBefore,     AMOUNT * 5, 'pre record');
         assertEq(adapter.sendOutCalls(), 0,    'pre adapter calls');
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+        assertFalse(bridge.consumedBurnIds(params.burnId), 'pre burn id');
 
         vm.deal(address(this), LZ_NATIVE_FEE);
         vm.expectRevert(bytes('verify: block commitment'));
         proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
 
         assertEq(proxy.teeNonce(),                nonce,            'tee nonce unchanged');
-        assertFalse(bridge.consumedBurnIds(BURN_ID),                'burn id unchanged');
+        assertFalse(bridge.consumedBurnIds(params.burnId),          'burn id unchanged');
         assertEq(adapter.sendOutCalls(),           0,               'adapter not called');
         assertEq(token.balanceOf(address(bridge)), bridgeBefore,    'bridge token unchanged');
         assertEq(token.balanceOf(address(adapter)), adapterBefore,  'adapter token unchanged');
@@ -2322,7 +2370,7 @@ contract MultisigProxyTest is Test {
         assertEq(nativePoolBefore, 0,          'pre native pool');
         assertEq(recordBefore,     AMOUNT * 5, 'pre record');
         assertEq(adapter.sendOutCalls(), 0,    'pre adapter calls');
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
+        assertFalse(bridge.consumedBurnIds(params.burnId), 'pre burn id');
 
         bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
 
@@ -2332,7 +2380,7 @@ contract MultisigProxyTest is Test {
             AMOUNT,
             netAmount,
             tokenCommission,
-            BURN_ID,
+            params.burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR
@@ -2346,7 +2394,7 @@ contract MultisigProxyTest is Test {
         proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
 
         assertEq(proxy.teeNonce(),                nonce + 1,        'tee nonce incremented');
-        assertTrue(bridge.consumedBurnIds(BURN_ID),                  'burn id consumed');
+        assertTrue(bridge.consumedBurnIds(params.burnId),            'burn id consumed');
         assertEq(adapter.sendOutCalls(),           1,               'adapter called once');
         assertEq(token.balanceOf(address(bridge)), bridgeBefore - AMOUNT, 'bridge token debit');
         assertEq(token.balanceOf(address(adapter)), adapterBefore,  'adapter no residue');
@@ -2363,8 +2411,6 @@ contract MultisigProxyTest is Test {
     // Flow-4 success coverage for duplicate RGB settlement ids: the reworked
     // module verifies each (id, amount) pair by pure read, so duplicates pass.
     function test_lzFundsOutCall_duplicateSettlementIdsFullConsume_succeedsAndIgnoresDuplicate() public {
-        uint256 burnId = BURN_ID + 1;
-
         vm.prank(user);
         bytes32 secondOpId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
 
@@ -2397,7 +2443,7 @@ contract MultisigProxyTest is Test {
         duplicateIds[0] = secondOpId;
         duplicateIds[1] = secondOpId;
 
-        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, burnId, duplicateIds);
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID + 1, duplicateIds);
 
         uint256 deadline = block.timestamp + 1 hours;
         (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
@@ -2423,7 +2469,7 @@ contract MultisigProxyTest is Test {
         assertEq(originalRecordBefore,    AMOUNT * 5, 'pre original record');
         assertEq(duplicateRecordBefore,   AMOUNT,     'pre duplicate record');
         assertEq(adapter.sendOutCalls(),  0,          'pre adapter calls');
-        assertFalse(bridge.consumedBurnIds(burnId), 'pre burn id');
+        assertFalse(bridge.consumedBurnIds(params.burnId), 'pre burn id');
 
         bytes32 sendOutGuid = keccak256(abi.encode('mock-send-out', DST_EID, LZ_RECIPIENT, netAmount));
 
@@ -2433,7 +2479,7 @@ contract MultisigProxyTest is Test {
             AMOUNT,
             netAmount,
             tokenCommission,
-            burnId,
+            params.burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR
@@ -2447,7 +2493,7 @@ contract MultisigProxyTest is Test {
         proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
 
         assertEq(proxy.teeNonce(),                nonce + 1,        'tee nonce incremented');
-        assertTrue(bridge.consumedBurnIds(burnId),                  'burn id consumed');
+        assertTrue(bridge.consumedBurnIds(params.burnId),            'burn id consumed');
         assertEq(adapter.sendOutCalls(),           1,               'adapter called once');
         assertEq(token.balanceOf(address(bridge)), bridgeBefore - AMOUNT, 'bridge token debit');
         assertEq(token.balanceOf(address(adapter)), adapterBefore,  'adapter no residue');
@@ -2541,7 +2587,7 @@ contract MultisigProxyTest is Test {
             AMOUNT,
             netAmount,
             tokenCommission,
-            BURN_ID,
+            params.burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR
@@ -2577,11 +2623,10 @@ contract MultisigProxyTest is Test {
         assertEq(bridgeBefore,    AMOUNT * 5, 'pre bridge pool');
         assertEq(recipientBefore, 0,          'pre recipient token');
         assertEq(recordBefore,    bridgeBefore, 'pre record backs full pool');
-        assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
-
         // Current behavior: if an on-chain amount cap or rate limit is added
         // later, this test should be inverted to expect a revert.
         IBridge.FundsOutParams memory params = _fundsOutParams(drainRecipient, bridgeBefore, BURN_ID);
+        assertFalse(bridge.consumedBurnIds(params.burnId), 'pre burn id');
         uint256 nonce = proxy.teeNonce();
         uint256 deadline = block.timestamp + 1 hours;
         bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
@@ -2594,7 +2639,7 @@ contract MultisigProxyTest is Test {
             bridgeBefore,
             bridgeBefore,
             0,
-            BURN_ID,
+            params.burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR
@@ -2605,7 +2650,7 @@ contract MultisigProxyTest is Test {
         proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
 
         assertEq(proxy.teeNonce(), nonce + 1, 'nonce incremented');
-        assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
+        assertTrue(bridge.consumedBurnIds(params.burnId), 'burn id consumed');
         assertEq(token.balanceOf(address(bridge)), 0, 'bridge pool drained');
         assertEq(token.balanceOf(drainRecipient), recipientBefore + bridgeBefore, 'recipient got full pool');
         assertEq(rgbModule.fundsInRecords(seedOpId), recordBefore, 'record unchanged (proof-of-mint permanent)');
