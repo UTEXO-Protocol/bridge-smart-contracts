@@ -2884,72 +2884,48 @@ contract MultisigProxyTest is Test {
     // The typed commission-withdraw path pins the recipient to
     // commissionRecipient, while generic CM admin execution forwards arbitrary
     // calldata and lets the encoded withdrawal recipient win.
-    function test_adminExecuteCommissionManagerBypassesRecipientPin_currentBehavior() public {
-        address arbitraryRecipient = makeAddr('arbitraryCommissionRecipient');
+    // R-W-15 after-fix: the generic AdminExecuteCommissionManager path can no
+    // longer reach a commission-withdrawal selector, so it cannot re-point
+    // commission away from the pinned `commissionRecipient`. The guard fires at
+    // propose time (before signature verification), so no valid federation
+    // signatures are needed to observe it.
+    function test_adminExecuteCommissionManager_rejectsWithdrawSelectors_afterFix() public {
+        bytes[] memory callDatas = new bytes[](4);
+        callDatas[0] = abi.encodeWithSignature(
+            'withdrawTokenCommission(address,address,uint256)', address(token), user, uint256(1));
+        callDatas[1] = abi.encodeWithSignature(
+            'withdrawNativeCommission(address,uint256)', user, uint256(1));
+        callDatas[2] = abi.encodeWithSignature(
+            'withdrawAllTokenCommission(address,address)', address(token), user);
+        callDatas[3] = abi.encodeWithSignature(
+            'withdrawAllNativeCommission(address)', user);
 
-        vm.prank(address(proxy));
-        cm.setCommissionRule(
-            SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token),
-            CommissionConfig({
-                stablePercent: 400, // 4%
-                multiplier: 100,
-                side: CommissionSide.FUNDS_IN,
-                currency: CommissionCurrency.TOKEN,
-                isSet: true
-            })
-        );
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes[] memory noSigs = new bytes[](0); // guard reverts before sig checks
 
-        uint256 depositAmount = 100e18;
-        vm.prank(user);
-        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
+        for (uint256 i = 0; i < callDatas.length; i++) {
+            vm.expectRevert(abi.encodeWithSelector(
+                IMultisigProxy.ForbiddenCommissionManagerSelector.selector, bytes4(callDatas[i])
+            ));
+            proxy.proposeAdminExecuteCommissionManager(callDatas[i], nonce, deadline, 0, noSigs);
+        }
+    }
 
-        uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
-        uint256 poolBefore = cm.tokenCommissionPool(address(token));
-        uint256 pinnedRecipientBefore = token.balanceOf(commissionReceiver);
-        uint256 arbitraryRecipientBefore = token.balanceOf(arbitraryRecipient);
-
-        assertEq(poolBefore, expectedCommission, 'pre cm pool');
-        assertEq(pinnedRecipientBefore, 0, 'pre pinned recipient');
-        assertEq(arbitraryRecipientBefore, 0, 'pre arbitrary recipient');
-
+    // The generic path stays open for non-withdrawal CommissionManager setters.
+    function test_adminExecuteCommissionManager_allowsNonWithdrawSelector() public {
         bytes memory callData = abi.encodeWithSignature(
-            'withdrawTokenCommission(address,address,uint256)',
-            address(token),
-            arbitraryRecipient,
-            expectedCommission
+            'setGlobalDefaults(uint256,uint8,uint8,uint8)', uint256(0), uint8(100), uint8(0), uint8(0)
         );
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
         bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(
-            domainSep,
-            bytes4(callData),
-            callData,
-            nonce,
-            deadline
+            domainSep, bytes4(callData), callData, nonce, deadline
         );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         bytes32 id = proxy.proposeAdminExecuteCommissionManager(callData, nonce, deadline, bitmap, sigs);
-
-        vm.warp(block.timestamp + TIMELOCK + 1);
-
-        // Current behavior: generic CM admin execution emits only the
-        // CommissionManager withdrawal event and sends funds to the calldata
-        // recipient, not to the proxy's pinned commissionRecipient.
-        vm.expectEmit(true, true, false, true, address(cm));
-        emit TokenCommissionWithdrawn(address(token), arbitraryRecipient, expectedCommission);
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit ProposalExecuted(id, IMultisigProxy.OperationType.AdminExecuteCommissionManager);
-
-        proxy.executeProposal(id, callData);
-
-        assertEq(cm.tokenCommissionPool(address(token)), 0, 'cm pool drained');
-        assertEq(token.balanceOf(commissionReceiver), pinnedRecipientBefore, 'pinned recipient unchanged');
-        assertEq(
-            token.balanceOf(arbitraryRecipient),
-            arbitraryRecipientBefore + expectedCommission,
-            'arbitrary recipient credited'
-        );
+        assertTrue(id != bytes32(0), 'non-withdrawal CM selector accepted on the generic path');
     }
 }
