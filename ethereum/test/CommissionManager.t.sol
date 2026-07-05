@@ -146,16 +146,17 @@ contract CommissionManagerTest is Test {
         cm.convertTokenFeeToNative(1, 19);
     }
 
-    // Current behavior: native quote validation only requires a fresh positive
-    // Chainlink answer. There is no sequencer uptime feed or min/max bound, so
-    // a fresh outlier price is still used for conversion.
-    function test_nativeQuoteDoesNotCheckSequencerUptime_currentBehavior() public {
-        ethUsdFeed.setAnswer(1);
+    // With the min/max band UNSET (the default), a fresh positive answer is
+    // accepted no matter how extreme — which is exactly why an Arbitrum
+    // deployment configures `setEthUsdPriceBounds`. Band-enabled rejection is
+    // covered by test_convertTokenFeeToNative_revertsWhenPriceBelowMin/AboveMax.
+    function test_convertTokenFeeToNative_allowsOutlierWhenBandUnset() public {
+        ethUsdFeed.setAnswer(1); // $1e-8 — an extreme outlier
         ethUsdFeed.setUpdatedAt(block.timestamp);
 
         uint256 nativeFee = cm.convertTokenFeeToNative(1e18, 18);
 
-        assertEq(nativeFee, 1e26, 'fresh positive outlier accepted');
+        assertEq(nativeFee, 1e26, 'fresh outlier accepted while band is unset');
     }
 
     function test_buildRouteKey_matchesEncodeHash() public view {

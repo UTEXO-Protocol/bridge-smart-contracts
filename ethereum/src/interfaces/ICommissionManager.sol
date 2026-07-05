@@ -130,6 +130,14 @@ interface ICommissionManager {
 
     function ethUsdHeartbeat() external view returns (uint256);
 
+    function sequencerUptimeFeed() external view returns (address);
+
+    function SEQUENCER_GRACE_PERIOD() external view returns (uint256);
+
+    function ethUsdMinPrice() external view returns (uint256);
+
+    function ethUsdMaxPrice() external view returns (uint256);
+
     // ============ Core calculations ============
 
     function calculateFundsInCommission(
