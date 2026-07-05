@@ -20,6 +20,7 @@ import {
 } from '../src/interfaces/ICommissionManager.sol';
 
 import { MockERC20 }        from './mocks/MockERC20.sol';
+import { FeeOnTransferERC20 } from './mocks/FeeOnTransferERC20.sol';
 import { MockBtcRelay }     from './mocks/MockBtcRelay.sol';
 import { MockAggregatorV3 } from './mocks/MockAggregatorV3.sol';
 import { MockSettlementModule } from './mocks/MockSettlementModule.sol';
@@ -2917,5 +2918,257 @@ contract BridgeTest is Test {
         );
 
         assertEq(usdt0.balanceOf(recipient), AMOUNT, 'release via derived id succeeds');
+    }
+
+    // ========================================================================
+    // fee-on-transfer safe ingress accounting
+    //
+    // `_fundsIn` credits the ledger from the ACTUAL amount received
+    // (balanceAfter - balanceBefore), not the nominal `amount`. For a
+    // fee-on-transfer token the bridge receives less than `amount`, so the
+    // record / lockedLiquidity / events must reflect `received - tokenCommission`
+    // and never the nominal figure (which would overstate the ledger and later
+    // brick the release with AmountExceedBridgePool).
+    //
+    // These tests build a full parallel stack whose Bridge TOKEN is a
+    // FeeOnTransferERC20, mirroring setUp() exactly (same predicted-bridge nonce
+    // math, CM, RouteRegistry, verifier reuse of `btcRelay`, module, both routes,
+    // feed, outflow limits, ownership transfer+accept, user funding).
+    // ========================================================================
+
+    struct FeeStack {
+        Bridge              bridge;
+        FeeOnTransferERC20  token;
+        RgbSettlementModule module;
+        CommissionManager   cm;
+    }
+
+    /// @dev Deploy a full parallel bridge stack backed by a fee-on-transfer
+    ///      token. Mirrors setUp() one-for-one. The RGB verifier / `btcRelay` /
+    ///      `_proof()` are shared (the source-block relay data is identical).
+    function _deployFeeStack(uint256 feeBps) internal returns (FeeStack memory s) {
+        s.token = new FeeOnTransferERC20('Fee USDT0', 'fUSDT0', feeBps);
+
+        vm.startPrank(deployer);
+        uint64  currentNonce    = vm.getNonce(deployer);
+        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
+
+        s.cm = new CommissionManager(predictedBridge);
+        RouteRegistry feeRouteRegistry = new RouteRegistry(predictedBridge, deployer);
+        s.bridge = new Bridge(
+            address(s.token),
+            address(feeRouteRegistry),
+            payable(address(s.cm)),
+            address(0),
+            1
+        );
+
+        // Reuse the suite's RGB verifier (shares `btcRelay` + `_proof()`); a
+        // fresh module is bound to this stack's route registry.
+        s.module = new RgbSettlementModule(address(feeRouteRegistry));
+
+        feeRouteRegistry.setRoute(
+            SOURCE_CHAIN_ID, RGB_CHAIN_ID,
+            true, address(rgbVerifier), address(s.module)
+        );
+        feeRouteRegistry.setRoute(
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID,
+            true, address(rgbVerifier), address(s.module)
+        );
+
+        s.cm.setEthUsdFeed(address(ethUsdFeed), 1 hours);
+
+        s.bridge.setOutflowLimit(RGB_CHAIN_ID, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+        s.bridge.setGlobalOutflowLimit(1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+
+        s.bridge.transferOwnership(multisig);
+        vm.stopPrank();
+
+        vm.prank(multisig);
+        s.bridge.acceptOwnership();
+
+        // Fund `user` generously and approve the fee bridge. `mint` is untaxed,
+        // so `user` holds exactly the minted amount.
+        s.token.mint(user, AMOUNT * 10);
+        vm.prank(user);
+        s.token.approve(address(s.bridge), type(uint256).max);
+    }
+
+    /// @dev Set a FUNDS_IN TOKEN commission rule on a fee stack's CM for the
+    ///      (SOURCE_CHAIN_ID → RGB_CHAIN_ID) route.
+    function _setFeeStackFundsInTokenRule(
+        FeeStack memory s,
+        uint256 stablePercent,
+        uint8   multiplier
+    ) internal {
+        vm.prank(deployer);
+        s.cm.setCommissionRule(
+            SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(s.token),
+            CommissionConfig({
+                stablePercent: stablePercent,
+                multiplier: multiplier,
+                side: CommissionSide.FUNDS_IN,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+    }
+
+    /// @dev Burn-id derivation bound to a fee stack's Bridge + token (the shared
+    ///      `_deriveBurnId` binds the setUp `bridge`/`usdt0`).
+    function _deriveBurnIdFor(
+        FeeStack memory s,
+        address recipient_,
+        uint256 amount,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string memory sourceAddress,
+        bytes memory proof,
+        bytes memory settlementData
+    ) internal view returns (uint256) {
+        return uint256(keccak256(abi.encode(
+            FUNDS_OUT_BURN_ID_TYPEHASH,
+            address(s.bridge),
+            block.chainid,
+            address(s.token),
+            recipient_,
+            amount,
+            sourceChainId,
+            destinationChainId,
+            keccak256(bytes(sourceAddress)),
+            keccak256(proof),
+            keccak256(settlementData)
+        )));
+    }
+
+    // --- Record/ledger/event use ACTUAL received, not nominal ---
+
+    function test_fundsIn_feeToken_creditsActualReceivedNotNominal() public {
+        FeeStack memory s = _deployFeeStack(100); // 1% fee, no commission rule
+
+        uint256 received = AMOUNT - s.token.feeOn(AMOUNT);
+        assertLt(received, AMOUNT, 'sanity: fee token delivers less than nominal');
+
+        bytes32 sourceSender = bytes32(uint256(uint160(user)));
+
+        // BridgeFundsIn must carry gross `amount == AMOUNT` and `netAmount == received`.
+        vm.expectEmit(true, true, false, true);
+        emit FundsIn(user, RGB_OP_ID, received);
+        vm.expectEmit(false, true, true, true);
+        emit BridgeFundsIn(
+            bytes32(0), sourceSender, user, 0, AMOUNT, received, 0, 0, SOURCE_CHAIN_ID, RGB_CHAIN_ID, DST_ADDR
+        );
+
+        vm.prank(user);
+        bytes32 opId = s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        assertEq(s.module.fundsInRecords(opId), received, 'record credits actual received');
+        assertEq(s.bridge.lockedLiquidity(RGB_CHAIN_ID), received, 'lockedLiquidity credits actual received');
+        assertEq(s.token.balanceOf(address(s.bridge)), received, 'bridge token balance == received');
+    }
+
+    // --- With a TOKEN commission the ledger is not overstated ---
+
+    function test_fundsIn_feeToken_ledgerNotOverstatedWithCommission() public {
+        FeeStack memory s = _deployFeeStack(100); // 1% transfer fee
+        // 4% FUNDS_IN TOKEN commission rule (stablePercent 400, multiplier 100).
+        _setFeeStackFundsInTokenRule(s, 400, 100);
+
+        uint256 received        = AMOUNT - s.token.feeOn(AMOUNT);
+        // Commission is quoted from the NOMINAL amount.
+        uint256 tokenCommission = s.cm.calculateStableFee(AMOUNT, 400, 100);
+        assertGt(tokenCommission, 0, 'sanity: non-zero commission');
+
+        vm.prank(user);
+        s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        // Ledger credited from actual received minus the (nominal-quoted) commission.
+        assertEq(
+            s.bridge.lockedLiquidity(RGB_CHAIN_ID),
+            received - tokenCommission,
+            'lockedLiquidity == received - tokenCommission'
+        );
+
+        // The Bridge→CM commission hop is itself taxed by the fee token, so the
+        // CM credits by its own balance delta: tokenCommission - feeOn(tokenCommission).
+        assertEq(
+            s.cm.tokenCommissionPool(address(s.token)),
+            tokenCommission - s.token.feeOn(tokenCommission),
+            'CM pool credited by its own balance delta'
+        );
+
+        // No overstate: the bridge's retained token balance equals the credited
+        // lockedLiquidity exactly (bridge sent `tokenCommission` out to the CM).
+        uint256 bridgeRetained = s.token.balanceOf(address(s.bridge));
+        assertEq(bridgeRetained, received - tokenCommission, 'bridge retained == lockedLiquidity');
+        assertEq(
+            s.bridge.lockedLiquidity(RGB_CHAIN_ID),
+            bridgeRetained,
+            'lockedLiquidity + bridge-retained invariant: credited == held'
+        );
+    }
+
+    // --- The recorded (actual) amount is releasable via fundsOut ---
+
+    function test_fundsOut_feeToken_recordedAmountIsReleasable() public {
+        FeeStack memory s = _deployFeeStack(100); // 1% fee, no commission
+
+        uint256 received = AMOUNT - s.token.feeOn(AMOUNT);
+
+        vm.prank(user);
+        bytes32 opId = s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        assertEq(s.module.fundsInRecords(opId), received, 'record == actual received');
+
+        // Release EXACTLY the recorded amount. Before the fix the record would
+        // have been the nominal AMOUNT (> bridge balance `received`) and the
+        // release would revert AmountExceedBridgePool.
+        bytes memory proof          = _proof();
+        bytes memory settlementData = _settlementWithAmounts(_ids(opId), _one(received));
+        uint256 burnId = _deriveBurnIdFor(
+            s, recipient, received, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData
+        );
+
+        uint256 recipientBefore = s.token.balanceOf(recipient);
+
+        vm.prank(multisig);
+        s.bridge.fundsOut(IBridge.FundsOutParams(
+            recipient, received, burnId,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            proof, settlementData
+        ));
+
+        // The outbound transfer is also taxed, so the recipient nets
+        // `received - feeOn(received)`. The payoff is that the release did NOT
+        // revert and value moved.
+        uint256 delta = s.token.balanceOf(recipient) - recipientBefore;
+        assertGt(delta, 0, 'recipient balance increased');
+        assertEq(delta, received - s.token.feeOn(received), 'recipient nets received minus outbound fee');
+        assertEq(s.bridge.lockedLiquidity(RGB_CHAIN_ID), 0, 'lockedLiquidity fully released');
+    }
+
+    // --- Received < tokenCommission reverts InsufficientReceived ---
+    //
+    // Fee = 9000 bps (90%) → received = 10% of AMOUNT = 10e18. The fee-shape
+    // guard caps the commission fraction at `stablePercent / multiplier^2`
+    // (stablePercent ≤ 9000, stablePercent ≤ multiplier^2). Choosing
+    // multiplier = 95, stablePercent = 9000 yields a fraction 9000/9025 ≈ 99.7%,
+    // so the commission quote on the NOMINAL AMOUNT (~99.7e18) far exceeds the
+    // actual received (10e18) — configurable within the guard, so no boundary
+    // compromise is needed.
+    function test_fundsIn_feeToken_revertsWhenFeeExceedsCommission() public {
+        FeeStack memory s = _deployFeeStack(9000); // 90% transfer fee
+        _setFeeStackFundsInTokenRule(s, 9000, 95); // ~99.7% commission on nominal
+
+        uint256 received        = AMOUNT - s.token.feeOn(AMOUNT);
+        uint256 tokenCommission = s.cm.calculateStableFee(AMOUNT, 9000, 95);
+
+        assertEq(received, AMOUNT / 10, 'sanity: received == 10% of nominal');
+        assertGt(tokenCommission, received, 'sanity: commission exceeds actual received');
+
+        vm.expectRevert(abi.encodeWithSelector(
+            IBridge.InsufficientReceived.selector, received, tokenCommission
+        ));
+        vm.prank(user);
+        s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 }
