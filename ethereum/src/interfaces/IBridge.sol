@@ -11,6 +11,7 @@ interface IBridge {
     error InvalidSourceChainId();
     error ZeroAmount();
     error AmountBelowMinimum(uint256 amount, uint256 minimum);
+    error InsufficientReceived(uint256 received, uint256 tokenCommission);
     error InvalidMinFundsInAmount();
     error AddressTooLong(uint256 length, uint256 maxLength);
     error ProofTooLong(uint256 length, uint256 maxLength);

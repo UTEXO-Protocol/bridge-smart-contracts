@@ -462,16 +462,17 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (sourceChainId      == 0)               revert InvalidSourceChainId();
         if (destinationChainId == 0)               revert InvalidDestinationChainId();
 
-        (
-            uint256 tokenCommission,
-            uint256 nativeCommission,
-            uint256 netAmount
-        ) = commissionManager.calculateFundsInCommission(
-            sourceChainId,
-            destinationChainId,
-            TOKEN,
-            amount
-        );
+        // Commission is quoted from the nominal `amount` so the native-commission
+        // quote (and the exact `msg.value` check below) stays predictable for the
+        // caller. The nominal net is intentionally discarded — the credited net is
+        // derived from the ACTUAL received amount after the transfer.
+        (uint256 tokenCommission, uint256 nativeCommission, ) =
+            commissionManager.calculateFundsInCommission(
+                sourceChainId,
+                destinationChainId,
+                TOKEN,
+                amount
+            );
 
         // Native payment must match the quote exactly (includes the zero-native case).
         if (msg.value != nativeCommission) revert NativeValueMismatch();
@@ -487,17 +488,32 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             sender:        from,
             sourceSender:  sourceSender,
             grossAmount:   amount,
-            netAmount:     netAmount,
+            netAmount:     0, // set below from the ACTUAL received amount
             operationId:   bytes32(0), // filled in on the next line
             senderNonce:   sourceSenderNonces[sourceChainId][sourceSender]++,
             sourceChainId: sourceChainId,
             destChainId:   destinationChainId,
             destAddress:   destinationAddress
         });
+        // operationId binds grossAmount (not netAmount), so it is stable
+        // regardless of any token transfer fee.
         ctx.operationId = _deriveOperationId(ctx, settlementData);
 
-        // Pull the full gross amount from `from` into this contract.
+        // Pull the gross amount and measure what ACTUALLY arrived. A
+        // fee-on-transfer token can deliver less than `amount`; crediting the
+        // nominal amount would overstate custody and could brick release of the
+        // recorded balance. Everything downstream — records, isolated
+        // liquidity, event — is built from `received`, never from `amount`.
+        uint256 balanceBefore = IERC20(TOKEN).balanceOf(address(this));
         IERC20(TOKEN).safeTransferFrom(from, address(this), amount);
+        uint256 received = IERC20(TOKEN).balanceOf(address(this)) - balanceBefore;
+
+        // The token commission is forwarded out of `received`; guard the
+        // subtraction so a token fee that eats more than the commission reverts
+        // cleanly instead of underflowing. A zero net (received == commission) is
+        // left to the existing zero-amount / dust handling, unchanged here.
+        if (received < tokenCommission) revert InsufficientReceived(received, tokenCommission);
+        ctx.netAmount = received - tokenCommission;
 
         // Delegate per-route inbound bookkeeping. The module returns an optional
         // correlation id (the RGB OpId for the RGB route; 0 otherwise) to surface
@@ -506,8 +522,9 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
         // Isolated liquidity: credit the net deposit to its destination
         // chain's bucket. A later `fundsOut` from that chain can release at most
-        // the accumulated locked liquidity.
-        lockedLiquidity[destinationChainId] += netAmount;
+        // the accumulated locked liquidity. Credited from the ACTUAL received
+        // amount so the ledger can never exceed real custody.
+        lockedLiquidity[destinationChainId] += ctx.netAmount;
 
         // Forward token commission, if any, to the CommissionManager pool.
         if (tokenCommission != 0) {
