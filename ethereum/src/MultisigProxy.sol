@@ -98,6 +98,17 @@ contract MultisigProxy is IMultisigProxy {
     ///         selector before it is sliced via `calldataload`.
     uint256 public constant SELECTOR_LENGTH = 4;
 
+    /// @notice CommissionManager withdrawal selectors that the generic
+    ///         `AdminExecuteCommissionManager` path is NOT allowed to call —
+    ///         they take a free recipient and would bypass the pinned
+    ///         `commissionRecipient`. Withdrawals must go through the
+    ///         dedicated WithdrawTokenCommissionCM / WithdrawNativeCommissionCM
+    ///         ops, which force the recipient to `commissionRecipient`.
+    bytes4 private constant _SEL_WITHDRAW_TOKEN      = bytes4(keccak256('withdrawTokenCommission(address,address,uint256)'));
+    bytes4 private constant _SEL_WITHDRAW_NATIVE     = bytes4(keccak256('withdrawNativeCommission(address,uint256)'));
+    bytes4 private constant _SEL_WITHDRAW_ALL_TOKEN  = bytes4(keccak256('withdrawAllTokenCommission(address,address)'));
+    bytes4 private constant _SEL_WITHDRAW_ALL_NATIVE = bytes4(keccak256('withdrawAllNativeCommission(address)'));
+
     uint256 private immutable _cachedChainId;
     bytes32 private immutable _cachedDomainSeparator;
 
@@ -587,6 +598,10 @@ contract MultisigProxy is IMultisigProxy {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
+        // Commission withdrawals must use the pinned-recipient ops; reject them
+        // on the generic path up front (fail-fast, no wasted proposal slot).
+        _requireNotCommissionWithdrawSelector(selector);
+
         bytes32 structHash = keccak256(abi.encode(
             _PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, selector, keccak256(callData), nonce, deadline
         ));
@@ -1010,7 +1025,11 @@ contract MultisigProxy is IMultisigProxy {
             emit TimelockDurationUpdated(newDuration);
 
         } else if (opType == OperationType.AdminExecuteCommissionManager) {
-            // opData = raw CommissionManager callData
+            // opData = raw CommissionManager callData. Enforce (again, at the
+            // execution boundary) that this generic path cannot call a
+            // withdrawal selector and re-point commission away from the pinned
+            // `commissionRecipient`.
+            _requireNotCommissionWithdrawSelector(_firstSelector(opData));
             (bool ok, bytes memory ret) = commissionManager.call(opData);
             _propagateRevert(ok, ret);
 
@@ -1241,6 +1260,29 @@ contract MultisigProxy is IMultisigProxy {
             } else {
                 revert CallFailed();
             }
+        }
+    }
+
+    /// @dev First 4 bytes of `data` as a selector, or `0x00000000` if `data` is
+    ///      shorter than a selector (such a payload can never be a withdrawal
+    ///      call and the downstream raw call rejects it anyway).
+    function _firstSelector(bytes memory data) private pure returns (bytes4 selector) {
+        if (data.length >= SELECTOR_LENGTH) {
+            assembly { selector := mload(add(data, 0x20)) }
+        }
+    }
+
+    /// @dev Reverts if `selector` is one of the CommissionManager withdrawal
+    ///      selectors, which the generic AdminExecuteCommissionManager path must
+    ///      not reach (they bypass the pinned `commissionRecipient`).
+    function _requireNotCommissionWithdrawSelector(bytes4 selector) private pure {
+        if (
+            selector == _SEL_WITHDRAW_TOKEN ||
+            selector == _SEL_WITHDRAW_NATIVE ||
+            selector == _SEL_WITHDRAW_ALL_TOKEN ||
+            selector == _SEL_WITHDRAW_ALL_NATIVE
+        ) {
+            revert ForbiddenCommissionManagerSelector(selector);
         }
     }
 }

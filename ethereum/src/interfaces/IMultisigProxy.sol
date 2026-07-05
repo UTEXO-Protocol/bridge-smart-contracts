@@ -71,6 +71,7 @@ interface IMultisigProxy {
     error UnknownOperationType();
     error ZeroRecipient();
     error ZeroTarget();
+    error ForbiddenCommissionManagerSelector(bytes4 selector);
     error LZAdapterNotSet();
     error InvalidLZAdapter();
 
