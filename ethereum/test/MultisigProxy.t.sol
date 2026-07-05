@@ -128,6 +128,9 @@ contract MultisigProxyTest is Test {
     MockERC20           token;
     MockBtcRelay        btcRelay;
 
+    // Derived operationId of the setUp() seed deposit (returned by fundsIn).
+    bytes32 seedOpId;
+
     // Enclave signers (3-of-N with threshold 2)
     uint256 encPk1 = 0xE1;
     uint256 encPk2 = 0xE2;
@@ -161,6 +164,7 @@ contract MultisigProxyTest is Test {
     string  constant SRC_ADDR        = 'rgb:sender/utxo1src';
     uint256 constant AMOUNT  = 100e18;
     uint256 constant TX_ID   = 42;
+    uint256 constant RGB_OP_ID = 0xABCDEF;
     uint256 constant BURN_ID = 9_001;
     uint256 constant LZ_NATIVE_FEE = 0.01 ether;
     uint32  constant DST_EID = 30110;
@@ -271,7 +275,7 @@ contract MultisigProxyTest is Test {
         vm.prank(user);
         token.approve(address(bridge), type(uint256).max);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT * 5, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+        seedOpId = bridge.fundsIn(AMOUNT * 5, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
     }
 
     // ========================================================================
@@ -292,18 +296,18 @@ contract MultisigProxyTest is Test {
         bitmap = 0x3;
     }
 
-    function _fundsInIds() internal pure returns (uint256[] memory ids) {
-        ids = new uint256[](1);
-        ids[0] = TX_ID;
+    function _fundsInIds() internal view returns (bytes32[] memory ids) {
+        ids = new bytes32[](1);
+        ids[0] = seedOpId;
     }
 
     /// @dev Build `settlementData` for the reworked RgbSettlementModule, which
-    ///      expects `(uint256[] operationIds, uint256[] amounts)` and checks
+    ///      expects `(bytes32[] operationIds, uint256[] amounts)` and checks
     ///      each id exists with an EXACTLY matching amount (no consumption).
     ///      The amount is derived from the on-chain mint record so an exact
     ///      match is guaranteed for the common path; ids with no record resolve
     ///      to amount 0 (the module then reverts FundsInNotFound first).
-    function _settlement(uint256[] memory ids) internal view returns (bytes memory) {
+    function _settlement(bytes32[] memory ids) internal view returns (bytes memory) {
         uint256[] memory amounts = new uint256[](ids.length);
         for (uint256 i = 0; i < ids.length; i++) {
             amounts[i] = rgbModule.fundsInRecords(ids[i]);
@@ -350,7 +354,7 @@ contract MultisigProxyTest is Test {
     /// @dev Flow-4 LZ release params. The Bridge recipient is forced to the
     ///      adapter on-chain, so it is not part of these params; `recipient`
     ///      here is the bytes32 destination on the far chain.
-    function _lzFundsOutParams(uint256 amount, uint256 burnId, uint256[] memory ids)
+    function _lzFundsOutParams(uint256 amount, uint256 burnId, bytes32[] memory ids)
         internal
         view
         returns (IMultisigProxy.LzFundsOutParams memory)
@@ -1087,7 +1091,7 @@ contract MultisigProxyTest is Test {
         // Inbound deposits are frozen.
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID + 1, '');
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
 
         // Enclave-signed release is frozen too — the revert propagates from
         // Bridge.fundsOut through proxy.fundsOutCall.
@@ -1124,7 +1128,7 @@ contract MultisigProxyTest is Test {
         // Deposits are frozen...
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID + 1, '');
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
 
         // ...but the enclave release still executes.
         IBridge.FundsOutParams memory params = _fundsOutParams();
@@ -1393,7 +1397,7 @@ contract MultisigProxyTest is Test {
 
         uint256 depositAmount = 100e18;
         vm.prank(user);
-        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, TX_ID + 1, '');
+        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
 
         uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
         assertEq(cm.tokenCommissionPool(address(token)), expectedCommission);
@@ -1963,7 +1967,7 @@ contract MultisigProxyTest is Test {
         uint256 cmBefore        = token.balanceOf(address(cm));
         uint256 cmPoolBefore    = cm.tokenCommissionPool(address(token));
         uint256 nativePoolBefore = cm.nativeCommissionPool();
-        uint256 recordBefore    = rgbModule.fundsInRecords(TX_ID);
+        uint256 recordBefore    = rgbModule.fundsInRecords(seedOpId);
 
         assertEq(bridgeBefore,     AMOUNT * 5, 'pre bridge pool');
         assertEq(recipientBefore,  0,          'pre recipient token');
@@ -2000,7 +2004,7 @@ contract MultisigProxyTest is Test {
             'cm pool delta'
         );
         assertEq(cm.nativeCommissionPool(),        nativePoolBefore,             'native pool unchanged');
-        assertEq(rgbModule.fundsInRecords(TX_ID),  recordBefore,                 'record unchanged (proof-of-mint permanent)');
+        assertEq(rgbModule.fundsInRecords(seedOpId),  recordBefore,                 'record unchanged (proof-of-mint permanent)');
 
         // The signed Bridge gross debit splits into recipient net payout and CM token commission.
         assertEq(
@@ -2051,7 +2055,7 @@ contract MultisigProxyTest is Test {
         uint256 oftBefore       = token.balanceOf(mockOft);
         uint256 cmBefore        = token.balanceOf(address(cm));
         uint256 cmPoolBefore    = cm.tokenCommissionPool(address(token));
-        uint256 recordBefore    = rgbModule.fundsInRecords(TX_ID);
+        uint256 recordBefore    = rgbModule.fundsInRecords(seedOpId);
         uint256 proxyEthBefore  = address(proxy).balance;
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore    = mockOft.balance;
@@ -2092,7 +2096,7 @@ contract MultisigProxyTest is Test {
         assertEq(token.balanceOf(address(bridge)),  bridgeBefore - AMOUNT,          'bridge gross debit');
         assertEq(token.balanceOf(address(cm)),      cmBefore + tokenCommission,     'cm fee delta');
         assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore + tokenCommission, 'cm pool delta');
-        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore,                   'record unchanged (proof-of-mint permanent)');
+        assertEq(rgbModule.fundsInRecords(seedOpId),   recordBefore,                   'record unchanged (proof-of-mint permanent)');
         assertEq(token.balanceOf(address(adapter)), adapterBefore,                  'adapter no residue');
         assertEq(token.balanceOf(mockOft),          oftBefore + netAmount,          'oft receives net');
         assertEq(address(proxy).balance,            proxyEthBefore,                 'proxy native no residue');
@@ -2147,7 +2151,7 @@ contract MultisigProxyTest is Test {
         uint256 cmBefore         = token.balanceOf(address(cm));
         uint256 cmPoolBefore     = cm.tokenCommissionPool(address(token));
         uint256 nativePoolBefore = cm.nativeCommissionPool();
-        uint256 recordBefore     = rgbModule.fundsInRecords(TX_ID);
+        uint256 recordBefore     = rgbModule.fundsInRecords(seedOpId);
         uint256 proxyEthBefore   = address(proxy).balance;
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore     = mockOft.balance;
@@ -2175,7 +2179,7 @@ contract MultisigProxyTest is Test {
         assertEq(token.balanceOf(address(cm)),      cmBefore,       'cm token unchanged');
         assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore, 'cm pool unchanged');
         assertEq(cm.nativeCommissionPool(),         nativePoolBefore,  'native pool unchanged');
-        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore,      'record unchanged');
+        assertEq(rgbModule.fundsInRecords(seedOpId),   recordBefore,      'record unchanged');
         assertEq(address(proxy).balance,            proxyEthBefore,    'proxy native unchanged');
         assertEq(address(adapter).balance,          adapterEthBefore,  'adapter native unchanged');
         assertEq(mockOft.balance,                   oftEthBefore,      'oft native unchanged');
@@ -2224,7 +2228,7 @@ contract MultisigProxyTest is Test {
         uint256 cmBefore         = token.balanceOf(address(cm));
         uint256 cmPoolBefore     = cm.tokenCommissionPool(address(token));
         uint256 nativePoolBefore = cm.nativeCommissionPool();
-        uint256 recordBefore     = rgbModule.fundsInRecords(TX_ID);
+        uint256 recordBefore     = rgbModule.fundsInRecords(seedOpId);
         uint256 proxyEthBefore   = address(proxy).balance;
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore     = mockOft.balance;
@@ -2252,7 +2256,7 @@ contract MultisigProxyTest is Test {
         assertEq(token.balanceOf(address(cm)),      cmBefore,       'cm token unchanged');
         assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore, 'cm pool unchanged');
         assertEq(cm.nativeCommissionPool(),         nativePoolBefore,  'native pool unchanged');
-        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore,      'record unchanged');
+        assertEq(rgbModule.fundsInRecords(seedOpId),   recordBefore,      'record unchanged');
         assertEq(address(proxy).balance,            proxyEthBefore,    'proxy native unchanged');
         assertEq(address(adapter).balance,          adapterEthBefore,  'adapter native unchanged');
         assertEq(mockOft.balance,                   oftEthBefore,      'oft native unchanged');
@@ -2286,9 +2290,9 @@ contract MultisigProxyTest is Test {
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
         _setLzAdapter(address(adapter));
 
-        uint256[] memory duplicateIds = new uint256[](2);
-        duplicateIds[0] = TX_ID;
-        duplicateIds[1] = TX_ID;
+        bytes32[] memory duplicateIds = new bytes32[](2);
+        duplicateIds[0] = seedOpId;
+        duplicateIds[1] = seedOpId;
 
         IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, duplicateIds);
 
@@ -2305,7 +2309,7 @@ contract MultisigProxyTest is Test {
         uint256 cmBefore         = token.balanceOf(address(cm));
         uint256 cmPoolBefore     = cm.tokenCommissionPool(address(token));
         uint256 nativePoolBefore = cm.nativeCommissionPool();
-        uint256 recordBefore     = rgbModule.fundsInRecords(TX_ID);
+        uint256 recordBefore     = rgbModule.fundsInRecords(seedOpId);
         uint256 proxyEthBefore   = address(proxy).balance;
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore     = mockOft.balance;
@@ -2350,7 +2354,7 @@ contract MultisigProxyTest is Test {
         assertEq(token.balanceOf(address(cm)),      cmBefore + tokenCommission, 'cm token delta');
         assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore + tokenCommission, 'cm pool delta');
         assertEq(cm.nativeCommissionPool(),         nativePoolBefore,  'native pool unchanged');
-        assertEq(rgbModule.fundsInRecords(TX_ID),   recordBefore, 'record unchanged (proof-of-mint permanent)');
+        assertEq(rgbModule.fundsInRecords(seedOpId),   recordBefore, 'record unchanged (proof-of-mint permanent)');
         assertEq(address(proxy).balance,            proxyEthBefore,  'proxy native unchanged');
         assertEq(address(adapter).balance,          adapterEthBefore, 'adapter native unchanged');
         assertEq(mockOft.balance,                   oftEthBefore + LZ_NATIVE_FEE, 'oft native fee');
@@ -2359,11 +2363,10 @@ contract MultisigProxyTest is Test {
     // Flow-4 success coverage for duplicate RGB settlement ids: the reworked
     // module verifies each (id, amount) pair by pure read, so duplicates pass.
     function test_lzFundsOutCall_duplicateSettlementIdsFullConsume_succeedsAndIgnoresDuplicate() public {
-        uint256 duplicateRecordId = TX_ID + 1;
         uint256 burnId = BURN_ID + 1;
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, duplicateRecordId, '');
+        bytes32 secondOpId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
 
         uint256 percent = 500; // 5%
         vm.prank(address(proxy));
@@ -2390,9 +2393,9 @@ contract MultisigProxyTest is Test {
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
         _setLzAdapter(address(adapter));
 
-        uint256[] memory duplicateIds = new uint256[](2);
-        duplicateIds[0] = duplicateRecordId;
-        duplicateIds[1] = duplicateRecordId;
+        bytes32[] memory duplicateIds = new bytes32[](2);
+        duplicateIds[0] = secondOpId;
+        duplicateIds[1] = secondOpId;
 
         IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, burnId, duplicateIds);
 
@@ -2406,8 +2409,8 @@ contract MultisigProxyTest is Test {
         uint256 oftBefore        = token.balanceOf(mockOft);
         uint256 cmBefore         = token.balanceOf(address(cm));
         uint256 cmPoolBefore     = cm.tokenCommissionPool(address(token));
-        uint256 originalRecordBefore  = rgbModule.fundsInRecords(TX_ID);
-        uint256 duplicateRecordBefore = rgbModule.fundsInRecords(duplicateRecordId);
+        uint256 originalRecordBefore  = rgbModule.fundsInRecords(seedOpId);
+        uint256 duplicateRecordBefore = rgbModule.fundsInRecords(secondOpId);
         uint256 proxyEthBefore   = address(proxy).balance;
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore     = mockOft.balance;
@@ -2451,8 +2454,8 @@ contract MultisigProxyTest is Test {
         assertEq(token.balanceOf(mockOft),          oftBefore + netAmount, 'oft token delta');
         assertEq(token.balanceOf(address(cm)),      cmBefore + tokenCommission, 'cm token delta');
         assertEq(cm.tokenCommissionPool(address(token)), cmPoolBefore + tokenCommission, 'cm pool delta');
-        assertEq(rgbModule.fundsInRecords(TX_ID),   originalRecordBefore, 'original record untouched');
-        assertEq(rgbModule.fundsInRecords(duplicateRecordId), duplicateRecordBefore, 'duplicate record unchanged');
+        assertEq(rgbModule.fundsInRecords(seedOpId),   originalRecordBefore, 'original record untouched');
+        assertEq(rgbModule.fundsInRecords(secondOpId), duplicateRecordBefore, 'duplicate record unchanged');
         assertEq(address(proxy).balance,            proxyEthBefore,  'proxy native unchanged');
         assertEq(address(adapter).balance,          adapterEthBefore, 'adapter native unchanged');
         assertEq(mockOft.balance,                   oftEthBefore + LZ_NATIVE_FEE, 'oft native fee');
@@ -2569,7 +2572,7 @@ contract MultisigProxyTest is Test {
         // amount cap on the signed Bridge fundsOut.
         uint256 bridgeBefore    = token.balanceOf(address(bridge));
         uint256 recipientBefore = token.balanceOf(drainRecipient);
-        uint256 recordBefore    = rgbModule.fundsInRecords(TX_ID);
+        uint256 recordBefore    = rgbModule.fundsInRecords(seedOpId);
 
         assertEq(bridgeBefore,    AMOUNT * 5, 'pre bridge pool');
         assertEq(recipientBefore, 0,          'pre recipient token');
@@ -2605,7 +2608,7 @@ contract MultisigProxyTest is Test {
         assertTrue(bridge.consumedBurnIds(BURN_ID), 'burn id consumed');
         assertEq(token.balanceOf(address(bridge)), 0, 'bridge pool drained');
         assertEq(token.balanceOf(drainRecipient), recipientBefore + bridgeBefore, 'recipient got full pool');
-        assertEq(rgbModule.fundsInRecords(TX_ID), recordBefore, 'record unchanged (proof-of-mint permanent)');
+        assertEq(rgbModule.fundsInRecords(seedOpId), recordBefore, 'record unchanged (proof-of-mint permanent)');
     }
 
     function test_governanceCanRotateEnclaveToUnattestedEOA_currentBehavior() public {
@@ -2853,7 +2856,7 @@ contract MultisigProxyTest is Test {
 
         uint256 depositAmount = 100e18;
         vm.prank(user);
-        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, TX_ID + 777, '');
+        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
 
         uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
         uint256 poolBefore = cm.tokenCommissionPool(address(token));

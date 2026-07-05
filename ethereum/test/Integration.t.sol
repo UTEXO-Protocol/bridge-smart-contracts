@@ -85,8 +85,9 @@ contract IntegrationTest is Test {
     uint256 constant FUNDS_OUT_PERCENT = 100;
     uint8   constant FUNDS_OUT_MULT    = 100;
 
-    uint256 constant TX_ID_IN  = 42;
     uint256 constant BURN_ID   = 9_001;
+    // Non-zero RGB OpId threaded through the RGB-route settlementData on fundsIn.
+    uint256 constant RGB_OP_ID = 0xABCDEF;
 
     // RGB proof = two (height, commit) pairs: a deep source block (RGB
     // burn/lock) and a fresh latest block (relay head). gap = 6 - 1 = 5.
@@ -276,12 +277,13 @@ contract IntegrationTest is Test {
         uint256 userBefore = token.balanceOf(user);
 
         vm.prank(user);
-        bridge.fundsIn(
+        // RGB route: settlementData carries the non-zero RGB OpId. The record is
+        // keyed by the bridge-derived operationId returned here.
+        bytes32 opId = bridge.fundsIn(
             USER_DEPOSIT,
             RGB_CHAIN_ID,
             'rgb:asset1qp0y3mq/utxo1abc',
-            TX_ID_IN,
-            ''   // settlementData ignored by RgbSettlementModule on inbound
+            abi.encode(RGB_OP_ID)
         );
 
         uint256 tokenCommissionIn = tInQuote;
@@ -291,7 +293,7 @@ contract IntegrationTest is Test {
         assertEq(token.balanceOf(address(bridge)),       netBridgedIn,              'bridge keeps net');
         assertEq(token.balanceOf(address(cm)),           tokenCommissionIn,         'cm got commission');
         assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn,         'cm pool mirrors balance');
-        assertEq(rgbModule.fundsInRecords(TX_ID_IN),     netBridgedIn,              'record stores net');
+        assertEq(rgbModule.fundsInRecords(opId),         netBridgedIn,              'record stores net');
 
         // -------------------------------------------------------------------------
         // 3. TEE-signed fundsOut — RGBVerifier checks the BtcRelay header, the
@@ -299,8 +301,8 @@ contract IntegrationTest is Test {
         //    amount (no consumption), Bridge releases `netBridgedIn` from the
         //    pool. 1% outbound commission to CM, the rest to recipient.
         // -------------------------------------------------------------------------
-        uint256[] memory fundsInIds     = new uint256[](1);
-        fundsInIds[0]     = TX_ID_IN;
+        bytes32[] memory fundsInIds     = new bytes32[](1);
+        fundsInIds[0]     = opId;
         uint256[] memory fundsInAmounts = new uint256[](1);
         fundsInAmounts[0] = netBridgedIn;   // must equal the recorded mint amount
 
@@ -346,7 +348,7 @@ contract IntegrationTest is Test {
         assertEq(token.balanceOf(recipient),             netOut,                                 'recipient got net');
         assertEq(token.balanceOf(address(cm)),           tokenCommissionIn + tokenCommissionOut, 'cm accrued both fees');
         assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn + tokenCommissionOut, 'cm pool mirrors');
-        assertEq(rgbModule.fundsInRecords(TX_ID_IN),     netBridgedIn,                           'fundsIn record unchanged (permanent)');
+        assertEq(rgbModule.fundsInRecords(opId),         netBridgedIn,                           'fundsIn record unchanged (permanent)');
         assertTrue(bridge.consumedBurnIds(BURN_ID),                                              'burnId recorded');
 
         // -------------------------------------------------------------------------
@@ -432,19 +434,18 @@ contract IntegrationTest is Test {
         vm.deal(user, nativeQuote);
 
         vm.prank(user);
-        bridge.fundsIn{ value: nativeQuote }(
+        bytes32 opId = bridge.fundsIn{ value: nativeQuote }(
             USER_DEPOSIT,
             RGB_CHAIN_ID,
             'rgb:asset1qp0y3mq/utxo1abc',
-            TX_ID_IN,
-            ''
+            abi.encode(RGB_OP_ID)
         );
 
         assertEq(token.balanceOf(address(bridge)),    USER_DEPOSIT, 'bridge got full token amount');
         assertEq(token.balanceOf(address(cm)),        0,            'cm no token commission');
         assertEq(address(cm).balance,                 nativeQuote,  'cm got native commission');
         assertEq(cm.nativeCommissionPool(),           nativeQuote,  'cm native pool');
-        assertEq(rgbModule.fundsInRecords(TX_ID_IN),  USER_DEPOSIT, 'record stores full amount');
+        assertEq(rgbModule.fundsInRecords(opId),      USER_DEPOSIT, 'record stores full amount');
 
         // Federation withdraws native commission.
         uint256 wdNonce    = proxy.proposalNonce();
