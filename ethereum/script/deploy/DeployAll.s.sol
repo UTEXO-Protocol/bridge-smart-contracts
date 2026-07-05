@@ -24,10 +24,13 @@ import { RgbSettlementModule } from '../../src/settlement/RgbSettlementModule.so
 ///   n + 3  → RGBVerifier        (wraps the BtcRelay)
 ///   n + 4  → RgbSettlementModule (paired with RouteRegistry)
 ///   n + 5  → MultisigProxy
-///   n + 6  → (optional) CommissionManager.setEthUsdFeed
-///   n + 7  → CommissionManager.transferOwnership (starts two-step handoff)
-///   n + 8  → Bridge.transferOwnership (starts two-step handoff)
-///   n + 9  → RouteRegistry.transferOwnership (starts two-step handoff)
+///          → (optional) CommissionManager config txs, each present only when
+///            its env is set: setEthUsdFeed, setSequencerUptimeFeed,
+///            setEthUsdPriceBounds. These shift the transferOwnership nonces
+///            below by however many are emitted (0–3).
+///          → CommissionManager.transferOwnership (starts two-step handoff)
+///          → Bridge.transferOwnership (starts two-step handoff)
+///          → RouteRegistry.transferOwnership (starts two-step handoff)
 ///
 /// Ownership is Ownable2Step: the transferOwnership calls only set
 /// pendingOwner = MultisigProxy. The federation MUST accept post-deploy via
@@ -57,6 +60,17 @@ import { RgbSettlementModule } from '../../src/settlement/RgbSettlementModule.so
 ///                       (freshness) block; must be >= 1.
 ///   MIN_CONFIRMATION_GAP     (5) — RGBVerifier: min depth gap between the
 ///                       source and latest blocks.
+///   SEQUENCER_UPTIME_FEED — (Arbitrum, R-I-14) Chainlink L2 Sequencer Uptime
+///                       feed. When set, NATIVE quotes reject prices during
+///                       sequencer downtime and the post-restart grace period.
+///                       SHOULD be set on Arbitrum when NATIVE commission is used.
+///   ETH_USD_MIN_PRICE / ETH_USD_MAX_PRICE — (R-I-14) optional ETH/USD sanity
+///                       band in feed decimals (e.g. 100e8 / 100000e8). Set both
+///                       or neither; else 0 < min < max.
+///   REQUIRE_CHAINLINK_HARDENING (false) — when true, the deploy reverts unless
+///                       ETH_USD_FEED, SEQUENCER_UPTIME_FEED, and the price band
+///                       are all set. Recommended for Arbitrum production so the
+///                       R-I-14 guards can never be silently absent.
 ///
 /// Usage:
 ///   forge script script/deploy/DeployAll.s.sol \
@@ -90,6 +104,24 @@ contract DeployAll is Script {
         uint256 minSourceConf  = vm.envOr('MIN_SOURCE_CONFIRMATIONS', uint256(6));
         uint256 maxLatestConf  = vm.envOr('MAX_LATEST_CONFIRMATIONS', uint256(1));
         uint256 minConfGap     = vm.envOr('MIN_CONFIRMATION_GAP',     uint256(5));
+        address seqFeed        = vm.envOr('SEQUENCER_UPTIME_FEED', address(0));
+        uint256 ethUsdMinPrice = vm.envOr('ETH_USD_MIN_PRICE', uint256(0));
+        uint256 ethUsdMaxPrice = vm.envOr('ETH_USD_MAX_PRICE', uint256(0));
+        bool    reqHardening   = vm.envOr('REQUIRE_CHAINLINK_HARDENING', false);
+
+        // ---- 1a. Misconfiguration checks (fail-fast, before any broadcast) ---
+        // Price band is all-or-nothing: a half-set band would otherwise be
+        // silently ignored (setter only runs when max != 0).
+        require((ethUsdMinPrice == 0) == (ethUsdMaxPrice == 0),
+            'set both ETH_USD_MIN_PRICE and ETH_USD_MAX_PRICE, or neither');
+        // Opt-in prod guard (set REQUIRE_CHAINLINK_HARDENING=true for Arbitrum):
+        // when NATIVE commission is enabled, the sequencer feed and price band
+        // must be wired too, so the R-I-14 protections are not silently absent.
+        if (reqHardening) {
+            require(ethUsdFeed != address(0), 'hardening: ETH_USD_FEED must be set');
+            require(seqFeed != address(0),    'hardening: SEQUENCER_UPTIME_FEED must be set');
+            require(ethUsdMaxPrice != 0,      'hardening: ETH_USD_MIN/MAX_PRICE must be set');
+        }
 
         address deployer    = vm.addr(pk);
         uint64  startNonce  = vm.getNonce(deployer);
@@ -137,6 +169,17 @@ contract DeployAll is Script {
             cm.setEthUsdFeed(ethUsdFeed, ethUsdHb);
         }
 
+        // ---- 7b. Wire optional R-I-14 Arbitrum hardening (owner-only, before
+        //          the ownership transfer): the L2 sequencer-uptime feed and the
+        //          ETH/USD sanity band. On Arbitrum these SHOULD be set whenever
+        //          the NATIVE commission path (ETH_USD_FEED) is used.
+        if (seqFeed != address(0)) {
+            cm.setSequencerUptimeFeed(seqFeed);
+        }
+        if (ethUsdMaxPrice != 0) {
+            cm.setEthUsdPriceBounds(ethUsdMinPrice, ethUsdMaxPrice);
+        }
+
         // ---- 8. Start two-step ownership handover to federation ----------
         // Ownable2Step: these only set pendingOwner = proxy. The federation
         // completes the handoff post-deploy by accepting via governance
@@ -164,6 +207,15 @@ contract DeployAll is Script {
         } else {
             console2.log('ETH/USD feed:                   ', 'UNSET (NATIVE quotes will revert until governance wires one)');
         }
+        if (seqFeed != address(0)) {
+            console2.log('Sequencer uptime feed wired:    ', seqFeed);
+        } else {
+            console2.log('Sequencer uptime feed:          ', 'UNSET (set on Arbitrum when NATIVE commission is used)');
+        }
+        if (ethUsdMaxPrice != 0) {
+            console2.log('ETH/USD price band min:         ', ethUsdMinPrice);
+            console2.log('ETH/USD price band max:         ', ethUsdMaxPrice);
+        }
 
         // ---- 10. Invariant checks ---------------------------------------
         require(address(bridge) == predictedBridge,         'Bridge address prediction mismatch');
@@ -182,6 +234,13 @@ contract DeployAll is Script {
         if (ethUsdFeed != address(0)) {
             require(cm.ethUsdFeed() == ethUsdFeed,          'CM.ethUsdFeed mismatch');
             require(cm.ethUsdHeartbeat() == ethUsdHb,       'CM.ethUsdHeartbeat mismatch');
+        }
+        if (seqFeed != address(0)) {
+            require(cm.sequencerUptimeFeed() == seqFeed,    'CM.sequencerUptimeFeed mismatch');
+        }
+        if (ethUsdMaxPrice != 0) {
+            require(cm.ethUsdMinPrice() == ethUsdMinPrice && cm.ethUsdMaxPrice() == ethUsdMaxPrice,
+                'CM.ethUsdPriceBounds mismatch');
         }
 
         // ---- 11. Post-deploy reminder -----------------------------------
