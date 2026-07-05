@@ -23,8 +23,8 @@ import { OutflowRateLimiter } from './libraries/OutflowRateLimiter.sol';
 ///      - Route-specific finality verification and per-route settlement
 ///        accounting (RGB `fundsInRecords` etc.) live behind the
 ///        `RouteRegistry` dispatcher in dedicated plugin contracts. Bridge
-///        only owns: token custody, the common `burnId` replay guard, and
-///        commission routing.
+///        only owns: token custody, the common derived `burnId` replay guard,
+///        and commission routing.
 ///      - `fundsIn` has two overloads:
 ///        • Public 5-arg: any EVM user on this chain can lock tokens; the
 ///          source chain id is filled with `block.chainid`.
@@ -66,6 +66,15 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         'UtexoFundsInOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,uint256 senderNonce,address token,uint256 grossAmount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataHash,uint256 chainId)'
     );
 
+    /// @notice Domain-separated type hash for the `fundsOut` replay key. 
+    ///         Binds common release intent fields to this Bridge deployment and
+    ///         formula version. `proof` is deliberately not included because it
+    ///         is verifier evidence, not release intent, and may change as
+    ///         finality evidence is refreshed.
+    bytes32 public constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
+        'UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash)'
+    );
+
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
@@ -78,8 +87,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @inheritdoc IBridge
     address public override lzAdapter;
 
-    /// @notice Set of burn identifiers already consumed by a successful
-    ///         `fundsOut`.
+    /// @notice Set of Bridge-derived burn identifiers already consumed by a
+    ///         successful `fundsOut`.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
     /// @notice Per-`(sourceChainId, sourceSender)` monotonic nonce. Folded into
@@ -301,15 +310,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         nonReentrant
         whenOutflowNotPaused
     {
-        if (fundsOutParams.amount             == 0)                       revert ZeroAmount();
-        if (fundsOutParams.recipient          == address(0))              revert InvalidRecipientAddress();
-        if (fundsOutParams.sourceChainId      == 0)                       revert InvalidSourceChainId();
-        if (fundsOutParams.destinationChainId == 0)                       revert InvalidDestinationChainId();
-        if (bytes(fundsOutParams.sourceAddress).length > MAX_ADDRESS_LENGTH) {
-            revert AddressTooLong(bytes(fundsOutParams.sourceAddress).length, MAX_ADDRESS_LENGTH);
-        }
-        if (fundsOutParams.proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(fundsOutParams.proof.length, MAX_PROOF_LENGTH);
-        if (fundsOutParams.amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
+        _validateFundsOutParams(fundsOutParams);
 
         // Common replay guard. Set the flag before any external interaction
         // so a revert anywhere downstream rolls the mark back with the rest
@@ -404,6 +405,23 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // =========================================================================
     // Internal
     // =========================================================================
+
+    function _validateFundsOutParams(FundsOutParams calldata params) private view {
+        if (params.amount             == 0)          revert ZeroAmount();
+        if (params.recipient          == address(0)) revert InvalidRecipientAddress();
+        if (params.sourceChainId      == 0)          revert InvalidSourceChainId();
+        if (params.destinationChainId == 0)          revert InvalidDestinationChainId();
+
+        uint256 sourceAddressLength = bytes(params.sourceAddress).length;
+        if (sourceAddressLength > MAX_ADDRESS_LENGTH) {
+            revert AddressTooLong(sourceAddressLength, MAX_ADDRESS_LENGTH);
+        }
+        if (params.proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(params.proof.length, MAX_PROOF_LENGTH);
+        if (params.amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
+
+        uint256 expectedBurnId = _deriveBurnId(params);
+        if (params.burnId != expectedBurnId) revert InvalidBurnId(params.burnId, expectedBurnId);
+    }
 
     /// @dev Build an enabled outflow-limit config from uint256 inputs, safely
     ///      narrowing to the library's uint128 fields. USDT0 amounts fit in
@@ -558,5 +576,63 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
                 block.chainid
             )
         );
+    }
+
+    /// @dev Canonical `burnId` = domain-separated hash of the release intent.
+    ///      Route-specific burn identity should be placed in `settlementData`
+    ///      when a route has one; Bridge commits to it via `settlementDataHash`.
+    function _deriveBurnId(FundsOutParams calldata params) private view returns (uint256) {
+        return _deriveBurnIdFromFields(
+            params.recipient,
+            params.amount,
+            params.sourceChainId,
+            params.destinationChainId,
+            params.sourceAddress,
+            params.settlementData
+        );
+    }
+
+    function _deriveBurnIdFromFields(
+        address recipient,
+        uint256 amount,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string calldata sourceAddress,
+        bytes calldata settlementData
+    ) private view returns (uint256) {
+        return uint256(
+            keccak256(
+                abi.encode(
+                    FUNDS_OUT_BURN_ID_TYPEHASH,
+                    address(this),
+                    block.chainid,
+                    TOKEN,
+                    recipient,
+                    amount,
+                    sourceChainId,
+                    destinationChainId,
+                    _hashCalldataString(sourceAddress),
+                    _hashCalldataBytes(settlementData)
+                )
+            )
+        );
+    }
+
+    function _hashCalldataString(string calldata value) private pure returns (bytes32 result) {
+        assembly {
+            let ptr := mload(0x40)
+            calldatacopy(ptr, value.offset, value.length)
+            result := keccak256(ptr, value.length)
+            mstore(0x40, add(ptr, and(add(value.length, 0x3f), not(0x1f))))
+        }
+    }
+
+    function _hashCalldataBytes(bytes calldata value) private pure returns (bytes32 result) {
+        assembly {
+            let ptr := mload(0x40)
+            calldatacopy(ptr, value.offset, value.length)
+            result := keccak256(ptr, value.length)
+            mstore(0x40, add(ptr, and(add(value.length, 0x3f), not(0x1f))))
+        }
     }
 }

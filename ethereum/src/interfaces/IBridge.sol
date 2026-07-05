@@ -20,6 +20,7 @@ interface IBridge {
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();
     error InvalidLZAdapter();
+    error InvalidBurnId(uint256 provided, uint256 expected);
     error BurnIdAlreadyConsumed(uint256 burnId);
     error NativeValueMismatch();
 
@@ -115,8 +116,8 @@ interface IBridge {
     /// @param amount             Gross amount released from the bridge pool (pre-commission).
     /// @param netAmount          Amount actually delivered to `recipient`.
     /// @param tokenCommission    Fee taken in the bridged token (sent to the CommissionManager).
-    /// @param burnId             Identifier extracted from the burn consignment on the
-    ///                           source side. Stored on-chain to block fundsOut replays.
+    /// @param burnId             Bridge-derived replay key. Stored on-chain to
+    ///                           block fundsOut replays for the same release intent.
     /// @param sourceChainId      Source chain id (non-EVM side for RGB→EVM releases).
     /// @param destinationChainId Destination chain id (EVM target receiving the release).
     /// @param sourceAddress      Sender address on the source chain.
@@ -179,8 +180,8 @@ interface IBridge {
     /// @notice Release parameters for `fundsOut`.
     /// @param recipient          Recipient on this chain.
     /// @param amount             Gross amount to release (pre-commission).
-    /// @param burnId             Single-use replay guard; MUST be unique across
-    ///                           every successful `fundsOut`.
+    /// @param burnId             Bridge-derived replay guard. Must equal the
+    ///                           Bridge's canonical hash of the release fields.
     /// @param sourceChainId      Source chain id.
     /// @param destinationChainId Destination chain id; part of the
     ///                           CommissionManager route key.
