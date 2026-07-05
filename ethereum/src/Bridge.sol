@@ -57,6 +57,15 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///         inclusion proof stays well under this).
     uint256 public constant MAX_PROOF_LENGTH = 1024;
 
+    /// @notice Domain-separated type hash for the on-chain `operationId`
+    ///         derivation. Binds the id to this contract, the deposit context
+    ///         and a formula version, so ids cannot collide across deployments
+    ///         or a future formula revision. Not an EIP-712 signing digest —
+    ///         it is an internal, unsigned domain separator for the id hash.
+    bytes32 public constant FUNDS_IN_OPERATION_TYPEHASH = keccak256(
+        'UtexoFundsInOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,uint256 senderNonce,address token,uint256 grossAmount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataHash,uint256 chainId)'
+    );
+
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
@@ -72,6 +81,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @notice Set of burn identifiers already consumed by a successful
     ///         `fundsOut`.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
+
+    /// @notice Per-`(sourceChainId, sourceSender)` monotonic nonce. Folded into
+    ///         `operationId` so two otherwise-identical deposits from the same
+    ///         sender still produce distinct ids. Incremented once per successful
+    ///         `fundsIn`; a downstream revert rolls the increment back.
+    mapping(uint256 sourceChainId => mapping(bytes32 sourceSender => uint256 nonce))
+        public sourceSenderNonces;
 
     /// @notice Isolated liquidity per non-Arbitrum chain. Tracks the
     ///         net token amount locked on this chain on behalf of a given
@@ -235,16 +251,17 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 amount,
         uint256 destinationChainId,
         string  calldata destinationAddress,
-        uint256 operationId,
         bytes   calldata settlementData
-    ) external payable override whenNotPaused nonReentrant {
-        _fundsIn(
-            _msgSender(),
+    ) external payable override whenNotPaused nonReentrant returns (bytes32 operationId) {
+        // Direct EVM deposit: the source sender IS the caller.
+        address caller = _msgSender();
+        operationId = _fundsIn(
+            caller,
+            _toSourceSender(caller),
             amount,
             block.chainid,
             destinationChainId,
             destinationAddress,
-            operationId,
             settlementData
         );
     }
@@ -253,18 +270,21 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     function fundsIn(
         uint256 amount,
         uint256 sourceChainId,
+        bytes32 sourceSender,
         uint256 destinationChainId,
         string  calldata destinationAddress,
-        uint256 operationId,
         bytes   calldata settlementData
-    ) external payable override whenNotPaused nonReentrant onlyLZAdapter {
-        _fundsIn(
+    ) external payable override whenNotPaused nonReentrant onlyLZAdapter returns (bytes32 operationId) {
+        // LZ deposit: tokens are pulled from the adapter (`_msgSender()`), but
+        // the identity bound into `operationId` is the authenticated
+        // `sourceSender` forwarded from the source-chain entrypoint.
+        operationId = _fundsIn(
             _msgSender(),
+            sourceSender,
             amount,
             sourceChainId,
             destinationChainId,
             destinationAddress,
-            operationId,
             settlementData
         );
     }
@@ -404,16 +424,19 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         });
     }
 
-    /// @dev Shared body for both `fundsIn` overloads.
+    /// @dev Shared body for both `fundsIn` overloads. Derives the canonical
+    ///      `operationId` on-chain (never caller-supplied) and returns it.
+    /// @param from         EVM caller tokens are pulled from (user, or adapter).
+    /// @param sourceSender Original source-chain sender bound into `operationId`.
     function _fundsIn(
         address          from,
+        bytes32          sourceSender,
         uint256          amount,
         uint256          sourceChainId,
         uint256          destinationChainId,
         string  memory   destinationAddress,
-        uint256          operationId,
         bytes   calldata settlementData
-    ) private {
+    ) private returns (bytes32 operationId) {
         if (amount < minFundsInAmount)             revert AmountBelowMinimum(amount, minFundsInAmount);
         if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
         if (bytes(destinationAddress).length > MAX_ADDRESS_LENGTH) {
@@ -436,23 +459,33 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // Native payment must match the quote exactly (includes the zero-native case).
         if (msg.value != nativeCommission) revert NativeValueMismatch();
 
+        // Build the canonical context. The per-`(sourceChainId, sourceSender)`
+        // nonce is consumed here — before any external call, so a downstream
+        // revert rolls it back — and folded, with the deposit context, into the
+        // on-chain-derived operationId. Because the id binds the authenticated
+        // `sourceSender` and an incrementing nonce, a third party cannot predict
+        // or pre-empt it. Held in memory to keep the stack shallow.
+        FundsInContext memory ctx = FundsInContext({
+            token:         TOKEN,
+            sender:        from,
+            sourceSender:  sourceSender,
+            grossAmount:   amount,
+            netAmount:     netAmount,
+            operationId:   bytes32(0), // filled in on the next line
+            senderNonce:   sourceSenderNonces[sourceChainId][sourceSender]++,
+            sourceChainId: sourceChainId,
+            destChainId:   destinationChainId,
+            destAddress:   destinationAddress
+        });
+        ctx.operationId = _deriveOperationId(ctx, settlementData);
+
         // Pull the full gross amount from `from` into this contract.
         IERC20(TOKEN).safeTransferFrom(from, address(this), amount);
 
-        // Delegate per-route inbound bookkeeping.
-        IRouteRegistry(routeRegistry).onFundsIn(
-            FundsInContext({
-                token:         TOKEN,
-                sender:        from,
-                grossAmount:   amount,
-                netAmount:     netAmount,
-                operationId:   operationId,
-                sourceChainId: sourceChainId,
-                destChainId:   destinationChainId,
-                destAddress:   destinationAddress
-            }),
-            settlementData
-        );
+        // Delegate per-route inbound bookkeeping. The module returns an optional
+        // correlation id (the RGB OpId for the RGB route; 0 otherwise) to surface
+        // in the RGB-only `FundsIn` event below.
+        uint256 rgbOpId = IRouteRegistry(routeRegistry).onFundsIn(ctx, settlementData);
 
         // Isolated liquidity: credit the net deposit to its destination
         // chain's bucket. A later `fundsOut` from that chain can release at most
@@ -471,17 +504,59 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             if (!ok) revert NativeValueMismatch();
         }
 
-        emit FundsIn(from, operationId, netAmount);
+        // RGB-only correlation event: emitted only when the route module
+        // returned a non-zero external id (the RGB OpId). Other routes skip it.
+        if (rgbOpId != 0) emit FundsIn(ctx.sender, rgbOpId, ctx.netAmount);
         emit BridgeFundsIn(
-            from,
-            operationId,
-            amount,
-            netAmount,
+            ctx.operationId,
+            ctx.sourceSender,
+            ctx.sender,
+            ctx.senderNonce,
+            ctx.grossAmount,
+            ctx.netAmount,
             tokenCommission,
             nativeCommission,
-            sourceChainId,
-            destinationChainId,
-            destinationAddress
+            ctx.sourceChainId,
+            ctx.destChainId,
+            ctx.destAddress
+        );
+
+        operationId = ctx.operationId;
+    }
+
+    /// @dev Left-pads an EVM address into the `bytes32` source-sender encoding
+    ///      used by `operationId` derivation and the LZ overload.
+    function _toSourceSender(address account) private pure returns (bytes32) {
+        return bytes32(uint256(uint160(account)));
+    }
+
+    /// @dev Canonical `operationId` = domain-separated hash of the deposit
+    ///      context. Binds the id to sender/gross-amount/route/destination so it
+    ///      is both unpredictable (via the authenticated `sourceSender` + nonce)
+    ///      and provably tied to this deposit. Uses `grossAmount` (the user's
+    ///      submitted amount, known before execution) rather than the
+    ///      commission-derived `netAmount`, so a backend can best-effort
+    ///      pre-compute the id; the canonical value is still the one in the
+    ///      `BridgeFundsIn` event. `ctx.operationId` is ignored (zero when called).
+    function _deriveOperationId(FundsInContext memory ctx, bytes calldata settlementData)
+        private
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(
+                FUNDS_IN_OPERATION_TYPEHASH,
+                address(this),
+                ctx.sourceChainId,
+                ctx.sourceSender,
+                ctx.senderNonce,
+                TOKEN,
+                ctx.grossAmount,
+                ctx.destChainId,
+                keccak256(bytes(ctx.destAddress)),
+                keccak256(settlementData),
+                block.chainid
+            )
         );
     }
 }
