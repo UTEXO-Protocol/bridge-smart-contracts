@@ -63,6 +63,10 @@ interface ICommissionManager {
     error StalePrice();
     error TokenDecimalsTooLarge();
     error InvalidHeartbeat();
+    error SequencerDown();
+    error GracePeriodNotOver();
+    error PriceOutOfBounds();
+    error InvalidPriceBounds();
 
     // ============ Events ============
 
@@ -92,6 +96,12 @@ interface ICommissionManager {
     event NativeCommissionReceived(uint256 amount);
 
     event EthUsdFeedUpdated(address indexed feed, uint256 heartbeat);
+
+    /// @notice Emitted on `setSequencerUptimeFeed` (`address(0)` disables the check).
+    event SequencerUptimeFeedUpdated(address indexed feed);
+
+    /// @notice Emitted on `setEthUsdPriceBounds` (both zero disables the band).
+    event EthUsdPriceBoundsUpdated(uint256 minPrice, uint256 maxPrice);
 
     event TokenCommissionWithdrawn(
         address indexed token,
@@ -174,6 +184,16 @@ interface ICommissionManager {
     ///         setting is ~90000 with a safety buffer). Pass `address(0)` to
     ///         disable NATIVE quoting until a new feed is set.
     function setEthUsdFeed(address feed, uint256 heartbeat) external;
+
+    /// @notice Configure (or rotate) the Chainlink L2 Sequencer Uptime feed used
+    ///         to gate NATIVE quotes on Arbitrum. Pass `address(0)` to disable
+    ///         the check (non-L2 / test environments).
+    function setSequencerUptimeFeed(address feed) external;
+
+    /// @notice Configure the optional [min, max] sanity band on the ETH/USD
+    ///         answer (feed decimals). Pass `(0, 0)` to disable; otherwise
+    ///         `0 < minPrice < maxPrice`.
+    function setEthUsdPriceBounds(uint256 minPrice, uint256 maxPrice) external;
 
     function setCommissionRule(
         uint256 sourceChainId,
