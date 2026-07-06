@@ -371,10 +371,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         );
 
         // Forward token commission to the CommissionManager pool.
-        if (tokenCommission != 0) {
-            IERC20(TOKEN).safeTransfer(address(commissionManager), tokenCommission);
-            commissionManager.receiveTokenCommission(TOKEN);
-        }
+        if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
 
         // Deliver the net amount to the recipient.
         IERC20(TOKEN).safeTransfer(fundsOutParams.recipient, netAmount);
@@ -532,10 +529,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         lockedLiquidity[destinationChainId] += ctx.netAmount;
 
         // Forward token commission, if any, to the CommissionManager pool.
-        if (tokenCommission != 0) {
-            IERC20(TOKEN).safeTransfer(address(commissionManager), tokenCommission);
-            commissionManager.receiveTokenCommission(TOKEN);
-        }
+        if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
 
         // Forward the FULL native value to the CommissionManager pool. Any
         // surplus over the quoted `nativeCommission` (favorable oracle drift) is
@@ -570,6 +564,19 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///      used by `operationId` derivation and the LZ overload.
     function _toSourceSender(address account) private pure returns (bytes32) {
         return bytes32(uint256(uint160(account)));
+    }
+
+    /// @dev Transfer `amount` of TOKEN to the CommissionManager and credit the
+    ///      commission pool by the ACTUAL balance increase this transfer caused.
+    ///      Measuring the delta here (rather than in CM from `balanceOf - pool`)
+    ///      keeps the credit fee-on-transfer safe and prevents any pre-existing /
+    ///      unsolicited direct transfer to CM from being absorbed as commission.
+    function _forwardTokenCommission(uint256 amount) private {
+        address cm = address(commissionManager);
+        uint256 balBefore = IERC20(TOKEN).balanceOf(cm);
+        IERC20(TOKEN).safeTransfer(cm, amount);
+        uint256 credited = IERC20(TOKEN).balanceOf(cm) - balBefore;
+        commissionManager.receiveTokenCommission(TOKEN, credited);
     }
 
     /// @dev Canonical `operationId` = domain-separated hash of the deposit
