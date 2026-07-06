@@ -463,9 +463,9 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (destinationChainId == 0)               revert InvalidDestinationChainId();
 
         // Commission is quoted from the nominal `amount` so the native-commission
-        // quote (and the exact `msg.value` check below) stays predictable for the
-        // caller. The nominal net is intentionally discarded — the credited net is
-        // derived from the ACTUAL received amount after the transfer.
+        // quote (and the lower-bound `msg.value` check below) stays predictable
+        // for the caller. The nominal net is intentionally discarded — the
+        // credited net is derived from the ACTUAL received amount after the transfer.
         (uint256 tokenCommission, uint256 nativeCommission, ) =
             commissionManager.calculateFundsInCommission(
                 sourceChainId,
@@ -474,8 +474,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
                 amount
             );
 
-        // Native payment must match the quote exactly (includes the zero-native case).
-        if (msg.value != nativeCommission) revert NativeValueMismatch();
+        // Native payment: require at least the freshly-quoted commission
+        // — an oracle move up between quote and execution reverts here. Any
+        // overpayment from a favorable move is collected as commission below
+        // (not refunded), so the rule is uniform for direct and LZ deposits.
+        // TOKEN-commission routes (nativeCommission == 0) accept no native.
+        if (msg.value < nativeCommission) revert NativeValueMismatch();
+        if (nativeCommission == 0 && msg.value != 0) revert NativeValueMismatch();
 
         // Build the canonical context. The per-`(sourceChainId, sourceSender)`
         // nonce is consumed here — before any external call, so a downstream
@@ -532,9 +537,12 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             commissionManager.receiveTokenCommission(TOKEN);
         }
 
-        // Forward native commission, if any, to the CommissionManager pool.
-        if (nativeCommission != 0) {
-            (bool ok, ) = address(commissionManager).call{ value: nativeCommission }('');
+        // Forward the FULL native value to the CommissionManager pool. Any
+        // surplus over the quoted `nativeCommission` (favorable oracle drift) is
+        // collected as commission rather than refunded, so no native is
+        // ever left stranded in the Bridge.
+        if (msg.value != 0) {
+            (bool ok, ) = address(commissionManager).call{ value: msg.value }('');
             if (!ok) revert NativeValueMismatch();
         }
 
@@ -549,7 +557,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             ctx.grossAmount,
             ctx.netAmount,
             tokenCommission,
-            nativeCommission,
+            msg.value, // actual native collected (== nativeCommission + any drift surplus)
             ctx.sourceChainId,
             ctx.destChainId,
             ctx.destAddress
