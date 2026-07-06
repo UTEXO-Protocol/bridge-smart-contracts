@@ -1663,6 +1663,31 @@ contract BridgeTest is Test {
         assertEq(rgbModule.fundsInRecords(opId),           expectedNet,         'record = net');
     }
 
+    // R-I-04 end-to-end: a token already donated directly to the CommissionManager
+    // is NOT absorbed as commission. Bridge measures the delta of its own transfer,
+    // so the pool grows by exactly the real fee; the donation stays a stray balance.
+    function test_fundsIn_tokenCommission_doesNotAbsorbCmDonation_afterFix() public {
+        _setFundsInTokenRule(400); // 4%
+        uint256 expectedCommission = (AMOUNT * 400) / 100 / 100;
+
+        // Unsolicited direct transfer into the CommissionManager.
+        address donor = makeAddr('cmDonor');
+        uint256 donation = 5e18;
+        usdt0.mint(donor, donation);
+        vm.prank(donor);
+        usdt0.transfer(address(cm), donation);
+
+        assertEq(cm.tokenCommissionPool(address(usdt0)), 0,        'pre pool (donation not counted)');
+        assertEq(usdt0.balanceOf(address(cm)),           donation, 'pre cm balance holds donation');
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        // Pool grew by exactly the real commission — the donation was not folded in.
+        assertEq(cm.tokenCommissionPool(address(usdt0)), expectedCommission,            'pool grew only by real commission');
+        assertEq(usdt0.balanceOf(address(cm)),           donation + expectedCommission, 'donation still present as stray balance');
+    }
+
     // ========================================================================
     // Commission — fundsIn NATIVE
     // ========================================================================
