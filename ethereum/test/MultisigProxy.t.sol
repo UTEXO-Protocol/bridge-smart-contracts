@@ -1050,7 +1050,7 @@ contract MultisigProxyTest is Test {
     // ========================================================================
 
     function test_emergencyPause_works() public {
-        uint256 nonce = proxy.proposalNonce();
+        uint256 nonce = proxy.emergencyNonce();
         uint256 deadline = block.timestamp + 1 hours;
 
         bytes32 digest = MultisigHelper.digestEmergencyPause(domainSep, nonce, deadline);
@@ -1063,11 +1063,12 @@ contract MultisigProxyTest is Test {
         proxy.emergencyPause(nonce, deadline, bitmap, sigs);
 
         assertTrue(bridge.paused());
-        assertEq(proxy.proposalNonce(), nonce + 1);
+        assertEq(proxy.emergencyNonce(), nonce + 1, 'emergency lane advanced');
+        assertEq(proxy.proposalNonce(), 0, 'proposal lane untouched by emergency');
     }
 
     function test_emergencyPause_revertsOnExpired() public {
-        uint256 nonce = proxy.proposalNonce();
+        uint256 nonce = proxy.emergencyNonce();
         uint256 deadline = block.timestamp - 1;
 
         bytes32 digest = MultisigHelper.digestEmergencyPause(domainSep, nonce, deadline);
@@ -1093,7 +1094,7 @@ contract MultisigProxyTest is Test {
     function test_emergencyUnpause_works() public {
         test_emergencyPause_works();
 
-        uint256 nonce = proxy.proposalNonce();
+        uint256 nonce = proxy.emergencyNonce();
         uint256 deadline = block.timestamp + 1 hours;
 
         bytes32 digest = MultisigHelper.digestEmergencyUnpause(domainSep, nonce, deadline);
@@ -1118,7 +1119,7 @@ contract MultisigProxyTest is Test {
     ///      must be frozen as well.
     function test_emergencyPause_freezesEnclaveFundsOut() public {
         // Federation triggers the emergency freeze (both paths).
-        uint256 nonce    = proxy.proposalNonce();
+        uint256 nonce    = proxy.emergencyNonce();
         uint256 deadline = block.timestamp + 1 hours;
         bytes32 digest   = MultisigHelper.digestEmergencyPause(domainSep, nonce, deadline);
         (uint256[] memory fpks, uint256 fbitmap) = _fedSigSet2of3();
@@ -2749,42 +2750,38 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.bridge(), newBridge, 'snapshotted proposal executes despite the live timelock raise');
     }
 
-    // Current behavior: emergency actions and regular proposals share
-    // proposalNonce, so an emergency pause can stale an already signed regular
-    // proposal before it is submitted on-chain.
-    function test_emergencyAndRegularProposalNonceCollide_currentBehavior() public {
+    // R-I-09 after-fix: emergency actions run on a separate `emergencyNonce`, so
+    // an emergency pause does NOT stale an already-signed regular proposal — the
+    // pre-signed proposal still submits.
+    function test_emergencyDoesNotStaleRegularProposal_afterFix() public {
         address newBridge = makeAddr('nonceCollisionBridge');
         uint256 regularNonce = proxy.proposalNonce();
         uint256 regularDeadline = block.timestamp + 1 days;
 
+        // Pre-sign a regular proposal at the current proposal-lane nonce.
         bytes32 regularDigest = MultisigHelper.digestProposeUpdateBridge(
             domainSep, newBridge, regularNonce, regularDeadline
         );
         (uint256[] memory regularPks, uint256 regularBitmap) = _fedSigSet2of3();
         bytes[] memory regularSigs = MultisigHelper.signAll(vm, regularDigest, regularPks);
 
-        uint256 emergencyDeadline = block.timestamp + 1 hours;
-        bytes32 emergencyDigest = MultisigHelper.digestEmergencyPause(domainSep, regularNonce, emergencyDeadline);
+        // An emergency pause runs on its own lane nonce.
+        uint256 emergencyLaneNonce = proxy.emergencyNonce();
+        uint256 emergencyDeadline  = block.timestamp + 1 hours;
+        bytes32 emergencyDigest = MultisigHelper.digestEmergencyPause(domainSep, emergencyLaneNonce, emergencyDeadline);
         (uint256[] memory emergencyPks, uint256 emergencyBitmap) = _fedSigSet2of3();
         bytes[] memory emergencySigs = MultisigHelper.signAll(vm, emergencyDigest, emergencyPks);
 
-        assertFalse(bridge.paused(), 'pre bridge active');
-        assertEq(proxy.proposalNonce(), regularNonce, 'pre proposal nonce');
-        assertEq(proxy.bridge(), address(bridge), 'pre bridge target');
-
-        vm.expectEmit(false, false, false, true, address(proxy));
-        emit EmergencyPaused(regularNonce, emergencyBitmap);
-
-        proxy.emergencyPause(regularNonce, emergencyDeadline, emergencyBitmap, emergencySigs);
+        proxy.emergencyPause(emergencyLaneNonce, emergencyDeadline, emergencyBitmap, emergencySigs);
 
         assertTrue(bridge.paused(), 'bridge paused by emergency action');
-        assertEq(proxy.proposalNonce(), regularNonce + 1, 'emergency consumed proposal nonce');
+        assertEq(proxy.emergencyNonce(), emergencyLaneNonce + 1, 'emergency advanced only its own lane');
+        assertEq(proxy.proposalNonce(), regularNonce, 'proposal lane untouched by emergency');
 
-        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
-        proxy.proposeUpdateBridge(newBridge, regularNonce, regularDeadline, regularBitmap, regularSigs);
-
-        assertEq(proxy.proposalNonce(), regularNonce + 1, 'stale proposal leaves nonce unchanged');
-        assertEq(proxy.bridge(), address(bridge), 'stale proposal leaves bridge unchanged');
+        // The pre-signed regular proposal is still valid and submits successfully.
+        bytes32 id = proxy.proposeUpdateBridge(newBridge, regularNonce, regularDeadline, regularBitmap, regularSigs);
+        assertTrue(id != bytes32(0), 'regular proposal created despite the emergency action');
+        assertEq(proxy.proposalNonce(), regularNonce + 1, 'regular proposal consumed its lane nonce');
     }
 
     // Generic Bridge admin execution can still call
