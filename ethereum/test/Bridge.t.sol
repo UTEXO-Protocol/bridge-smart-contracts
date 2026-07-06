@@ -1743,37 +1743,47 @@ contract BridgeTest is Test {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
-    function test_nativeValueMismatchRejectsSmallOverpay_currentBehavior() public {
+    // R-I-03 after-fix: a native overpayment (favorable ETH/USD drift between
+    // quote and execution) is now accepted; the FULL msg.value is collected as
+    // commission (not refunded, not stranded) and the deposit completes.
+    function test_fundsIn_nativeOverpayAcceptedAndCollected_afterFix() public {
         _setFundsInNativeRule(100);
 
         (, uint256 nativeCommission,) =
             cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
         assertGt(nativeCommission, 0, 'native fee quoted');
 
-        vm.deal(user, nativeCommission + 1);
+        uint256 sent = nativeCommission + 0.01 ether; // overpay (price moved down)
+        vm.deal(user, sent);
 
-        uint256 userTokenBefore   = usdt0.balanceOf(user);
-        uint256 bridgeTokenBefore = usdt0.balanceOf(address(bridge));
-        uint256 cmNativeBefore    = address(cm).balance;
-        uint256 nativePoolBefore  = cm.nativeCommissionPool();
-        // The deposit reverts, so no record is created under the id it would derive.
-        bytes32 expectedOpId = _deriveOpId(
-            SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData()
-        );
-        uint256 recordBefore      = rgbModule.fundsInRecords(expectedOpId);
+        uint256 cmNativeBefore   = address(cm).balance;
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
 
-        // Current behavior: native fundsIn requires exact msg.value. Even a
-        // 1-wei overpay reverts before token pull, commission credit, or RGB
-        // settlement bookkeeping.
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn{ value: sent }(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        // Full msg.value collected as commission — surplus neither refunded nor
+        // left in the Bridge.
+        assertEq(address(cm).balance,       cmNativeBefore + sent,   'cm received full msg.value');
+        assertEq(cm.nativeCommissionPool(), nativePoolBefore + sent, 'native pool credited full msg.value');
+        assertEq(address(bridge).balance,   0,                       'no native stranded in bridge');
+        // Deposit completed: RGB record created (NATIVE rule → token commission 0, net == gross).
+        assertEq(rgbModule.fundsInRecords(opId), AMOUNT, 'deposit recorded from actual amount');
+    }
+
+    // R-I-03: underpaying the freshly-quoted native commission (price moved up)
+    // still reverts — the lower bound is enforced.
+    function test_fundsIn_nativeUnderpayReverts_afterFix() public {
+        _setFundsInNativeRule(100);
+
+        (, uint256 nativeCommission,) =
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+        assertGt(nativeCommission, 1, 'native fee quoted');
+
+        vm.deal(user, nativeCommission);
         vm.expectRevert(IBridge.NativeValueMismatch.selector);
         vm.prank(user);
-        bridge.fundsIn{ value: nativeCommission + 1 }(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-
-        assertEq(usdt0.balanceOf(user),           userTokenBefore,   'user token unchanged');
-        assertEq(usdt0.balanceOf(address(bridge)), bridgeTokenBefore, 'bridge token unchanged');
-        assertEq(address(cm).balance,             cmNativeBefore,    'cm native unchanged');
-        assertEq(cm.nativeCommissionPool(),       nativePoolBefore,  'native pool unchanged');
-        assertEq(rgbModule.fundsInRecords(expectedOpId), recordBefore, 'record unchanged');
+        bridge.fundsIn{ value: nativeCommission - 1 }(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
     // ========================================================================
