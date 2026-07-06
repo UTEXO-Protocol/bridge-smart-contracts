@@ -482,6 +482,8 @@ interface IMultisigProxy {
     function commissionRecipient() external view returns (address);
     function DOMAIN_SEPARATOR() external view returns (bytes32);
     function proposalNonce() external view returns (uint256);
+
+    function emergencyNonce() external view returns (uint256);
     function timelockDuration() external view returns (uint256);
     function MIN_TIMELOCK() external view returns (uint256);
     function getProposal(bytes32 proposalId) external view returns (Proposal memory);

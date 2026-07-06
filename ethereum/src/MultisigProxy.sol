@@ -60,8 +60,16 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Federation proposals.
     mapping(bytes32 => Proposal) private _proposals;
 
-    /// @notice Sequential nonce for all federation operations (propose, cancel, emergency).
+    /// @notice Sequential nonce for the regular federation lane: `_propose`
+    ///         (all typed proposals) and `cancelProposal`.
     uint256 public proposalNonce;
+
+    /// @notice Sequential nonce for the emergency lane: `emergencyPause` /
+    ///         `emergencyUnpause`. Kept separate from `proposalNonce` so an
+    ///         emergency action cannot invalidate an already-signed regular
+    ///         proposal. Cross-lane replay is independently prevented by
+    ///         each operation's distinct EIP-712 typehash.
+    uint256 public emergencyNonce;
 
     /// @notice Minimum delay (seconds) between proposal creation and execution.
     uint256 public timelockDuration;
@@ -402,14 +410,14 @@ contract MultisigProxy is IMultisigProxy {
         bytes[] calldata fedSigs
     ) external {
         if (block.timestamp > deadline) revert Expired();
-        if (nonce != proposalNonce) revert InvalidNonce();
+        if (nonce != emergencyNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(
             keccak256(abi.encode(_EMERGENCY_PAUSE_TYPEHASH, nonce, deadline))
         );
         _verifySignatures(digest, fedBitmap, fedSigs, _federationSigners, federationThreshold);
 
-        proposalNonce++;
+        emergencyNonce++;
 
         // Emergency freeze of BOTH inflow and outflow — no timelock, federation
         // signatures only. Also halts the enclave/TEE release path (it routes
@@ -428,14 +436,14 @@ contract MultisigProxy is IMultisigProxy {
         bytes[] calldata fedSigs
     ) external {
         if (block.timestamp > deadline) revert Expired();
-        if (nonce != proposalNonce) revert InvalidNonce();
+        if (nonce != emergencyNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(
             keccak256(abi.encode(_EMERGENCY_UNPAUSE_TYPEHASH, nonce, deadline))
         );
         _verifySignatures(digest, fedBitmap, fedSigs, _federationSigners, federationThreshold);
 
-        proposalNonce++;
+        emergencyNonce++;
 
         // Lift the emergency freeze on BOTH inflow and outflow.
         (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('emergencyUnpauseAll()'));
