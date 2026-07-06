@@ -43,7 +43,7 @@ import { RgbSettlementModule } from '../../src/settlement/RgbSettlementModule.so
 ///
 /// Env (required):
 ///   PRIVATE_KEY, USDT0_ADDRESS, BTC_RELAY_ADDRESS,
-///   ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD,
+///   ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD, INITIAL_ENCLAVE_SOURCE_CHAIN_ID,
 ///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD,
 ///   COMMISSION_RECIPIENT, TIMELOCK_DURATION, MIN_TIMELOCK,
 ///   MIN_FUNDS_IN_AMOUNT
@@ -93,6 +93,7 @@ contract DeployAll is Script {
         address btcRelay       = vm.envAddress('BTC_RELAY_ADDRESS');
         address[] memory enc   = vm.envAddress('ENCLAVE_SIGNERS', ',');
         uint256 encThr         = vm.envUint('ENCLAVE_THRESHOLD');
+        uint256 initialSrcChain = vm.envUint('INITIAL_ENCLAVE_SOURCE_CHAIN_ID');
         address[] memory fed   = vm.envAddress('FEDERATION_SIGNERS', ',');
         uint256 fedThr         = vm.envUint('FEDERATION_THRESHOLD');
         address commission     = vm.envAddress('COMMISSION_RECIPIENT');
@@ -156,7 +157,7 @@ contract DeployAll is Script {
         proxy = new MultisigProxy(
             address(bridge),
             address(cm),
-            enc, encThr,
+            enc, encThr, initialSrcChain,
             fed, fedThr,
             commission,
             timelock,

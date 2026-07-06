@@ -19,7 +19,7 @@ import { OutflowRateLimiter } from './libraries/OutflowRateLimiter.sol';
 ///         protocol fees are held separately from bridge liquidity.
 ///
 /// @dev - Owner is `MultisigProxy`. `fundsOut` is called via
-///        `MultisigProxy.execute()` (TEE M-of-N).
+///        `MultisigProxy.fundsOutCall()` (TEE M-of-N).
 ///      - Route-specific finality verification and per-route settlement
 ///        accounting (RGB `fundsInRecords` etc.) live behind the
 ///        `RouteRegistry` dispatcher in dedicated plugin contracts. Bridge
