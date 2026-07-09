@@ -19,7 +19,7 @@ import { OutflowRateLimiter } from './libraries/OutflowRateLimiter.sol';
 ///         protocol fees are held separately from bridge liquidity.
 ///
 /// @dev - Owner is `MultisigProxy`. `fundsOut` is called via
-///        `MultisigProxy.execute()` (TEE M-of-N).
+///        `MultisigProxy.fundsOutCall()` (TEE M-of-N).
 ///      - Route-specific finality verification and per-route settlement
 ///        accounting (RGB `fundsInRecords` etc.) live behind the
 ///        `RouteRegistry` dispatcher in dedicated plugin contracts. Bridge
@@ -371,10 +371,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         );
 
         // Forward token commission to the CommissionManager pool.
-        if (tokenCommission != 0) {
-            IERC20(TOKEN).safeTransfer(address(commissionManager), tokenCommission);
-            commissionManager.receiveTokenCommission(TOKEN);
-        }
+        if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
 
         // Deliver the net amount to the recipient.
         IERC20(TOKEN).safeTransfer(fundsOutParams.recipient, netAmount);
@@ -463,9 +460,9 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (destinationChainId == 0)               revert InvalidDestinationChainId();
 
         // Commission is quoted from the nominal `amount` so the native-commission
-        // quote (and the exact `msg.value` check below) stays predictable for the
-        // caller. The nominal net is intentionally discarded — the credited net is
-        // derived from the ACTUAL received amount after the transfer.
+        // quote (and the lower-bound `msg.value` check below) stays predictable
+        // for the caller. The nominal net is intentionally discarded — the
+        // credited net is derived from the ACTUAL received amount after the transfer.
         (uint256 tokenCommission, uint256 nativeCommission, ) =
             commissionManager.calculateFundsInCommission(
                 sourceChainId,
@@ -474,8 +471,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
                 amount
             );
 
-        // Native payment must match the quote exactly (includes the zero-native case).
-        if (msg.value != nativeCommission) revert NativeValueMismatch();
+        // Native payment: require at least the freshly-quoted commission
+        // — an oracle move up between quote and execution reverts here. Any
+        // overpayment from a favorable move is collected as commission below
+        // (not refunded), so the rule is uniform for direct and LZ deposits.
+        // TOKEN-commission routes (nativeCommission == 0) accept no native.
+        if (msg.value < nativeCommission) revert NativeValueMismatch();
+        if (nativeCommission == 0 && msg.value != 0) revert NativeValueMismatch();
 
         // Build the canonical context. The per-`(sourceChainId, sourceSender)`
         // nonce is consumed here — before any external call, so a downstream
@@ -515,6 +517,14 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (received < tokenCommission) revert InsufficientReceived(received, tokenCommission);
         ctx.netAmount = received - tokenCommission;
 
+        // Forward token commission BEFORE the settlement hook so that any
+        // external call the hook makes (or a contract reading `getContractBalance`
+        // during it) observes only the net amount the Bridge actually retains,
+        // never the in-flight commission about to leave. `netAmount` is
+        // already fixed above, so the hook does not depend on the tokens still
+        // being held here.
+        if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
+
         // Delegate per-route inbound bookkeeping. The module returns an optional
         // correlation id (the RGB OpId for the RGB route; 0 otherwise) to surface
         // in the RGB-only `FundsIn` event below.
@@ -526,15 +536,12 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // amount so the ledger can never exceed real custody.
         lockedLiquidity[destinationChainId] += ctx.netAmount;
 
-        // Forward token commission, if any, to the CommissionManager pool.
-        if (tokenCommission != 0) {
-            IERC20(TOKEN).safeTransfer(address(commissionManager), tokenCommission);
-            commissionManager.receiveTokenCommission(TOKEN);
-        }
-
-        // Forward native commission, if any, to the CommissionManager pool.
-        if (nativeCommission != 0) {
-            (bool ok, ) = address(commissionManager).call{ value: nativeCommission }('');
+        // Forward the FULL native value to the CommissionManager pool. Any
+        // surplus over the quoted `nativeCommission` (favorable oracle drift) is
+        // collected as commission rather than refunded, so no native is
+        // ever left stranded in the Bridge.
+        if (msg.value != 0) {
+            (bool ok, ) = address(commissionManager).call{ value: msg.value }('');
             if (!ok) revert NativeValueMismatch();
         }
 
@@ -549,7 +556,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             ctx.grossAmount,
             ctx.netAmount,
             tokenCommission,
-            nativeCommission,
+            msg.value, // actual native collected (== nativeCommission + any drift surplus)
             ctx.sourceChainId,
             ctx.destChainId,
             ctx.destAddress
@@ -562,6 +569,19 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///      used by `operationId` derivation and the LZ overload.
     function _toSourceSender(address account) private pure returns (bytes32) {
         return bytes32(uint256(uint160(account)));
+    }
+
+    /// @dev Transfer `amount` of TOKEN to the CommissionManager and credit the
+    ///      commission pool by the ACTUAL balance increase this transfer caused.
+    ///      Measuring the delta here (rather than in CM from `balanceOf - pool`)
+    ///      keeps the credit fee-on-transfer safe and prevents any pre-existing /
+    ///      unsolicited direct transfer to CM from being absorbed as commission.
+    function _forwardTokenCommission(uint256 amount) private {
+        address cm = address(commissionManager);
+        uint256 balBefore = IERC20(TOKEN).balanceOf(cm);
+        IERC20(TOKEN).safeTransfer(cm, amount);
+        uint256 credited = IERC20(TOKEN).balanceOf(cm) - balBefore;
+        commissionManager.receiveTokenCommission(TOKEN, credited);
     }
 
     /// @dev Canonical `operationId` = domain-separated hash of the deposit
