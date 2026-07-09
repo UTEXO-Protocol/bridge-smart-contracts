@@ -40,6 +40,10 @@ contract BaseBridgeTest is Test {
         vm.prank(deployer);
         bridge.transferOwnership(owner);
 
+        // Ownable2Step: the new owner must accept before it takes effect.
+        vm.prank(owner);
+        bridge.acceptOwnership();
+
         token.mint(user, AMOUNT * 10);
         vm.prank(user);
         token.approve(address(bridge), type(uint256).max);

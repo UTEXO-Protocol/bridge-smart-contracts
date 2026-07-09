@@ -143,6 +143,10 @@ contract BridgeTest is Test {
         bridge.transferOwnership(multisig);
         vm.stopPrank();
 
+        // Ownable2Step: the new owner must accept before it takes effect.
+        vm.prank(multisig);
+        bridge.acceptOwnership();
+
         // fund user and approve bridge
         usdt0.mint(user, AMOUNT * 10);
         vm.prank(user);
