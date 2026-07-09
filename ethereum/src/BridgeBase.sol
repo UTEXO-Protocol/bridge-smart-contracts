@@ -37,15 +37,10 @@ abstract contract BridgeBase is Ownable2Step, Pausable {
     // Events
     // =========================================================================
 
-    /// @notice Emitted on every fundsIn.
-    /// @param sender      Address that deposited the tokens.
-    /// @param operationId Backend-assigned operation identifier.
-    /// @param amount      Amount of tokens locked.
-    event FundsIn(
-        address indexed sender,
-        uint256 indexed operationId,
-        uint256 amount
-    );
+    /// @dev The `FundsIn` event is declared by each concrete bridge, because
+    ///      the two variants use different `operationId` types: the production
+    ///      `Bridge` derives a `bytes32` id on-chain (see `IBridge`), while the
+    ///      minimal `BaseBridge` echoes a caller-supplied `uint256` id.
 
     /// @notice Emitted when the outflow (withdrawal) path is frozen.
     /// @dev The inflow path reuses OpenZeppelin `Pausable`, which emits its own
