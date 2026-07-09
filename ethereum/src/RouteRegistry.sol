@@ -2,6 +2,7 @@
 pragma solidity 0.8.35;
 
 import { Ownable } from '@openzeppelin/contracts/access/Ownable.sol';
+import { Ownable2Step } from '@openzeppelin/contracts/access/Ownable2Step.sol';
 
 import { IRouteRegistry }    from './interfaces/IRouteRegistry.sol';
 import { IFinalityVerifier } from './interfaces/IFinalityVerifier.sol';
@@ -33,7 +34,7 @@ import {
 ///      auditable on-chain rather than hidden behind an empty slot.
 ///
 ///      `renounceOwnership` is permanently blocked.
-contract RouteRegistry is IRouteRegistry, Ownable {
+contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // =========================================================================
     // Errors
     // =========================================================================

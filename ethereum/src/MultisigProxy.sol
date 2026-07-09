@@ -137,6 +137,9 @@ contract MultisigProxy is IMultisigProxy {
     bytes32 private constant _PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH = keccak256(
         'ProposeAdminExecuteCommissionManager(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
     );
+    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH = keccak256(
+        'ProposeAdminExecuteRouteRegistry(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
+    );
     bytes32 private constant _PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH = keccak256(
         'ProposeWithdrawTokenCommissionCM(address token,uint256 amount,uint256 nonce,uint256 deadline)'
     );
@@ -153,6 +156,9 @@ contract MultisigProxy is IMultisigProxy {
     );
     bytes32 private constant _PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH = keccak256(
         'ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)'
+    );
+    bytes32 private constant _PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH = keccak256(
+        'ProposeDisableLZAdapter(uint256 nonce,uint256 deadline)'
     );
 
     // Federation propose — RouteRegistry side
@@ -593,6 +599,30 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     /// @inheritdoc IMultisigProxy
+    function proposeAdminExecuteRouteRegistry(
+        bytes calldata callData,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        if (callData.length < SELECTOR_LENGTH) revert CallDataTooShort();
+
+        bytes4 selector;
+        assembly { selector := calldataload(callData.offset) }
+
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH, selector, keccak256(callData), nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.AdminExecuteRouteRegistry,
+            callData,
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
     function proposeWithdrawTokenCommissionCM(
         address token,
         uint256 amount,
@@ -693,6 +723,24 @@ contract MultisigProxy is IMultisigProxy {
         return _propose(
             OperationType.UpdateLZAdapter,
             abi.encode(newLZAdapter),
+            nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeDisableLZAdapter(
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(
+            _PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH, nonce, deadline
+        ));
+
+        return _propose(
+            OperationType.DisableLZAdapter,
+            '',
             nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
@@ -966,6 +1014,16 @@ contract MultisigProxy is IMultisigProxy {
             (bool ok, bytes memory ret) = commissionManager.call(opData);
             _propagateRevert(ok, ret);
 
+        } else if (opType == OperationType.AdminExecuteRouteRegistry) {
+            // opData = raw RouteRegistry callData. Registry resolved from Bridge
+            // (single source of truth), same as SetRoute. Enables ownership
+            // migration (transferOwnership / acceptOwnership) for the Ownable2Step
+            // RouteRegistry.
+            address registry = IBridge(bridge).routeRegistry();
+            if (registry == address(0)) revert ZeroTarget();
+            (bool ok, bytes memory ret) = registry.call(opData);
+            _propagateRevert(ok, ret);
+
         } else if (opType == OperationType.WithdrawTokenCommissionCM) {
             (address token, uint256 amount) = abi.decode(opData, (address, uint256));
             address recipient = commissionRecipient;
@@ -1006,9 +1064,15 @@ contract MultisigProxy is IMultisigProxy {
 
         } else if (opType == OperationType.UpdateLZAdapter) {
             address newAdapter = abi.decode(opData, (address));
+            if (newAdapter == address(0)) revert InvalidLZAdapter();
             address oldAdapter = lzAdapter;
             lzAdapter = newAdapter;
             emit LZAdapterUpdated(oldAdapter, newAdapter);
+
+        } else if (opType == OperationType.DisableLZAdapter) {
+            address oldAdapter = lzAdapter;
+            lzAdapter = address(0);
+            emit LZAdapterDisabled(oldAdapter);
 
         } else if (opType == OperationType.SetRoute) {
             // Forwards to RouteRegistry, looked up dynamically from Bridge to
