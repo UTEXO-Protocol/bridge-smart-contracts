@@ -250,6 +250,15 @@ contract MultisigProxyTest is Test {
         routeRegistry.transferOwnership(address(proxy));
         vm.stopPrank();
 
+        // Ownable2Step: the proxy accepts ownership of all three (prank shortcut;
+        // the real governance-driven accept path is covered by a dedicated test).
+        vm.prank(address(proxy));
+        bridge.acceptOwnership();
+        vm.prank(address(proxy));
+        cm.acceptOwnership();
+        vm.prank(address(proxy));
+        routeRegistry.acceptOwnership();
+
         domainSep = proxy.DOMAIN_SEPARATOR();
 
         // Fund user, lock tokens into the bridge so fundsOut has a pool.
@@ -2725,10 +2734,11 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.bridge(), address(bridge), 'stale proposal leaves bridge unchanged');
     }
 
-    // Current behavior: generic Bridge admin execution can call standard
-    // Ownable transferOwnership directly. A wrong nonzero owner leaves the
-    // proxy unable to execute future Bridge owner-only operations.
-    function test_singleStepOwnershipTransferCanOrphanGovernance_currentBehavior() public {
+    // Generic Bridge admin execution can still call
+    // transferOwnership, but Ownable2Step only records a pendingOwner. A wrong
+    // non-zero address never becomes owner, so governance is not orphaned and
+    // the proxy keeps driving owner-only operations.
+    function test_ownershipTransferToWrongAddressDoesNotOrphanGovernance_afterFix() public {
         address wrongOwner = makeAddr('wrongBridgeOwner');
         uint256 startTime = block.timestamp;
 
@@ -2757,14 +2767,14 @@ contract MultisigProxyTest is Test {
         uint256 transferReadyAt = startTime + TIMELOCK + 1;
         vm.warp(transferReadyAt);
 
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit OwnershipTransferred(address(proxy), wrongOwner);
         vm.expectEmit(true, true, false, true, address(proxy));
         emit ProposalExecuted(transferProposalId, IMultisigProxy.OperationType.AdminExecute);
 
         proxy.executeProposal(transferProposalId, transferCallData);
 
-        assertEq(bridge.owner(), wrongOwner, 'bridge owner moved away from proxy');
+        // Ownable2Step: ownership did NOT move; the wrong address is only pending.
+        assertEq(bridge.owner(), address(proxy), 'owner unchanged (two-step)');
+        assertEq(bridge.pendingOwner(), wrongOwner, 'wrong address only pending');
 
         address replacementRegistry = makeAddr('replacementRouteRegistry');
         bytes memory registryCallData = abi.encodeWithSignature('setRouteRegistry(address)', replacementRegistry);
@@ -2785,11 +2795,37 @@ contract MultisigProxyTest is Test {
 
         vm.warp(transferReadyAt + TIMELOCK + 1);
 
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(proxy)));
+        // Governance is NOT orphaned: the proxy still owns Bridge, so the
+        // setRouteRegistry op executes and takes effect.
         proxy.executeProposal(registryProposalId, registryCallData);
 
-        assertEq(bridge.owner(), wrongOwner, 'wrong owner remains');
-        assertEq(bridge.routeRegistry(), routeRegistryBefore, 'proxy cannot update bridge config');
+        assertEq(bridge.owner(), address(proxy), 'proxy remains owner');
+        assertEq(bridge.routeRegistry(), replacementRegistry, 'proxy still governs bridge config');
+    }
+
+    // The new AdminExecuteRouteRegistry op gives the proxy a call path
+    // into RouteRegistry (which previously had only the typed SetRoute op), so
+    // it can drive RouteRegistry's Ownable2Step transferOwnership on migration.
+    function test_adminExecuteRouteRegistry_initiatesRouteRegistryOwnershipTransfer() public {
+        address newOwner = makeAddr('newRouteRegistryOwner');
+        bytes memory callData = abi.encodeWithSignature('transferOwnership(address)', newOwner);
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteRouteRegistry(
+            domainSep, bytes4(callData), callData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        assertEq(routeRegistry.owner(), address(proxy), 'pre RR owner');
+
+        bytes32 id = proxy.proposeAdminExecuteRouteRegistry(callData, nonce, deadline, bitmap, sigs);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, callData);
+
+        // Ownable2Step: RR ownership is only pending until the new owner accepts.
+        assertEq(routeRegistry.owner(), address(proxy), 'RR owner unchanged (two-step)');
+        assertEq(routeRegistry.pendingOwner(), newOwner, 'RR transfer started via new op');
     }
 
     // The typed commission-withdraw path pins the recipient to
