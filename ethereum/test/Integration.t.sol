@@ -85,8 +85,11 @@ contract IntegrationTest is Test {
     uint256 constant FUNDS_OUT_PERCENT = 100;
     uint8   constant FUNDS_OUT_MULT    = 100;
 
-    uint256 constant TX_ID_IN  = 42;
-    uint256 constant BURN_ID   = 9_001;
+    // Non-zero RGB OpId threaded through the RGB-route settlementData on fundsIn.
+    uint256 constant RGB_OP_ID = 0xABCDEF;
+    bytes32 constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
+        'UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)'
+    );
 
     // RGB proof = two (height, commit) pairs: a deep source block (RGB
     // burn/lock) and a fresh latest block (relay head). gap = 6 - 1 = 5.
@@ -120,6 +123,30 @@ contract IntegrationTest is Test {
     // =========================================================================
     // Setup
     // =========================================================================
+
+    function _deriveBurnId(
+        address recipient_,
+        uint256 amount,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string memory sourceAddress,
+        bytes memory proof,
+        bytes memory settlementData
+    ) internal view returns (uint256) {
+        return uint256(keccak256(abi.encode(
+            FUNDS_OUT_BURN_ID_TYPEHASH,
+            address(bridge),
+            block.chainid,
+            address(token),
+            recipient_,
+            amount,
+            sourceChainId,
+            destinationChainId,
+            keccak256(bytes(sourceAddress)),
+            keccak256(proof),
+            keccak256(settlementData)
+        )));
+    }
 
     function setUp() public {
         encA1 = vm.addr(encPk1); encA2 = vm.addr(encPk2); encA3 = vm.addr(encPk3);
@@ -181,6 +208,7 @@ contract IntegrationTest is Test {
             address(bridge),
             address(cm),
             enc, 2,
+            RGB_CHAIN_ID,
             fed, 2,
             commissionReceiver,
             TIMELOCK,
@@ -276,12 +304,13 @@ contract IntegrationTest is Test {
         uint256 userBefore = token.balanceOf(user);
 
         vm.prank(user);
-        bridge.fundsIn(
+        // RGB route: settlementData carries the non-zero RGB OpId. The record is
+        // keyed by the bridge-derived operationId returned here.
+        bytes32 opId = bridge.fundsIn(
             USER_DEPOSIT,
             RGB_CHAIN_ID,
             'rgb:asset1qp0y3mq/utxo1abc',
-            TX_ID_IN,
-            ''   // settlementData ignored by RgbSettlementModule on inbound
+            abi.encode(RGB_OP_ID)
         );
 
         uint256 tokenCommissionIn = tInQuote;
@@ -291,7 +320,7 @@ contract IntegrationTest is Test {
         assertEq(token.balanceOf(address(bridge)),       netBridgedIn,              'bridge keeps net');
         assertEq(token.balanceOf(address(cm)),           tokenCommissionIn,         'cm got commission');
         assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn,         'cm pool mirrors balance');
-        assertEq(rgbModule.fundsInRecords(TX_ID_IN),     netBridgedIn,              'record stores net');
+        assertEq(rgbModule.fundsInRecords(opId),         netBridgedIn,              'record stores net');
 
         // -------------------------------------------------------------------------
         // 3. TEE-signed fundsOut — RGBVerifier checks the BtcRelay header, the
@@ -299,26 +328,30 @@ contract IntegrationTest is Test {
         //    amount (no consumption), Bridge releases `netBridgedIn` from the
         //    pool. 1% outbound commission to CM, the rest to recipient.
         // -------------------------------------------------------------------------
-        uint256[] memory fundsInIds     = new uint256[](1);
-        fundsInIds[0]     = TX_ID_IN;
+        bytes32[] memory fundsInIds     = new bytes32[](1);
+        fundsInIds[0]     = opId;
         uint256[] memory fundsInAmounts = new uint256[](1);
         fundsInAmounts[0] = netBridgedIn;   // must equal the recorded mint amount
 
         bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
         bytes memory settlementData = abi.encode(fundsInIds, fundsInAmounts);
+        string memory sourceAddress = 'rgb:sender/utxo1src';
+        uint256 burnId = _deriveBurnId(
+            recipient, netBridgedIn, RGB_CHAIN_ID, SOURCE_CHAIN_ID, sourceAddress, proof, settlementData
+        );
 
         IBridge.FundsOutParams memory params = IBridge.FundsOutParams(
             recipient,
             netBridgedIn,          // amount = full bridged pool from this deposit
-            BURN_ID,
+            burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
-            'rgb:sender/utxo1src',
+            sourceAddress,
             proof,
             settlementData
         );
 
-        uint256 outNonce    = proxy.teeNonce();
+        uint256 outNonce    = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 outDeadline = block.timestamp + 1 hours;
         bytes32 outDigest   = MultisigHelper.digestTeeFundsOut(
             domainSep, params, outNonce, outDeadline
@@ -334,10 +367,10 @@ contract IntegrationTest is Test {
             netBridgedIn,
             netOut,
             tokenCommissionOut,
-            BURN_ID,
+            burnId,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
-            'rgb:sender/utxo1src'
+            sourceAddress
         );
 
         proxy.fundsOutCall(params, outNonce, outDeadline, 3, teeSigs);
@@ -346,8 +379,8 @@ contract IntegrationTest is Test {
         assertEq(token.balanceOf(recipient),             netOut,                                 'recipient got net');
         assertEq(token.balanceOf(address(cm)),           tokenCommissionIn + tokenCommissionOut, 'cm accrued both fees');
         assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn + tokenCommissionOut, 'cm pool mirrors');
-        assertEq(rgbModule.fundsInRecords(TX_ID_IN),     netBridgedIn,                           'fundsIn record unchanged (permanent)');
-        assertTrue(bridge.consumedBurnIds(BURN_ID),                                              'burnId recorded');
+        assertEq(rgbModule.fundsInRecords(opId),         netBridgedIn,                           'fundsIn record unchanged (permanent)');
+        assertTrue(bridge.consumedBurnIds(burnId),                                               'burnId recorded');
 
         // -------------------------------------------------------------------------
         // 4. Federation withdraws ERC-20 commission from CM to commissionReceiver.
@@ -432,19 +465,18 @@ contract IntegrationTest is Test {
         vm.deal(user, nativeQuote);
 
         vm.prank(user);
-        bridge.fundsIn{ value: nativeQuote }(
+        bytes32 opId = bridge.fundsIn{ value: nativeQuote }(
             USER_DEPOSIT,
             RGB_CHAIN_ID,
             'rgb:asset1qp0y3mq/utxo1abc',
-            TX_ID_IN,
-            ''
+            abi.encode(RGB_OP_ID)
         );
 
         assertEq(token.balanceOf(address(bridge)),    USER_DEPOSIT, 'bridge got full token amount');
         assertEq(token.balanceOf(address(cm)),        0,            'cm no token commission');
         assertEq(address(cm).balance,                 nativeQuote,  'cm got native commission');
         assertEq(cm.nativeCommissionPool(),           nativeQuote,  'cm native pool');
-        assertEq(rgbModule.fundsInRecords(TX_ID_IN),  USER_DEPOSIT, 'record stores full amount');
+        assertEq(rgbModule.fundsInRecords(opId),      USER_DEPOSIT, 'record stores full amount');
 
         // Federation withdraws native commission.
         uint256 wdNonce    = proxy.proposalNonce();
