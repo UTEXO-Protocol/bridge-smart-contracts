@@ -208,6 +208,7 @@ contract IntegrationTest is Test {
             address(bridge),
             address(cm),
             enc, 2,
+            RGB_CHAIN_ID,
             fed, 2,
             commissionReceiver,
             TIMELOCK,
@@ -350,7 +351,7 @@ contract IntegrationTest is Test {
             settlementData
         );
 
-        uint256 outNonce    = proxy.teeNonce();
+        uint256 outNonce    = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 outDeadline = block.timestamp + 1 hours;
         bytes32 outDigest   = MultisigHelper.digestTeeFundsOut(
             domainSep, params, outNonce, outDeadline
