@@ -160,11 +160,24 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
     /// @inheritdoc IBridge
     /// @dev Owner is `MultisigProxy`; federation governance gates this call
-    ///      on its M-of-N timelock flow.
+    ///      on its M-of-N timelock flow. Rotation only — rejects `address(0)`
+    ///      so an accidental zero cannot silently close the path; use
+    ///      `disableLZAdapter` for an explicit, separately-logged shutdown.
     function setLZAdapter(address newAdapter) external override onlyOwner {
+        if (newAdapter == address(0)) revert InvalidLZAdapter();
         address old = lzAdapter;
         lzAdapter = newAdapter;
         emit LZAdapterUpdated(old, newAdapter);
+    }
+
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`. Explicit disable, emitting
+    ///      `LZAdapterDisabled` so monitoring can tell a shutdown from a
+    ///      rotation.
+    function disableLZAdapter() external override onlyOwner {
+        address old = lzAdapter;
+        lzAdapter = address(0);
+        emit LZAdapterDisabled(old);
     }
 
     /// @inheritdoc IBridge

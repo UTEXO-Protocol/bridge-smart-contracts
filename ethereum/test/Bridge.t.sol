@@ -29,10 +29,10 @@ import { Pausable }  from '@openzeppelin/contracts/utils/Pausable.sol';
 
 contract BridgeTest is Test {
     // Events re-declared locally for vm.expectEmit
-    event FundsIn(address indexed sender, uint256 operationId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 indexed operationId, uint256 amount);
     event BridgeFundsIn(
         address indexed sender,
-        uint256 operationId,
+        uint256 indexed operationId,
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
@@ -46,12 +46,13 @@ contract BridgeTest is Test {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 burnId,
+        uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  sourceAddress
     );
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
+    event LZAdapterDisabled(address indexed oldAdapter);
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
     event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
     event OutflowLimitUpdated(uint256 indexed chainId, uint256 capacity, uint256 refillRate, uint256 available);
@@ -141,6 +142,10 @@ contract BridgeTest is Test {
         // governance-driven paths live in MultisigProxy.t.sol / Integration.t.sol.
         bridge.transferOwnership(multisig);
         vm.stopPrank();
+
+        // Ownable2Step: the new owner must accept before it takes effect.
+        vm.prank(multisig);
+        bridge.acceptOwnership();
 
         // fund user and approve bridge
         usdt0.mint(user, AMOUNT * 10);
@@ -320,7 +325,7 @@ contract BridgeTest is Test {
     // setLZAdapter
     // ========================================================================
 
-    function test_setLZAdapter_ownerCanSetAndUnset() public {
+    function test_setLZAdapter_rotatesToNonZero() public {
         address adapter = makeAddr('adapter');
 
         vm.expectEmit(true, true, false, true, address(bridge));
@@ -328,14 +333,32 @@ contract BridgeTest is Test {
 
         vm.prank(multisig);
         bridge.setLZAdapter(adapter);
-        assertEq(bridge.lzAdapter(), adapter, 'set');
+        assertEq(bridge.lzAdapter(), adapter, 'rotated');
+    }
 
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit LZAdapterUpdated(adapter, address(0));
+    function test_setLZAdapter_revertsOnZero() public {
+        vm.prank(multisig);
+        vm.expectRevert(IBridge.InvalidLZAdapter.selector);
+        bridge.setLZAdapter(address(0));
+    }
+
+    function test_disableLZAdapter_clearsAndEmits() public {
+        address adapter = makeAddr('adapter');
+        vm.prank(multisig);
+        bridge.setLZAdapter(adapter);
+
+        vm.expectEmit(true, false, false, false, address(bridge));
+        emit LZAdapterDisabled(adapter);
 
         vm.prank(multisig);
-        bridge.setLZAdapter(address(0));
-        assertEq(bridge.lzAdapter(), address(0), 'unset');
+        bridge.disableLZAdapter();
+        assertEq(bridge.lzAdapter(), address(0), 'disabled');
+    }
+
+    function test_disableLZAdapter_revertsIfNotOwner() public {
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        bridge.disableLZAdapter();
     }
 
     function test_setLZAdapter_revertsIfNotOwner() public {
@@ -632,6 +655,77 @@ contract BridgeTest is Test {
     }
 
     // ========================================================================
+    // Settlement-data length cap
+    //
+    // settlementData is forwarded to the route settlement module, which may
+    // decode and iterate it (RgbSettlementModule.beforeFundsOut walks the
+    // (operationIds, amounts) arrays). It is capped at MAX_SETTLEMENT_DATA_LENGTH
+    // on both fundsOut and fundsIn to keep any settlement loop bounded. One byte
+    // over reverts SettlementDataTooLong; the exact cap clears the guard.
+    // ========================================================================
+
+    function test_fundsOut_revertsOnSettlementDataTooLong() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        bytes memory tooLong = _bytesOfLength(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
+        vm.prank(multisig);
+        _fundsOut(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), tooLong
+        );
+    }
+
+    function test_fundsOut_acceptsSettlementDataAtMaxLength() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        // settlementData at the exact cap clears the length guard. The arbitrary
+        // blob is not a valid (operationIds, amounts) encoding, so it reverts
+        // later in the settlement module — the guard is isolated by asserting the
+        // revert is NOT SettlementDataTooLong.
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        bytes memory atMax = _bytesOfLength(max);
+
+        vm.prank(multisig);
+        try bridge.fundsOut(IBridge.FundsOutParams(
+            recipient, AMOUNT, BURN_ID,
+            RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
+            _proof(), atMax
+        )) {
+            // a valid settlement blob would succeed; this one won't, but if it
+            // did the length guard still passed — which is what we assert.
+        } catch (bytes memory reason) {
+            bytes4 sel = bytes4(reason);
+            assertTrue(sel != IBridge.SettlementDataTooLong.selector, 'max-length settlementData must clear the length guard');
+        }
+    }
+
+    function test_fundsIn_revertsOnSettlementDataTooLong() public {
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        bytes memory tooLong = _bytesOfLength(max + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, tooLong);
+    }
+
+    function test_fundsIn_acceptsSettlementDataAtMaxLength() public {
+        // The RGB inbound module ignores settlementData, so an arbitrary blob at
+        // the exact cap is accepted and the deposit records normally.
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        bytes memory atMax = _bytesOfLength(max);
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, atMax);
+        assertEq(rgbModule.fundsInRecords(TX_ID), AMOUNT, 'deposit at the settlement-data cap is accepted');
+    }
+
+    // ========================================================================
     // fundsIn — adapter overload (`onlyLZAdapter`)
     // ========================================================================
 
@@ -664,7 +758,7 @@ contract BridgeTest is Test {
 
         // Drop the emitter filter so Forge's expectEmit scans past the token's
         // Transfer event (emitter = usdt0) and matches BridgeFundsIn by topic0.
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsIn(mockAdapter, TX_ID, AMOUNT, AMOUNT, 0, 0, customSrc, RGB_CHAIN_ID, DST_ADDR);
 
         vm.prank(mockAdapter);
@@ -695,9 +789,9 @@ contract BridgeTest is Test {
     }
 
     function test_fundsIn_emitsBothEvents() public {
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, TX_ID, AMOUNT);
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsIn(user, TX_ID, AMOUNT, AMOUNT, 0, 0, SOURCE_CHAIN_ID, RGB_CHAIN_ID, DST_ADDR);
 
         vm.prank(user);
@@ -760,7 +854,7 @@ contract BridgeTest is Test {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
             recipient, AMOUNT, AMOUNT, 0, BURN_ID,
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
@@ -1577,9 +1671,9 @@ contract BridgeTest is Test {
         assertEq(nativePoolBefore, 0, 'pre native pool');
         assertEq(recordBefore,     0, 'pre record');
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, TX_ID, netAmount);
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsIn(
             user,
             TX_ID,
@@ -1648,9 +1742,9 @@ contract BridgeTest is Test {
         assertEq(nativePoolBefore,  0, 'pre native pool');
         assertEq(recordBefore,      0, 'pre record');
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, TX_ID, netAmount);
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsIn(
             user,
             TX_ID,
@@ -1719,7 +1813,7 @@ contract BridgeTest is Test {
         assertEq(recordBefore,     AMOUNT, 'pre record');
         assertFalse(bridge.consumedBurnIds(BURN_ID), 'pre burn id');
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
             recipient,
             releaseAmount,
@@ -2011,7 +2105,7 @@ contract BridgeTest is Test {
         // this alternate enabled route because the proof is not bound to release
         // context on-chain. If that binding is enforced later, invert this to
         // expect a revert.
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
             alternateRecipient,
             releaseAmount,
@@ -2061,9 +2155,9 @@ contract BridgeTest is Test {
         // Current behavior: operationId uniqueness is enforced only by the
         // settlement record. A different address can occupy a predicted id
         // first, but doing so locks that address's own USDT0 in the Bridge.
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(preemptor, predictedOperationId, preemptAmount);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             preemptor,
             predictedOperationId,
@@ -2126,9 +2220,9 @@ contract BridgeTest is Test {
         assertEq(cm.nativeCommissionPool(), nativePoolBefore, 'native pool unchanged');
         assertEq(rgbModule.fundsInRecords(operationId), recordBefore, 'record not created');
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, operationId, AMOUNT);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             operationId,
@@ -2162,9 +2256,9 @@ contract BridgeTest is Test {
         assertEq(bridgeBefore, 0, 'pre bridge token');
         assertEq(recordBefore, 0, 'pre record');
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, operationId, AMOUNT);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             operationId,
@@ -2217,9 +2311,9 @@ contract BridgeTest is Test {
         assertEq(cmBefore, 0, 'pre cm token');
         assertEq(cmPoolBefore, 0, 'pre cm pool');
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, TX_ID + 10_000, netAmount);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             TX_ID + 10_000,
@@ -2378,9 +2472,9 @@ contract BridgeTest is Test {
         uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
         uint256 nativePoolBefore = cm.nativeCommissionPool();
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, operationId, netAmount);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             operationId,
@@ -2470,9 +2564,9 @@ contract BridgeTest is Test {
         uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
         uint256 nativePoolBefore = cm.nativeCommissionPool();
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, operationId, 0);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             operationId,
@@ -2495,9 +2589,9 @@ contract BridgeTest is Test {
         assertEq(cm.nativeCommissionPool(), nativePoolBefore, 'native pool unchanged');
         assertEq(rgbModule.fundsInRecords(operationId), 0, 'zero record leaves id reusable');
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, operationId, 0);
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsIn(
             user,
             operationId,

@@ -104,7 +104,7 @@ contract IntegrationTest is Test {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 burnId,
+        uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  sourceAddress
@@ -190,6 +190,13 @@ contract IntegrationTest is Test {
         cm.transferOwnership(address(proxy));
         bridge.transferOwnership(address(proxy));
         vm.stopPrank();
+
+        // Ownable2Step: the proxy accepts ownership (prank shortcut; the real
+        // governance-accept path is exercised in MultisigProxy.t.sol).
+        vm.prank(address(proxy));
+        cm.acceptOwnership();
+        vm.prank(address(proxy));
+        bridge.acceptOwnership();
 
         // Invariants from deployment.
         assertEq(address(bridge),                       predictedBridge,        'bridge prediction');
@@ -315,7 +322,7 @@ contract IntegrationTest is Test {
         uint256 tokenCommissionOut = netBridgedIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
         uint256 netOut             = netBridgedIn - tokenCommissionOut;
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
             recipient,
             netBridgedIn,
