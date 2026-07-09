@@ -22,9 +22,13 @@ contract MockSettlementModule is ISettlementModule {
     uint256 public onFundsInCount;
     uint256 public beforeFundsOutCount;
 
+    /// @notice Correlation id returned from `onFundsIn` (mirrors the RGB OpId a
+    ///         real settlement module would surface). Defaults to 0.
+    uint256 public externalIdToReturn;
+
     // Last-call recordings — kept minimal; we don't need every field.
     address public lastSender;
-    uint256 public lastOperationId;
+    bytes32 public lastOperationId;
     uint256 public lastNetAmount;
     address public lastRecipient;
     uint256 public lastAmount;
@@ -48,10 +52,15 @@ contract MockSettlementModule is ISettlementModule {
         balanceProbeTarget = target;
     }
 
+    function setExternalIdToReturn(uint256 v) external {
+        externalIdToReturn = v;
+    }
+
     /// @inheritdoc ISettlementModule
     function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
         external
         override
+        returns (uint256)
     {
         if (shouldRevertOnFundsIn) revert MockModuleForcedRevert();
         onFundsInCount     += 1;
@@ -62,6 +71,7 @@ contract MockSettlementModule is ISettlementModule {
         if (balanceProbeToken != address(0)) {
             lastObservedBalanceOnFundsIn = IERC20(balanceProbeToken).balanceOf(balanceProbeTarget);
         }
+        return externalIdToReturn;
     }
 
     /// @inheritdoc ISettlementModule
