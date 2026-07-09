@@ -7,7 +7,15 @@ import { FundsInContext, FundsOutContext } from '../src/interfaces/RouteTypes.so
 
 /// @title RgbSettlementModuleTest
 /// @notice Unit tests for the standalone settlement module. The module is
-///         driven via `vm.prank(routeRegistry)` — no actual `RouteRegistry`
+///         driven via `vm.prank(routeRegistry)` — no actual `RouteRegistry`.
+///
+/// @dev    Release semantics under test (post R-C-01 rework): `beforeFundsOut`
+///         is a pure (view) proof-of-mint check. It decodes
+///         `(uint256[] operationIds, uint256[] amounts)` and asserts every id
+///         EXISTS in `fundsInRecords` with an EXACTLY matching amount. It does
+///         NOT consume/delete records, does NOT sum them, and does NOT compare
+///         against `ctx.amount` — solvency and replay are owned by the Bridge
+///         (`lockedLiquidity` / `consumedBurnIds`).
 contract RgbSettlementModuleTest is Test {
     RgbSettlementModule module;
 
@@ -52,11 +60,14 @@ contract RgbSettlementModuleTest is Test {
         });
     }
 
-    function _fundsOutCtx(uint256 amount) internal view returns (FundsOutContext memory) {
+    /// @dev `ctx.amount` is irrelevant to the reworked module — it never
+    ///      compares the release amount against the mint records. We still
+    ///      supply a context so the signature matches.
+    function _fundsOutCtx() internal view returns (FundsOutContext memory) {
         return FundsOutContext({
             token:         token,
             recipient:     recipient,
-            amount:        amount,
+            amount:        AMOUNT,
             burnId:        BURN_ID,
             sourceChainId: SOURCE_CHAIN_ID,
             destChainId:   DEST_CHAIN_ID,
@@ -64,13 +75,24 @@ contract RgbSettlementModuleTest is Test {
         });
     }
 
-    function _settlementData(uint256[] memory ids) internal pure returns (bytes memory) {
-        return abi.encode(ids);
+    /// @dev Encodes the two parallel arrays the reworked module expects.
+    function _settlementData(uint256[] memory ids, uint256[] memory amounts)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encode(ids, amounts);
     }
 
-    function _single(uint256 id) internal pure returns (uint256[] memory ids) {
-        ids = new uint256[](1);
-        ids[0] = id;
+    function _single(uint256 value) internal pure returns (uint256[] memory arr) {
+        arr = new uint256[](1);
+        arr[0] = value;
+    }
+
+    function _pair(uint256 a, uint256 b) internal pure returns (uint256[] memory arr) {
+        arr = new uint256[](2);
+        arr[0] = a;
+        arr[1] = b;
     }
 
     function _record(uint256 operationId, uint256 netAmount) internal {
@@ -115,87 +137,69 @@ contract RgbSettlementModuleTest is Test {
     }
 
     // ========================================================================
-    // beforeFundsOut — happy paths
+    // beforeFundsOut — happy paths (existence + exact-amount, no consumption)
     // ========================================================================
 
-    function test_beforeFundsOut_consumesFullSingleRecord() public {
+    function test_beforeFundsOut_passesOnSingleExactMatch() public {
         _record(TX_ID_1, AMOUNT);
 
         vm.prank(routeRegistry);
-        module.beforeFundsOut(_fundsOutCtx(AMOUNT), _settlementData(_single(TX_ID_1)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT)));
 
-        assertEq(module.fundsInRecords(TX_ID_1), 0, 'record fully consumed');
+        // Proof-of-mint ledger is permanent: the check must not mutate it.
+        assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, 'record left intact (no consumption)');
     }
 
-    function test_beforeFundsOut_consumesSequentiallyMultipleIds() public {
+    function test_beforeFundsOut_passesOnMultipleExactMatches() public {
         uint256 amount1 = 60e18;
         uint256 amount2 = 40e18;
         _record(TX_ID_1, amount1);
         _record(TX_ID_2, amount2);
 
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = TX_ID_1;
-        ids[1] = TX_ID_2;
-
         vm.prank(routeRegistry);
-        module.beforeFundsOut(_fundsOutCtx(amount1 + amount2), _settlementData(ids));
+        module.beforeFundsOut(
+            _fundsOutCtx(),
+            _settlementData(_pair(TX_ID_1, TX_ID_2), _pair(amount1, amount2))
+        );
 
-        assertEq(module.fundsInRecords(TX_ID_1), 0);
-        assertEq(module.fundsInRecords(TX_ID_2), 0);
+        assertEq(module.fundsInRecords(TX_ID_1), amount1, 'record 1 intact');
+        assertEq(module.fundsInRecords(TX_ID_2), amount2, 'record 2 intact');
     }
 
-    function test_beforeFundsOut_partialConsume_preservesResidual() public {
+    function test_beforeFundsOut_passesOnEmptyArrays() public {
+        // Degenerate input: nothing to verify, nothing to revert on.
+        vm.prank(routeRegistry);
+        module.beforeFundsOut(
+            _fundsOutCtx(),
+            _settlementData(new uint256[](0), new uint256[](0))
+        );
+    }
+
+    function test_beforeFundsOut_duplicateIdsAreHarmless() public {
+        // The check is a pure read, so referencing the same id twice with the
+        // same (correct) amount simply passes both times — no double-spend
+        // here; solvency is the Bridge's concern.
         _record(TX_ID_1, AMOUNT);
-        uint256 partialAmount = 60e18;
 
         vm.prank(routeRegistry);
         module.beforeFundsOut(
-            _fundsOutCtx(partialAmount),
-            _settlementData(_single(TX_ID_1))
+            _fundsOutCtx(),
+            _settlementData(_pair(TX_ID_1, TX_ID_1), _pair(AMOUNT, AMOUNT))
         );
 
-        assertEq(
-            module.fundsInRecords(TX_ID_1),
-            AMOUNT - partialAmount,
-            'residual preserved on same operationId'
-        );
+        assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, 'record intact');
     }
 
-    function test_beforeFundsOut_consumesPartiallyAcrossIds() public {
-        // Two records of 100 each. fundsOut for 150 fully consumes the
-        // first and partially consumes the second (leaving 50).
+    function test_beforeFundsOut_isViewAcrossManyCalls() public {
+        // Repeated verification of the same record never depletes it.
         _record(TX_ID_1, AMOUNT);
-        _record(TX_ID_2, AMOUNT);
 
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = TX_ID_1;
-        ids[1] = TX_ID_2;
+        for (uint256 i = 0; i < 3; i++) {
+            vm.prank(routeRegistry);
+            module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT)));
+        }
 
-        vm.prank(routeRegistry);
-        module.beforeFundsOut(_fundsOutCtx(150e18), _settlementData(ids));
-
-        assertEq(module.fundsInRecords(TX_ID_1), 0,    'first fully consumed');
-        assertEq(module.fundsInRecords(TX_ID_2), 50e18, 'second partially consumed');
-    }
-
-    function test_beforeFundsOut_breaksAfterAmountSatisfied() public {
-        // Three records, but the request is satisfied by the first one. The
-        // remaining two records must remain untouched (loop early-terminates).
-        _record(TX_ID_1, AMOUNT);
-        _record(TX_ID_2, AMOUNT);
-        _record(TX_ID_3, AMOUNT);
-
-        uint256[] memory ids = new uint256[](3);
-        ids[0] = TX_ID_1;
-        ids[1] = TX_ID_2;
-        ids[2] = TX_ID_3;
-
-        vm.prank(routeRegistry);
-        module.beforeFundsOut(_fundsOutCtx(AMOUNT), _settlementData(ids));
-
-        assertEq(module.fundsInRecords(TX_ID_1), 0);
-        assertEq(module.fundsInRecords(TX_ID_2), AMOUNT, 'second untouched');
-        assertEq(module.fundsInRecords(TX_ID_3), AMOUNT, 'third untouched');
+        assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, 'record never consumed');
     }
 
     // ========================================================================
@@ -208,34 +212,62 @@ contract RgbSettlementModuleTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, TX_ID_1)
         );
-        module.beforeFundsOut(_fundsOutCtx(AMOUNT), _settlementData(_single(TX_ID_1)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT)));
     }
 
-    function test_beforeFundsOut_revertsOnAmountExceedsFundsIn() public {
+    function test_beforeFundsOut_revertsWhenAmountAboveRecord() public {
         _record(TX_ID_1, AMOUNT);
 
-        vm.prank(routeRegistry);
-        vm.expectRevert(RgbSettlementModule.FundsOutAmountExceedsFundsIn.selector);
-        module.beforeFundsOut(
-            _fundsOutCtx(AMOUNT + 1),
-            _settlementData(_single(TX_ID_1))
-        );
-    }
-
-    function test_beforeFundsOut_revertsOnDoubleSpendConsumedRecord() public {
-        // Record + fully consume + try to consume the same id again.
-        _record(TX_ID_1, AMOUNT);
-
-        vm.prank(routeRegistry);
-        module.beforeFundsOut(_fundsOutCtx(AMOUNT), _settlementData(_single(TX_ID_1)));
-
-        // Second redemption against the same id reverts with FundsInNotFound
-        // (slot is back to 0 after `delete`).
         vm.prank(routeRegistry);
         vm.expectRevert(
-            abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, TX_ID_1)
+            abi.encodeWithSelector(
+                RgbSettlementModule.AmountMismatch.selector, TX_ID_1, AMOUNT + 1, AMOUNT
+            )
         );
-        module.beforeFundsOut(_fundsOutCtx(AMOUNT), _settlementData(_single(TX_ID_1)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT + 1)));
+    }
+
+    function test_beforeFundsOut_revertsWhenAmountBelowRecord() public {
+        // RGB binds an operationId to an EXACT mint amount, so even an
+        // under-claim is rejected — the supplied amount must equal the record.
+        _record(TX_ID_1, AMOUNT);
+
+        vm.prank(routeRegistry);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RgbSettlementModule.AmountMismatch.selector, TX_ID_1, AMOUNT - 1, AMOUNT
+            )
+        );
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT - 1)));
+    }
+
+    function test_beforeFundsOut_revertsOnLengthMismatch() public {
+        _record(TX_ID_1, AMOUNT);
+
+        // Two ids but one amount.
+        vm.prank(routeRegistry);
+        vm.expectRevert(RgbSettlementModule.SettlementDataLengthMismatch.selector);
+        module.beforeFundsOut(
+            _fundsOutCtx(),
+            _settlementData(_pair(TX_ID_1, TX_ID_2), _single(AMOUNT))
+        );
+    }
+
+    function test_beforeFundsOut_revertsOnSecondIdMismatch() public {
+        // First id matches, second does not — the loop must still catch it.
+        _record(TX_ID_1, AMOUNT);
+        _record(TX_ID_2, AMOUNT);
+
+        vm.prank(routeRegistry);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RgbSettlementModule.AmountMismatch.selector, TX_ID_2, AMOUNT + 5, AMOUNT
+            )
+        );
+        module.beforeFundsOut(
+            _fundsOutCtx(),
+            _settlementData(_pair(TX_ID_1, TX_ID_2), _pair(AMOUNT, AMOUNT + 5))
+        );
     }
 
     function test_beforeFundsOut_revertsIfNotRouteRegistry() public {
@@ -243,45 +275,34 @@ contract RgbSettlementModuleTest is Test {
 
         vm.prank(attacker);
         vm.expectRevert(RgbSettlementModule.NotRouteRegistry.selector);
-        module.beforeFundsOut(_fundsOutCtx(AMOUNT), _settlementData(_single(TX_ID_1)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT)));
     }
 
-    function test_beforeFundsOut_duplicateIdsFullyConsumedReverts() public {
-        _record(TX_ID_1, AMOUNT);
+    // ========================================================================
+    // beforeFundsOut — fuzz
+    // ========================================================================
 
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = TX_ID_1;
-        ids[1] = TX_ID_1;
+    /// @dev Any amount that differs from the record must revert; the exact
+    ///      record amount must pass. Record is never mutated either way.
+    function testFuzz_beforeFundsOut_exactMatchOnly(uint256 recorded, uint256 provided) public {
+        recorded = bound(recorded, 1, type(uint128).max);
+        provided = bound(provided, 0, type(uint128).max);
+        _record(TX_ID_1, recorded);
 
-        // The first entry fully consumes and deletes the record. The duplicate
-        // entry must not count the same record again.
-        vm.prank(routeRegistry);
-        vm.expectRevert(
-            abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, TX_ID_1)
-        );
-        // +1 forces a second loop iteration; exact AMOUNT would break before the duplicate is read.
-        module.beforeFundsOut(_fundsOutCtx(AMOUNT + 1), _settlementData(ids));
+        if (provided == recorded) {
+            vm.prank(routeRegistry);
+            module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(provided)));
+        } else {
+            vm.prank(routeRegistry);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    RgbSettlementModule.AmountMismatch.selector, TX_ID_1, provided, recorded
+                )
+            );
+            module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(provided)));
+        }
 
-        assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, 'record restored on revert');
+        assertEq(module.fundsInRecords(TX_ID_1), recorded, 'record never mutated');
     }
 
-    function test_beforeFundsOut_trailingUnknownIdsUnread_currentBehavior() public {
-        _record(TX_ID_1, AMOUNT);
-
-        uint256 trailingUnknownId = TX_ID_2;
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = TX_ID_1;
-        ids[1] = trailingUnknownId;
-
-        assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, 'pre first record');
-        assertEq(module.fundsInRecords(trailingUnknownId), 0, 'pre trailing unknown');
-
-        // Current behavior: the loop exits once the requested amount is
-        // satisfied, so trailing ids are not read or validated.
-        vm.prank(routeRegistry);
-        module.beforeFundsOut(_fundsOutCtx(AMOUNT), _settlementData(ids));
-
-        assertEq(module.fundsInRecords(TX_ID_1), 0, 'first record consumed');
-        assertEq(module.fundsInRecords(trailingUnknownId), 0, 'trailing unknown unread');
-    }
 }
