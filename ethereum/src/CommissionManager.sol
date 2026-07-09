@@ -559,19 +559,22 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     // ============ Commission Collection Functions ============
 
     /**
-     * @notice Credits token commission: increases `tokenCommissionPool[token]` by the actual balance delta.
+     * @notice Credits `credited` token units to `tokenCommissionPool[token]`.
      * @param token ERC-20 token (non-zero). Bridge must transfer tokens before this call.
-     * @dev Pool tracks on-chain balance; no calldata amount (supports fee-on-transfer tokens).
+     * @param credited The Bridge-measured balance increase of THIS contract from
+     *        its `safeTransfer` (fee-on-transfer safe). Credited as-is rather than
+     *        recomputed from `balanceOf - pool`, so a pre-existing/unsolicited
+     *        direct transfer is never folded into the pool.
+     * @dev Reverts if the resulting pool would exceed the on-chain balance —
+     *      guards against a caller crediting more than actually arrived.
      */
-    function receiveTokenCommission(address token) external onlyBridge {
+    function receiveTokenCommission(address token, uint256 credited) external onlyBridge {
         if (token == address(0)) revert InvalidToken();
-        uint256 newBalance = IERC20(token).balanceOf(address(this));
-        uint256 priorPool = tokenCommissionPool[token];
-        if (newBalance < priorPool) revert BalanceBelowRecordedPool();
-        uint256 recorded = newBalance - priorPool;
-        if (recorded == 0) revert NothingReceived();
-        tokenCommissionPool[token] = newBalance;
-        emit TokenCommissionReceived(token, recorded);
+        if (credited == 0) revert NothingReceived();
+        uint256 newPool = tokenCommissionPool[token] + credited;
+        if (IERC20(token).balanceOf(address(this)) < newPool) revert BalanceBelowRecordedPool();
+        tokenCommissionPool[token] = newPool;
+        emit TokenCommissionReceived(token, credited);
     }
 
     /**
