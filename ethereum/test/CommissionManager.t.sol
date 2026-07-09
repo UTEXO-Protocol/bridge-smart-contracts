@@ -696,62 +696,63 @@ contract CommissionManagerTest is Test {
 
         vm.prank(user);
         vm.expectRevert(ICommissionManager.OnlyBridge.selector);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), amt);
 
         vm.prank(BRIDGE);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), amt);
         assertEq(cm.tokenCommissionPool(address(token)), amt);
     }
 
     function test_receiveTokenCommission_revertsNothingReceived() public {
         vm.prank(BRIDGE);
         vm.expectRevert(ICommissionManager.NothingReceived.selector);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), 0);
     }
 
-    function test_receiveTokenCommission_revertsNothingReceived_whenNoNewTokens() public {
-        uint256 amt = 10 ether;
-        token.mint(address(cm), amt);
-        vm.startPrank(BRIDGE);
-        cm.receiveTokenCommission(address(token));
-        vm.expectRevert(ICommissionManager.NothingReceived.selector);
-        cm.receiveTokenCommission(address(token));
-        vm.stopPrank();
+    // After the R-I-04 fix the pool is credited by the passed `credited`, not by
+    // balanceOf - pool. Crediting more than the on-chain balance can back reverts
+    // BalanceBelowRecordedPool (guards against over-crediting).
+    function test_receiveTokenCommission_revertsWhenCreditExceedsBalance() public {
+        token.mint(address(cm), 5 ether);
+        vm.prank(BRIDGE);
+        vm.expectRevert(ICommissionManager.BalanceBelowRecordedPool.selector);
+        cm.receiveTokenCommission(address(token), 6 ether);
     }
 
-    // Current behavior: token commission accounting records the whole balance
-    // delta since the last pool update, so unsolicited tokens already sitting
-    // in the CommissionManager are credited with the next bridge commission.
-    function test_unsolicitedTokenBalanceIncludedInNextCommissionCredit_currentBehavior() public {
+    // R-I-04 after-fix: an unsolicited direct transfer already sitting in the CM
+    // is NOT folded into the pool. The Bridge measures only its own transfer and
+    // passes that as `credited`; the donation stays as a stray balance.
+    function test_receiveTokenCommission_doesNotAbsorbUnsolicitedBalance_afterFix() public {
         uint256 unsolicitedAmount = 3 ether;
         uint256 legitimateAmount  = 7 ether;
-        uint256 expectedCredit    = unsolicitedAmount + legitimateAmount;
 
         token.mint(user, unsolicitedAmount);
         vm.prank(user);
-        token.transfer(address(cm), unsolicitedAmount);
+        token.transfer(address(cm), unsolicitedAmount); // donation
 
         token.mint(BRIDGE, legitimateAmount);
         vm.prank(BRIDGE);
-        token.transfer(address(cm), legitimateAmount);
+        token.transfer(address(cm), legitimateAmount); // the Bridge's transfer
 
-        assertEq(token.balanceOf(address(cm)), expectedCredit, 'pre cm token balance');
+        assertEq(token.balanceOf(address(cm)), unsolicitedAmount + legitimateAmount, 'pre cm token balance');
         assertEq(cm.tokenCommissionPool(address(token)), 0, 'pre cm pool');
 
+        // Bridge credits ONLY the amount its transfer actually delivered.
         vm.expectEmit(true, false, false, true, address(cm));
-        emit TokenCommissionReceived(address(token), expectedCredit);
+        emit TokenCommissionReceived(address(token), legitimateAmount);
 
         vm.prank(BRIDGE);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), legitimateAmount);
 
-        assertEq(cm.tokenCommissionPool(address(token)), expectedCredit, 'pool includes unsolicited balance');
+        assertEq(cm.tokenCommissionPool(address(token)), legitimateAmount, 'pool credited only the legit commission');
+        assertEq(token.balanceOf(address(cm)), unsolicitedAmount + legitimateAmount, 'donation stays as stray balance');
     }
 
     function test_withdrawTokenCommission_transfersAndUpdatesPool() public {
         uint256 amt = 50 ether;
         token.mint(address(cm), amt);
         vm.prank(BRIDGE);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), amt);
 
         vm.prank(owner);
         cm.withdrawTokenCommission(address(token), recipient, amt);
@@ -764,7 +765,7 @@ contract CommissionManagerTest is Test {
         uint256 amt = 30 ether;
         token.mint(address(cm), amt);
         vm.prank(BRIDGE);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), amt);
 
         vm.prank(owner);
         cm.withdrawAllTokenCommission(address(token), recipient);
