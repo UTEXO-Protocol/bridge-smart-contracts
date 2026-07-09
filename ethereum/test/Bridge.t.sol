@@ -1663,6 +1663,31 @@ contract BridgeTest is Test {
         assertEq(rgbModule.fundsInRecords(opId),           expectedNet,         'record = net');
     }
 
+    // R-I-04 end-to-end: a token already donated directly to the CommissionManager
+    // is NOT absorbed as commission. Bridge measures the delta of its own transfer,
+    // so the pool grows by exactly the real fee; the donation stays a stray balance.
+    function test_fundsIn_tokenCommission_doesNotAbsorbCmDonation_afterFix() public {
+        _setFundsInTokenRule(400); // 4%
+        uint256 expectedCommission = (AMOUNT * 400) / 100 / 100;
+
+        // Unsolicited direct transfer into the CommissionManager.
+        address donor = makeAddr('cmDonor');
+        uint256 donation = 5e18;
+        usdt0.mint(donor, donation);
+        vm.prank(donor);
+        usdt0.transfer(address(cm), donation);
+
+        assertEq(cm.tokenCommissionPool(address(usdt0)), 0,        'pre pool (donation not counted)');
+        assertEq(usdt0.balanceOf(address(cm)),           donation, 'pre cm balance holds donation');
+
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        // Pool grew by exactly the real commission — the donation was not folded in.
+        assertEq(cm.tokenCommissionPool(address(usdt0)), expectedCommission,            'pool grew only by real commission');
+        assertEq(usdt0.balanceOf(address(cm)),           donation + expectedCommission, 'donation still present as stray balance');
+    }
+
     // ========================================================================
     // Commission — fundsIn NATIVE
     // ========================================================================
@@ -2507,7 +2532,10 @@ contract BridgeTest is Test {
     // Current behavior: Bridge calls the settlement hook after pulling gross
     // funds but before forwarding token commission, so a hook can observe funds
     // that will not remain as Bridge liquidity after the call.
-    function test_onFundsInHookSeesBalanceIncludingFutureCommission_currentBehavior() public {
+    // R-W-17 after-fix: the token commission is forwarded before the onFundsIn
+    // hook, so a settlement module reading getContractBalance during the hook
+    // observes only the net the Bridge retains — never the in-flight commission.
+    function test_onFundsInHookSeesNetBalanceNotFutureCommission_afterFix() public {
         uint256 percent = 400; // 4%
         _setFundsInTokenRule(percent);
 
@@ -2566,8 +2594,8 @@ contract BridgeTest is Test {
         assertEq(observingModule.lastNetAmount(), netAmount, 'module got net amount');
         assertEq(
             observingModule.lastObservedBalanceOnFundsIn(),
-            bridgeBefore + AMOUNT,
-            'hook saw gross bridge balance'
+            bridgeBefore + netAmount,
+            'hook sees only the retained net, not the in-flight commission'
         );
         assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + netAmount, 'final bridge net');
         assertEq(usdt0.balanceOf(address(cm)), cmBefore + tokenCommission, 'cm token delta');

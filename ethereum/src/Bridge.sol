@@ -19,7 +19,7 @@ import { OutflowRateLimiter } from './libraries/OutflowRateLimiter.sol';
 ///         protocol fees are held separately from bridge liquidity.
 ///
 /// @dev - Owner is `MultisigProxy`. `fundsOut` is called via
-///        `MultisigProxy.execute()` (TEE M-of-N).
+///        `MultisigProxy.fundsOutCall()` (TEE M-of-N).
 ///      - Route-specific finality verification and per-route settlement
 ///        accounting (RGB `fundsInRecords` etc.) live behind the
 ///        `RouteRegistry` dispatcher in dedicated plugin contracts. Bridge
@@ -517,6 +517,14 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (received < tokenCommission) revert InsufficientReceived(received, tokenCommission);
         ctx.netAmount = received - tokenCommission;
 
+        // Forward token commission BEFORE the settlement hook so that any
+        // external call the hook makes (or a contract reading `getContractBalance`
+        // during it) observes only the net amount the Bridge actually retains,
+        // never the in-flight commission about to leave. `netAmount` is
+        // already fixed above, so the hook does not depend on the tokens still
+        // being held here.
+        if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
+
         // Delegate per-route inbound bookkeeping. The module returns an optional
         // correlation id (the RGB OpId for the RGB route; 0 otherwise) to surface
         // in the RGB-only `FundsIn` event below.
@@ -527,9 +535,6 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // the accumulated locked liquidity. Credited from the ACTUAL received
         // amount so the ledger can never exceed real custody.
         lockedLiquidity[destinationChainId] += ctx.netAmount;
-
-        // Forward token commission, if any, to the CommissionManager pool.
-        if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
 
         // Forward the FULL native value to the CommissionManager pool. Any
         // surplus over the quoted `nativeCommission` (favorable oracle drift) is
