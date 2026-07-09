@@ -13,9 +13,14 @@ import { ICommissionManager } from '../../src/interfaces/ICommissionManager.sol'
 ///         `block.chainid` by the Bridge — the script just reads it back to
 ///         drive the quote.
 ///
+///         The canonical `operationId` is derived on-chain by the Bridge and
+///         returned; this script logs it. The RGB route carries the RGB OpId
+///         in `settlementData` (`abi.encode(uint256 rgbOpId)`), sourced from
+///         `RGB_OP_ID`.
+///
 /// Env:
 ///   PRIVATE_KEY, BRIDGE_ADDRESS, AMOUNT (wei),
-///   DESTINATION_CHAIN_ID, DESTINATION_ADDRESS, OPERATION_ID
+///   DESTINATION_CHAIN_ID, DESTINATION_ADDRESS, RGB_OP_ID
 contract BridgeFundsIn is Script {
     function run() external {
         uint256 pk            = vm.envUint('PRIVATE_KEY');
@@ -23,7 +28,7 @@ contract BridgeFundsIn is Script {
         uint256 amount        = vm.envUint('AMOUNT');
         uint256 destChainId   = vm.envUint('DESTINATION_CHAIN_ID');
         string memory dAddr   = vm.envString('DESTINATION_ADDRESS');
-        uint256 operationId   = vm.envUint('OPERATION_ID');
+        uint256 rgbOpId       = vm.envUint('RGB_OP_ID');
 
         Bridge bridge = Bridge(bridgeAddr);
         address token = bridge.TOKEN();
@@ -40,12 +45,16 @@ contract BridgeFundsIn is Script {
 
         vm.startBroadcast(pk);
         IERC20(token).approve(bridgeAddr, amount);
-        // `settlementData` is empty for the RGB route — its settlement
-        // module ignores inbound data. Other routes whose modules consume
-        // extra data on `onFundsIn` would need to source the blob from env.
-        bridge.fundsIn{ value: nativeCommission }(amount, destChainId, dAddr, operationId, '');
+        // RGB route: `settlementData` carries the RGB OpId as `abi.encode(uint256)`;
+        // the settlement module decodes it and surfaces it in the FundsIn event.
+        // Other routes define their own blob layout.
+        bytes32 operationId = bridge.fundsIn{ value: nativeCommission }(
+            amount, destChainId, dAddr, abi.encode(rgbOpId)
+        );
         vm.stopBroadcast();
 
-        console2.log('fundsIn succeeded. Bridge balance:', IERC20(token).balanceOf(bridgeAddr));
+        console2.log('fundsIn succeeded. Derived operationId:');
+        console2.logBytes32(operationId);
+        console2.log('Bridge balance:', IERC20(token).balanceOf(bridgeAddr));
     }
 }

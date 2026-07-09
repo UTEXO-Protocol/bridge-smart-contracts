@@ -45,6 +45,8 @@ contract CommissionManagerTest is Test {
     );
     event EthUsdFeedUpdated(address indexed feed, uint256 heartbeat);
     event TokenCommissionReceived(address indexed token, uint256 amount);
+    event SequencerUptimeFeedUpdated(address indexed feed);
+    event EthUsdPriceBoundsUpdated(uint256 minPrice, uint256 maxPrice);
 
     function setUp() public {
         // Anvil starts at timestamp 1; warp past the heartbeat so staleness
@@ -144,16 +146,17 @@ contract CommissionManagerTest is Test {
         cm.convertTokenFeeToNative(1, 19);
     }
 
-    // Current behavior: native quote validation only requires a fresh positive
-    // Chainlink answer. There is no sequencer uptime feed or min/max bound, so
-    // a fresh outlier price is still used for conversion.
-    function test_nativeQuoteDoesNotCheckSequencerUptime_currentBehavior() public {
-        ethUsdFeed.setAnswer(1);
+    // With the min/max band UNSET (the default), a fresh positive answer is
+    // accepted no matter how extreme — which is exactly why an Arbitrum
+    // deployment configures `setEthUsdPriceBounds`. Band-enabled rejection is
+    // covered by test_convertTokenFeeToNative_revertsWhenPriceBelowMin/AboveMax.
+    function test_convertTokenFeeToNative_allowsOutlierWhenBandUnset() public {
+        ethUsdFeed.setAnswer(1); // $1e-8 — an extreme outlier
         ethUsdFeed.setUpdatedAt(block.timestamp);
 
         uint256 nativeFee = cm.convertTokenFeeToNative(1e18, 18);
 
-        assertEq(nativeFee, 1e26, 'fresh positive outlier accepted');
+        assertEq(nativeFee, 1e26, 'fresh outlier accepted while band is unset');
     }
 
     function test_buildRouteKey_matchesEncodeHash() public view {
@@ -693,62 +696,63 @@ contract CommissionManagerTest is Test {
 
         vm.prank(user);
         vm.expectRevert(ICommissionManager.OnlyBridge.selector);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), amt);
 
         vm.prank(BRIDGE);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), amt);
         assertEq(cm.tokenCommissionPool(address(token)), amt);
     }
 
     function test_receiveTokenCommission_revertsNothingReceived() public {
         vm.prank(BRIDGE);
         vm.expectRevert(ICommissionManager.NothingReceived.selector);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), 0);
     }
 
-    function test_receiveTokenCommission_revertsNothingReceived_whenNoNewTokens() public {
-        uint256 amt = 10 ether;
-        token.mint(address(cm), amt);
-        vm.startPrank(BRIDGE);
-        cm.receiveTokenCommission(address(token));
-        vm.expectRevert(ICommissionManager.NothingReceived.selector);
-        cm.receiveTokenCommission(address(token));
-        vm.stopPrank();
+    // After the R-I-04 fix the pool is credited by the passed `credited`, not by
+    // balanceOf - pool. Crediting more than the on-chain balance can back reverts
+    // BalanceBelowRecordedPool (guards against over-crediting).
+    function test_receiveTokenCommission_revertsWhenCreditExceedsBalance() public {
+        token.mint(address(cm), 5 ether);
+        vm.prank(BRIDGE);
+        vm.expectRevert(ICommissionManager.BalanceBelowRecordedPool.selector);
+        cm.receiveTokenCommission(address(token), 6 ether);
     }
 
-    // Current behavior: token commission accounting records the whole balance
-    // delta since the last pool update, so unsolicited tokens already sitting
-    // in the CommissionManager are credited with the next bridge commission.
-    function test_unsolicitedTokenBalanceIncludedInNextCommissionCredit_currentBehavior() public {
+    // R-I-04 after-fix: an unsolicited direct transfer already sitting in the CM
+    // is NOT folded into the pool. The Bridge measures only its own transfer and
+    // passes that as `credited`; the donation stays as a stray balance.
+    function test_receiveTokenCommission_doesNotAbsorbUnsolicitedBalance_afterFix() public {
         uint256 unsolicitedAmount = 3 ether;
         uint256 legitimateAmount  = 7 ether;
-        uint256 expectedCredit    = unsolicitedAmount + legitimateAmount;
 
         token.mint(user, unsolicitedAmount);
         vm.prank(user);
-        token.transfer(address(cm), unsolicitedAmount);
+        token.transfer(address(cm), unsolicitedAmount); // donation
 
         token.mint(BRIDGE, legitimateAmount);
         vm.prank(BRIDGE);
-        token.transfer(address(cm), legitimateAmount);
+        token.transfer(address(cm), legitimateAmount); // the Bridge's transfer
 
-        assertEq(token.balanceOf(address(cm)), expectedCredit, 'pre cm token balance');
+        assertEq(token.balanceOf(address(cm)), unsolicitedAmount + legitimateAmount, 'pre cm token balance');
         assertEq(cm.tokenCommissionPool(address(token)), 0, 'pre cm pool');
 
+        // Bridge credits ONLY the amount its transfer actually delivered.
         vm.expectEmit(true, false, false, true, address(cm));
-        emit TokenCommissionReceived(address(token), expectedCredit);
+        emit TokenCommissionReceived(address(token), legitimateAmount);
 
         vm.prank(BRIDGE);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), legitimateAmount);
 
-        assertEq(cm.tokenCommissionPool(address(token)), expectedCredit, 'pool includes unsolicited balance');
+        assertEq(cm.tokenCommissionPool(address(token)), legitimateAmount, 'pool credited only the legit commission');
+        assertEq(token.balanceOf(address(cm)), unsolicitedAmount + legitimateAmount, 'donation stays as stray balance');
     }
 
     function test_withdrawTokenCommission_transfersAndUpdatesPool() public {
         uint256 amt = 50 ether;
         token.mint(address(cm), amt);
         vm.prank(BRIDGE);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), amt);
 
         vm.prank(owner);
         cm.withdrawTokenCommission(address(token), recipient, amt);
@@ -761,7 +765,7 @@ contract CommissionManagerTest is Test {
         uint256 amt = 30 ether;
         token.mint(address(cm), amt);
         vm.prank(BRIDGE);
-        cm.receiveTokenCommission(address(token));
+        cm.receiveTokenCommission(address(token), amt);
 
         vm.prank(owner);
         cm.withdrawAllTokenCommission(address(token), recipient);
@@ -873,5 +877,156 @@ contract CommissionManagerTest is Test {
                 'native fee formula'
             );
         }
+    }
+
+    // =========================================================================
+    // L2 sequencer-uptime gate + min/max price band
+    // =========================================================================
+
+    /// @dev The sequencer uptime feed is a standard AggregatorV3Interface;
+    ///      MockAggregatorV3 reports `startedAt == updatedAt`, so we drive
+    ///      `startedAt` via the constructor's `updatedAt` argument. `status`
+    ///      is the sequencer answer (0 = up, 1 = down).
+    function _sequencerFeed(int256 status, uint256 startedAt_) internal returns (MockAggregatorV3) {
+        return new MockAggregatorV3(0, status, startedAt_);
+    }
+
+    function _setSequencer(int256 status, uint256 startedAt_) internal returns (MockAggregatorV3 seq) {
+        seq = _sequencerFeed(status, startedAt_);
+        vm.prank(owner);
+        cm.setSequencerUptimeFeed(address(seq));
+    }
+
+    // --- sequencer uptime ---
+
+    function test_convertTokenFeeToNative_noSequencerCheckWhenUnset() public view {
+        // No sequencer feed wired (setUp does not set one) → quote works.
+        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14);
+    }
+
+    function test_convertTokenFeeToNative_revertsWhenSequencerDown() public {
+        _setSequencer(1, block.timestamp - 2 hours); // answer == 1 => down
+        vm.expectRevert(ICommissionManager.SequencerDown.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_revertsDuringGracePeriod() public {
+        // Up, but restarted this block → within the grace window.
+        _setSequencer(0, block.timestamp);
+        vm.expectRevert(ICommissionManager.GracePeriodNotOver.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_revertsAtGraceBoundary() public {
+        // Exactly at the grace period: `block.timestamp - startedAt == GRACE`,
+        // and the check is `<= GRACE`, so it still reverts.
+        _setSequencer(0, block.timestamp - cm.SEQUENCER_GRACE_PERIOD());
+        vm.expectRevert(ICommissionManager.GracePeriodNotOver.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_passesWhenSequencerUpPastGrace() public {
+        _setSequencer(0, block.timestamp - cm.SEQUENCER_GRACE_PERIOD() - 1);
+        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14); // same as happy path
+    }
+
+    // --- min/max price band ---
+
+    function test_convertTokenFeeToNative_noBandWhenUnset() public view {
+        // No band configured in setUp → any positive fresh answer is accepted.
+        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14);
+    }
+
+    function test_convertTokenFeeToNative_revertsWhenPriceBelowMin() public {
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(1_000e8, 100_000e8);
+        ethUsdFeed.setAnswer(999e8);              // below min
+        ethUsdFeed.setUpdatedAt(block.timestamp); // keep fresh so StalePrice doesn't mask it
+        vm.expectRevert(ICommissionManager.PriceOutOfBounds.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_revertsWhenPriceAboveMax() public {
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(1_000e8, 100_000e8);
+        ethUsdFeed.setAnswer(100_001e8);          // above max
+        ethUsdFeed.setUpdatedAt(block.timestamp);
+        vm.expectRevert(ICommissionManager.PriceOutOfBounds.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_passesWithinBand() public {
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(1_000e8, 100_000e8);
+        // DEFAULT_ETH_USD = 2000e8 sits inside the band.
+        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14);
+    }
+
+    function test_convertTokenFeeToNative_healthySequencerAndBandTogether() public {
+        _setSequencer(0, block.timestamp - cm.SEQUENCER_GRACE_PERIOD() - 1);
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(1_000e8, 100_000e8);
+        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14);
+    }
+
+    // --- setters ---
+
+    function test_setSequencerUptimeFeed_setsAndEmits() public {
+        address seq = makeAddr('seqFeed');
+        vm.expectEmit(true, false, false, false, address(cm));
+        emit SequencerUptimeFeedUpdated(seq);
+        vm.prank(owner);
+        cm.setSequencerUptimeFeed(seq);
+        assertEq(cm.sequencerUptimeFeed(), seq);
+    }
+
+    function test_setSequencerUptimeFeed_canDisableWithZero() public {
+        vm.prank(owner);
+        cm.setSequencerUptimeFeed(makeAddr('seqFeed'));
+        vm.prank(owner);
+        cm.setSequencerUptimeFeed(address(0));
+        assertEq(cm.sequencerUptimeFeed(), address(0));
+    }
+
+    function test_setSequencerUptimeFeed_onlyOwner() public {
+        vm.prank(user);
+        vm.expectRevert();
+        cm.setSequencerUptimeFeed(makeAddr('seqFeed'));
+    }
+
+    function test_setEthUsdPriceBounds_setsAndEmits() public {
+        vm.expectEmit(false, false, false, true, address(cm));
+        emit EthUsdPriceBoundsUpdated(1_000e8, 100_000e8);
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(1_000e8, 100_000e8);
+        assertEq(cm.ethUsdMinPrice(), 1_000e8);
+        assertEq(cm.ethUsdMaxPrice(), 100_000e8);
+    }
+
+    function test_setEthUsdPriceBounds_disableWithZeros() public {
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(1_000e8, 100_000e8);
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(0, 0);
+        assertEq(cm.ethUsdMinPrice(), 0);
+        assertEq(cm.ethUsdMaxPrice(), 0);
+    }
+
+    function test_setEthUsdPriceBounds_revertsOnZeroMinWithNonZeroMax() public {
+        vm.prank(owner);
+        vm.expectRevert(ICommissionManager.InvalidPriceBounds.selector);
+        cm.setEthUsdPriceBounds(0, 100e8);
+    }
+
+    function test_setEthUsdPriceBounds_revertsWhenMinNotBelowMax() public {
+        vm.prank(owner);
+        vm.expectRevert(ICommissionManager.InvalidPriceBounds.selector);
+        cm.setEthUsdPriceBounds(100e8, 100e8);
+    }
+
+    function test_setEthUsdPriceBounds_onlyOwner() public {
+        vm.prank(user);
+        vm.expectRevert();
+        cm.setEthUsdPriceBounds(1_000e8, 100_000e8);
     }
 }
