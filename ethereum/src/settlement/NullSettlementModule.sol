@@ -21,8 +21,10 @@ import { FundsInContext, FundsOutContext } from '../interfaces/RouteTypes.sol';
 ///      decision visible on-chain.
 contract NullSettlementModule is ISettlementModule {
     /// @inheritdoc ISettlementModule
-    function onFundsIn(FundsInContext calldata, bytes calldata) external pure override {
-        // Intentionally empty.
+    /// @dev Returns `0`: no external correlation id, so Bridge emits no
+    ///      `FundsIn` event for routes using this module.
+    function onFundsIn(FundsInContext calldata, bytes calldata) external pure override returns (uint256) {
+        return 0;
     }
 
     /// @inheritdoc ISettlementModule

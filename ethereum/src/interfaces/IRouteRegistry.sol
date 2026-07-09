@@ -101,7 +101,11 @@ interface IRouteRegistry {
     /// @notice Forwards the inbound context to the settlement module of the
     ///         route `(ctx.sourceChainId, ctx.destChainId)`. Reverts if the
     ///         route is not enabled. Callable only by `bridge`.
-    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData) external;
+    /// @return externalId The settlement module's optional correlation id (see
+    ///                    `ISettlementModule.onFundsIn`); forwarded to Bridge.
+    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
+        external
+        returns (uint256 externalId);
 
     /// @notice Runs the verifier (view-only proof check) and then the
     ///         settlement module's `beforeFundsOut` hook, in that order, for
