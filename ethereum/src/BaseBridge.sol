@@ -27,7 +27,7 @@ contract BaseBridge is BridgeBase {
     event FundsOut(
         address indexed recipient,
         uint256 amount,
-        uint256 operationId,
+        uint256 indexed operationId,
         string  sourceAddress
     );
 

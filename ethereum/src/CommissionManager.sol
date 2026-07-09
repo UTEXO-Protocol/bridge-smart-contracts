@@ -2,6 +2,7 @@
 pragma solidity 0.8.35;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
@@ -40,7 +41,7 @@ import {
  *      `owner` configures rules and withdraws accumulated pools. `renounceOwnership` is disabled.
  *      Withdrawals use `nonReentrant` against reentrancy via ERC-20 hooks or native recipients.
  */
-contract CommissionManager is Ownable, ReentrancyGuard, ICommissionManager {
+contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager {
     using SafeERC20 for IERC20;
 
     // ============ State Variables ============
