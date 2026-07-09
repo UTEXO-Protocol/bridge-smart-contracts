@@ -42,7 +42,7 @@ library MultisigHelper {
     );
 
     bytes32 internal constant PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH = keccak256(
-        'ProposeUpdateEnclaveSigners(address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)'
+        'ProposeUpdateEnclaveSigners(uint256 sourceChainId,address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)'
     );
 
     bytes32 internal constant PROPOSE_UPDATE_FEDERATION_SIGNERS_TYPEHASH = keccak256(
@@ -220,6 +220,7 @@ library MultisigHelper {
 
     function digestProposeUpdateEnclaveSigners(
         bytes32 domainSep,
+        uint256 sourceChainId,
         address[] memory newSigners,
         uint256 newThreshold,
         uint256 nonce,
@@ -227,7 +228,7 @@ library MultisigHelper {
     ) internal pure returns (bytes32) {
         return toTypedDataHash(domainSep, keccak256(abi.encode(
             PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH,
-            hashAddressArray(newSigners), newThreshold, nonce, deadline
+            sourceChainId, hashAddressArray(newSigners), newThreshold, nonce, deadline
         )));
     }
 
