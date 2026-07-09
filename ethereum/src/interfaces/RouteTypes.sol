@@ -62,10 +62,9 @@ struct FundsInContext {
 /// @param recipient          Final recipient on this chain.
 /// @param amount             Gross amount being released from the pool
 ///                           (pre-commission).
-/// @param burnId             Source-side burn identifier — the common replay
-///                           guard enforced by Bridge itself. Carried in the
+/// @param burnId             Bridge-derived release replay key. Carried in the
 ///                           context so verifiers and settlement modules can
-///                           reference it if they need to.
+///                           reference the canonical key if they need to.
 /// @param sourceChainId      Source chain id.
 /// @param destChainId        Destination chain id (this chain, in practice).
 /// @param sourceAddress      Sender address on the source chain.

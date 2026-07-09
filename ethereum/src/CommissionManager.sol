@@ -77,6 +77,24 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     ///         in seconds. Quotes revert `StalePrice` when the answer is older.
     uint256 public ethUsdHeartbeat;
 
+    /// @notice Chainlink L2 Sequencer Uptime feed (Arbitrum). `address(0)`
+    ///         (default) disables the check for non-L2 / test environments;
+    ///         an Arbitrum deployment MUST wire it via `setSequencerUptimeFeed`.
+    address public sequencerUptimeFeed;
+
+    /// @notice Seconds after a sequencer restart during which NATIVE quotes are
+    ///         rejected — the L2-published price can lag the market right after
+    ///         recovery. Chainlink's recommended grace period is 3600s.
+    uint256 public constant SEQUENCER_GRACE_PERIOD = 3600;
+
+    /// @notice Optional [min, max] sanity band on the ETH/USD answer (in feed
+    ///         decimals). `ethUsdMaxPrice == 0` (default) disables the band; when
+    ///         set, an answer outside it (e.g. an aggregator floored/capped to
+    ///         `minAnswer`/`maxAnswer` during an extreme move) reverts
+    ///         `PriceOutOfBounds`.
+    uint256 public ethUsdMinPrice;
+    uint256 public ethUsdMaxPrice;
+
     // ============ Modifiers ============
 
     /// @dev Restricts call to `bridgeAddress`.
@@ -252,14 +270,38 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
         address feedAddr = ethUsdFeed;
         if (feedAddr == address(0)) revert EthUsdFeedNotSet();
+
+        // L2 sequencer liveness (Arbitrum). Skipped when unset so non-L2 / test
+        // environments are unaffected; an Arbitrum deployment wires it.
+        if (sequencerUptimeFeed != address(0)) _requireSequencerUp();
+
         AggregatorV3Interface feed = AggregatorV3Interface(feedAddr);
 
         (, int256 answer, , uint256 updatedAt, ) = feed.latestRoundData();
         if (answer <= 0) revert InvalidPrice();
         if (block.timestamp - updatedAt > ethUsdHeartbeat) revert StalePrice();
+        // Optional circuit-breaker band (disabled when ethUsdMaxPrice == 0):
+        // rejects a floored/capped aggregator answer that `answer > 0` misses.
+        if (ethUsdMaxPrice != 0 &&
+            (uint256(answer) < ethUsdMinPrice || uint256(answer) > ethUsdMaxPrice)) {
+            revert PriceOutOfBounds();
+        }
 
         uint256 scale = 10 ** (18 - tokenDecimals + uint256(feed.decimals()));
         nativeFee = (tokenFee * scale) / uint256(answer);
+    }
+
+    /// @dev Reverts unless the Arbitrum L2 sequencer is up and past the grace
+    ///      period. Only invoked when `sequencerUptimeFeed` is configured. The
+    ///      uptime feed is a standard `AggregatorV3Interface`: `answer == 0`
+    ///      means the sequencer is up, `answer == 1` means down; `startedAt` is
+    ///      when the current status round began (i.e. the last restart when it
+    ///      transitions back to up).
+    function _requireSequencerUp() internal view {
+        (, int256 answer, uint256 startedAt, , ) =
+            AggregatorV3Interface(sequencerUptimeFeed).latestRoundData();
+        if (answer != 0) revert SequencerDown();
+        if (block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) revert GracePeriodNotOver();
     }
 
     /**
@@ -334,6 +376,33 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         ethUsdFeed = feed;
         ethUsdHeartbeat = heartbeat;
         emit EthUsdFeedUpdated(feed, heartbeat);
+    }
+
+    /// @inheritdoc ICommissionManager
+    /// @dev `address(0)` disables the sequencer-uptime gate (non-L2 / test
+    ///      environments). On Arbitrum, federation MUST set the Chainlink
+    ///      Sequencer Uptime feed so NATIVE quotes reject prices during
+    ///      downtime and the post-restart grace period.
+    function setSequencerUptimeFeed(address feed) external onlyOwner {
+        sequencerUptimeFeed = feed;
+        emit SequencerUptimeFeedUpdated(feed);
+    }
+
+    /// @inheritdoc ICommissionManager
+    /// @dev Pass `(0, 0)` to disable the band; otherwise require
+    ///      `0 < minPrice < maxPrice` (values in the feed's decimals, e.g.
+    ///      `100e8` / `100_000e8` for an 8-decimal ETH/USD feed).
+    function setEthUsdPriceBounds(uint256 minPrice, uint256 maxPrice) external onlyOwner {
+        if (minPrice == 0 && maxPrice == 0) {
+            ethUsdMinPrice = 0;
+            ethUsdMaxPrice = 0;
+            emit EthUsdPriceBoundsUpdated(0, 0);
+            return;
+        }
+        if (minPrice == 0 || minPrice >= maxPrice) revert InvalidPriceBounds();
+        ethUsdMinPrice = minPrice;
+        ethUsdMaxPrice = maxPrice;
+        emit EthUsdPriceBoundsUpdated(minPrice, maxPrice);
     }
 
     /**
@@ -490,19 +559,22 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     // ============ Commission Collection Functions ============
 
     /**
-     * @notice Credits token commission: increases `tokenCommissionPool[token]` by the actual balance delta.
+     * @notice Credits `credited` token units to `tokenCommissionPool[token]`.
      * @param token ERC-20 token (non-zero). Bridge must transfer tokens before this call.
-     * @dev Pool tracks on-chain balance; no calldata amount (supports fee-on-transfer tokens).
+     * @param credited The Bridge-measured balance increase of THIS contract from
+     *        its `safeTransfer` (fee-on-transfer safe). Credited as-is rather than
+     *        recomputed from `balanceOf - pool`, so a pre-existing/unsolicited
+     *        direct transfer is never folded into the pool.
+     * @dev Reverts if the resulting pool would exceed the on-chain balance —
+     *      guards against a caller crediting more than actually arrived.
      */
-    function receiveTokenCommission(address token) external onlyBridge {
+    function receiveTokenCommission(address token, uint256 credited) external onlyBridge {
         if (token == address(0)) revert InvalidToken();
-        uint256 newBalance = IERC20(token).balanceOf(address(this));
-        uint256 priorPool = tokenCommissionPool[token];
-        if (newBalance < priorPool) revert BalanceBelowRecordedPool();
-        uint256 recorded = newBalance - priorPool;
-        if (recorded == 0) revert NothingReceived();
-        tokenCommissionPool[token] = newBalance;
-        emit TokenCommissionReceived(token, recorded);
+        if (credited == 0) revert NothingReceived();
+        uint256 newPool = tokenCommissionPool[token] + credited;
+        if (IERC20(token).balanceOf(address(this)) < newPool) revert BalanceBelowRecordedPool();
+        tokenCommissionPool[token] = newPool;
+        emit TokenCommissionReceived(token, credited);
     }
 
     /**
