@@ -191,6 +191,13 @@ contract IntegrationTest is Test {
         bridge.transferOwnership(address(proxy));
         vm.stopPrank();
 
+        // Ownable2Step: the proxy accepts ownership (prank shortcut; the real
+        // governance-accept path is exercised in MultisigProxy.t.sol).
+        vm.prank(address(proxy));
+        cm.acceptOwnership();
+        vm.prank(address(proxy));
+        bridge.acceptOwnership();
+
         // Invariants from deployment.
         assertEq(address(bridge),                       predictedBridge,        'bridge prediction');
         assertEq(cm.bridgeAddress(),                    address(bridge),        'CM.bridgeAddress');

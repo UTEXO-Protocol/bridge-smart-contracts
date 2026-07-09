@@ -52,6 +52,7 @@ contract BridgeTest is Test {
         string  sourceAddress
     );
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
+    event LZAdapterDisabled(address indexed oldAdapter);
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
     event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
     event OutflowLimitUpdated(uint256 indexed chainId, uint256 capacity, uint256 refillRate, uint256 available);
@@ -141,6 +142,10 @@ contract BridgeTest is Test {
         // governance-driven paths live in MultisigProxy.t.sol / Integration.t.sol.
         bridge.transferOwnership(multisig);
         vm.stopPrank();
+
+        // Ownable2Step: the new owner must accept before it takes effect.
+        vm.prank(multisig);
+        bridge.acceptOwnership();
 
         // fund user and approve bridge
         usdt0.mint(user, AMOUNT * 10);
@@ -320,7 +325,7 @@ contract BridgeTest is Test {
     // setLZAdapter
     // ========================================================================
 
-    function test_setLZAdapter_ownerCanSetAndUnset() public {
+    function test_setLZAdapter_rotatesToNonZero() public {
         address adapter = makeAddr('adapter');
 
         vm.expectEmit(true, true, false, true, address(bridge));
@@ -328,14 +333,32 @@ contract BridgeTest is Test {
 
         vm.prank(multisig);
         bridge.setLZAdapter(adapter);
-        assertEq(bridge.lzAdapter(), adapter, 'set');
+        assertEq(bridge.lzAdapter(), adapter, 'rotated');
+    }
 
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit LZAdapterUpdated(adapter, address(0));
+    function test_setLZAdapter_revertsOnZero() public {
+        vm.prank(multisig);
+        vm.expectRevert(IBridge.InvalidLZAdapter.selector);
+        bridge.setLZAdapter(address(0));
+    }
+
+    function test_disableLZAdapter_clearsAndEmits() public {
+        address adapter = makeAddr('adapter');
+        vm.prank(multisig);
+        bridge.setLZAdapter(adapter);
+
+        vm.expectEmit(true, false, false, false, address(bridge));
+        emit LZAdapterDisabled(adapter);
 
         vm.prank(multisig);
-        bridge.setLZAdapter(address(0));
-        assertEq(bridge.lzAdapter(), address(0), 'unset');
+        bridge.disableLZAdapter();
+        assertEq(bridge.lzAdapter(), address(0), 'disabled');
+    }
+
+    function test_disableLZAdapter_revertsIfNotOwner() public {
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        bridge.disableLZAdapter();
     }
 
     function test_setLZAdapter_revertsIfNotOwner() public {
