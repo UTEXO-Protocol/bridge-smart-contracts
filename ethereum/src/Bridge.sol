@@ -19,12 +19,12 @@ import { OutflowRateLimiter } from './libraries/OutflowRateLimiter.sol';
 ///         protocol fees are held separately from bridge liquidity.
 ///
 /// @dev - Owner is `MultisigProxy`. `fundsOut` is called via
-///        `MultisigProxy.execute()` (TEE M-of-N).
+///        `MultisigProxy.fundsOutCall()` (TEE M-of-N).
 ///      - Route-specific finality verification and per-route settlement
 ///        accounting (RGB `fundsInRecords` etc.) live behind the
 ///        `RouteRegistry` dispatcher in dedicated plugin contracts. Bridge
-///        only owns: token custody, the common `burnId` replay guard, and
-///        commission routing.
+///        only owns: token custody, the common derived `burnId` replay guard,
+///        and commission routing.
 ///      - `fundsIn` has two overloads:
 ///        • Public 5-arg: any EVM user on this chain can lock tokens; the
 ///          source chain id is filled with `block.chainid`.
@@ -66,6 +66,14 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         'UtexoFundsInOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,uint256 senderNonce,address token,uint256 grossAmount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataHash,uint256 chainId)'
     );
 
+    /// @notice Domain-separated type hash for the `fundsOut` replay key.
+    ///         Binds common release intent fields to this Bridge deployment and
+    ///         formula version, including the exact verifier proof the enclave
+    ///         signed for the release.
+    bytes32 public constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
+        'UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)'
+    );
+
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
@@ -78,8 +86,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @inheritdoc IBridge
     address public override lzAdapter;
 
-    /// @notice Set of burn identifiers already consumed by a successful
-    ///         `fundsOut`.
+    /// @notice Set of Bridge-derived burn identifiers already consumed by a
+    ///         successful `fundsOut`.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
     /// @notice Per-`(sourceChainId, sourceSender)` monotonic nonce. Folded into
@@ -301,15 +309,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         nonReentrant
         whenOutflowNotPaused
     {
-        if (fundsOutParams.amount             == 0)                       revert ZeroAmount();
-        if (fundsOutParams.recipient          == address(0))              revert InvalidRecipientAddress();
-        if (fundsOutParams.sourceChainId      == 0)                       revert InvalidSourceChainId();
-        if (fundsOutParams.destinationChainId == 0)                       revert InvalidDestinationChainId();
-        if (bytes(fundsOutParams.sourceAddress).length > MAX_ADDRESS_LENGTH) {
-            revert AddressTooLong(bytes(fundsOutParams.sourceAddress).length, MAX_ADDRESS_LENGTH);
-        }
-        if (fundsOutParams.proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(fundsOutParams.proof.length, MAX_PROOF_LENGTH);
-        if (fundsOutParams.amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
+        _validateFundsOutParams(fundsOutParams);
 
         // Common replay guard. Set the flag before any external interaction
         // so a revert anywhere downstream rolls the mark back with the rest
@@ -371,10 +371,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         );
 
         // Forward token commission to the CommissionManager pool.
-        if (tokenCommission != 0) {
-            IERC20(TOKEN).safeTransfer(address(commissionManager), tokenCommission);
-            commissionManager.receiveTokenCommission(TOKEN);
-        }
+        if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
 
         // Deliver the net amount to the recipient.
         IERC20(TOKEN).safeTransfer(fundsOutParams.recipient, netAmount);
@@ -404,6 +401,23 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // =========================================================================
     // Internal
     // =========================================================================
+
+    function _validateFundsOutParams(FundsOutParams calldata params) private view {
+        if (params.amount             == 0)          revert ZeroAmount();
+        if (params.recipient          == address(0)) revert InvalidRecipientAddress();
+        if (params.sourceChainId      == 0)          revert InvalidSourceChainId();
+        if (params.destinationChainId == 0)          revert InvalidDestinationChainId();
+
+        uint256 sourceAddressLength = bytes(params.sourceAddress).length;
+        if (sourceAddressLength > MAX_ADDRESS_LENGTH) {
+            revert AddressTooLong(sourceAddressLength, MAX_ADDRESS_LENGTH);
+        }
+        if (params.proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(params.proof.length, MAX_PROOF_LENGTH);
+        if (params.amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
+
+        uint256 expectedBurnId = _deriveBurnId(params);
+        if (params.burnId != expectedBurnId) revert InvalidBurnId(params.burnId, expectedBurnId);
+    }
 
     /// @dev Build an enabled outflow-limit config from uint256 inputs, safely
     ///      narrowing to the library's uint128 fields. USDT0 amounts fit in
@@ -445,19 +459,25 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (sourceChainId      == 0)               revert InvalidSourceChainId();
         if (destinationChainId == 0)               revert InvalidDestinationChainId();
 
-        (
-            uint256 tokenCommission,
-            uint256 nativeCommission,
-            uint256 netAmount
-        ) = commissionManager.calculateFundsInCommission(
-            sourceChainId,
-            destinationChainId,
-            TOKEN,
-            amount
-        );
+        // Commission is quoted from the nominal `amount` so the native-commission
+        // quote (and the lower-bound `msg.value` check below) stays predictable
+        // for the caller. The nominal net is intentionally discarded — the
+        // credited net is derived from the ACTUAL received amount after the transfer.
+        (uint256 tokenCommission, uint256 nativeCommission, ) =
+            commissionManager.calculateFundsInCommission(
+                sourceChainId,
+                destinationChainId,
+                TOKEN,
+                amount
+            );
 
-        // Native payment must match the quote exactly (includes the zero-native case).
-        if (msg.value != nativeCommission) revert NativeValueMismatch();
+        // Native payment: require at least the freshly-quoted commission
+        // — an oracle move up between quote and execution reverts here. Any
+        // overpayment from a favorable move is collected as commission below
+        // (not refunded), so the rule is uniform for direct and LZ deposits.
+        // TOKEN-commission routes (nativeCommission == 0) accept no native.
+        if (msg.value < nativeCommission) revert NativeValueMismatch();
+        if (nativeCommission == 0 && msg.value != 0) revert NativeValueMismatch();
 
         // Build the canonical context. The per-`(sourceChainId, sourceSender)`
         // nonce is consumed here — before any external call, so a downstream
@@ -470,17 +490,40 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             sender:        from,
             sourceSender:  sourceSender,
             grossAmount:   amount,
-            netAmount:     netAmount,
+            netAmount:     0, // set below from the ACTUAL received amount
             operationId:   bytes32(0), // filled in on the next line
             senderNonce:   sourceSenderNonces[sourceChainId][sourceSender]++,
             sourceChainId: sourceChainId,
             destChainId:   destinationChainId,
             destAddress:   destinationAddress
         });
+        // operationId binds grossAmount (not netAmount), so it is stable
+        // regardless of any token transfer fee.
         ctx.operationId = _deriveOperationId(ctx, settlementData);
 
-        // Pull the full gross amount from `from` into this contract.
+        // Pull the gross amount and measure what ACTUALLY arrived. A
+        // fee-on-transfer token can deliver less than `amount`; crediting the
+        // nominal amount would overstate custody and could brick release of the
+        // recorded balance. Everything downstream — records, isolated
+        // liquidity, event — is built from `received`, never from `amount`.
+        uint256 balanceBefore = IERC20(TOKEN).balanceOf(address(this));
         IERC20(TOKEN).safeTransferFrom(from, address(this), amount);
+        uint256 received = IERC20(TOKEN).balanceOf(address(this)) - balanceBefore;
+
+        // The token commission is forwarded out of `received`; guard the
+        // subtraction so a token fee that eats more than the commission reverts
+        // cleanly instead of underflowing. A zero net (received == commission) is
+        // left to the existing zero-amount / dust handling, unchanged here.
+        if (received < tokenCommission) revert InsufficientReceived(received, tokenCommission);
+        ctx.netAmount = received - tokenCommission;
+
+        // Forward token commission BEFORE the settlement hook so that any
+        // external call the hook makes (or a contract reading `getContractBalance`
+        // during it) observes only the net amount the Bridge actually retains,
+        // never the in-flight commission about to leave. `netAmount` is
+        // already fixed above, so the hook does not depend on the tokens still
+        // being held here.
+        if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
 
         // Delegate per-route inbound bookkeeping. The module returns an optional
         // correlation id (the RGB OpId for the RGB route; 0 otherwise) to surface
@@ -489,18 +532,16 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
         // Isolated liquidity: credit the net deposit to its destination
         // chain's bucket. A later `fundsOut` from that chain can release at most
-        // the accumulated locked liquidity.
-        lockedLiquidity[destinationChainId] += netAmount;
+        // the accumulated locked liquidity. Credited from the ACTUAL received
+        // amount so the ledger can never exceed real custody.
+        lockedLiquidity[destinationChainId] += ctx.netAmount;
 
-        // Forward token commission, if any, to the CommissionManager pool.
-        if (tokenCommission != 0) {
-            IERC20(TOKEN).safeTransfer(address(commissionManager), tokenCommission);
-            commissionManager.receiveTokenCommission(TOKEN);
-        }
-
-        // Forward native commission, if any, to the CommissionManager pool.
-        if (nativeCommission != 0) {
-            (bool ok, ) = address(commissionManager).call{ value: nativeCommission }('');
+        // Forward the FULL native value to the CommissionManager pool. Any
+        // surplus over the quoted `nativeCommission` (favorable oracle drift) is
+        // collected as commission rather than refunded, so no native is
+        // ever left stranded in the Bridge.
+        if (msg.value != 0) {
+            (bool ok, ) = address(commissionManager).call{ value: msg.value }('');
             if (!ok) revert NativeValueMismatch();
         }
 
@@ -515,7 +556,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             ctx.grossAmount,
             ctx.netAmount,
             tokenCommission,
-            nativeCommission,
+            msg.value, // actual native collected (== nativeCommission + any drift surplus)
             ctx.sourceChainId,
             ctx.destChainId,
             ctx.destAddress
@@ -528,6 +569,19 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///      used by `operationId` derivation and the LZ overload.
     function _toSourceSender(address account) private pure returns (bytes32) {
         return bytes32(uint256(uint160(account)));
+    }
+
+    /// @dev Transfer `amount` of TOKEN to the CommissionManager and credit the
+    ///      commission pool by the ACTUAL balance increase this transfer caused.
+    ///      Measuring the delta here (rather than in CM from `balanceOf - pool`)
+    ///      keeps the credit fee-on-transfer safe and prevents any pre-existing /
+    ///      unsolicited direct transfer to CM from being absorbed as commission.
+    function _forwardTokenCommission(uint256 amount) private {
+        address cm = address(commissionManager);
+        uint256 balBefore = IERC20(TOKEN).balanceOf(cm);
+        IERC20(TOKEN).safeTransfer(cm, amount);
+        uint256 credited = IERC20(TOKEN).balanceOf(cm) - balBefore;
+        commissionManager.receiveTokenCommission(TOKEN, credited);
     }
 
     /// @dev Canonical `operationId` = domain-separated hash of the deposit
@@ -558,5 +612,66 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
                 block.chainid
             )
         );
+    }
+
+    /// @dev Canonical `burnId` = domain-separated hash of the release intent.
+    ///      Route-specific burn identity should be placed in `settlementData`
+    ///      when a route has one; Bridge commits to it via `settlementDataHash`.
+    function _deriveBurnId(FundsOutParams calldata params) private view returns (uint256) {
+        return _deriveBurnIdFromFields(
+            params.recipient,
+            params.amount,
+            params.sourceChainId,
+            params.destinationChainId,
+            params.sourceAddress,
+            params.proof,
+            params.settlementData
+        );
+    }
+
+    function _deriveBurnIdFromFields(
+        address recipient,
+        uint256 amount,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string calldata sourceAddress,
+        bytes calldata proof,
+        bytes calldata settlementData
+    ) private view returns (uint256) {
+        return uint256(
+            keccak256(
+                abi.encode(
+                    FUNDS_OUT_BURN_ID_TYPEHASH,
+                    address(this),
+                    block.chainid,
+                    TOKEN,
+                    recipient,
+                    amount,
+                    sourceChainId,
+                    destinationChainId,
+                    _hashCalldataString(sourceAddress),
+                    _hashCalldataBytes(proof),
+                    _hashCalldataBytes(settlementData)
+                )
+            )
+        );
+    }
+
+    function _hashCalldataString(string calldata value) private pure returns (bytes32 result) {
+        assembly {
+            let ptr := mload(0x40)
+            calldatacopy(ptr, value.offset, value.length)
+            result := keccak256(ptr, value.length)
+            mstore(0x40, add(ptr, and(add(value.length, 0x3f), not(0x1f))))
+        }
+    }
+
+    function _hashCalldataBytes(bytes calldata value) private pure returns (bytes32 result) {
+        assembly {
+            let ptr := mload(0x40)
+            calldatacopy(ptr, value.offset, value.length)
+            result := keccak256(ptr, value.length)
+            mstore(0x40, add(ptr, and(add(value.length, 0x3f), not(0x1f))))
+        }
     }
 }
