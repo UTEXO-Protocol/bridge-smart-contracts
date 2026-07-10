@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { ISettlementModule } from '../interfaces/ISettlementModule.sol';
-import { FundsInContext, FundsOutContext } from '../interfaces/RouteTypes.sol';
+import {ISettlementModule} from "../interfaces/ISettlementModule.sol";
+import {FundsInContext, FundsOutContext} from "../interfaces/RouteTypes.sol";
 
 /// @title NullSettlementModule
 /// @notice Explicit "no per-route settlement state" `ISettlementModule`.

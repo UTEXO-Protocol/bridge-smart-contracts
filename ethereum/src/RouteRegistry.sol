@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Ownable } from '@openzeppelin/contracts/access/Ownable.sol';
-import { Ownable2Step } from '@openzeppelin/contracts/access/Ownable2Step.sol';
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
-import { IRouteRegistry }    from './interfaces/IRouteRegistry.sol';
-import { IFinalityVerifier } from './interfaces/IFinalityVerifier.sol';
-import { ISettlementModule } from './interfaces/ISettlementModule.sol';
-import {
-    FundsInContext,
-    FundsOutContext,
-    RouteConfig
-} from './interfaces/RouteTypes.sol';
+import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
+import {IFinalityVerifier} from "./interfaces/IFinalityVerifier.sol";
+import {ISettlementModule} from "./interfaces/ISettlementModule.sol";
+import {FundsInContext, FundsOutContext, RouteConfig} from "./interfaces/RouteTypes.sol";
 
 /// @title RouteRegistry
 /// @notice Bridge directory of routes and their plugin implementations.
@@ -96,18 +92,15 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     function setRoute(
         uint256 sourceChainId,
         uint256 destChainId,
-        bool    enabled,
+        bool enabled,
         address finalityVerifier,
         address settlementModule
     ) external override onlyOwner {
         if (finalityVerifier == address(0)) revert ZeroFinalityVerifier();
         if (settlementModule == address(0)) revert ZeroSettlementModule();
 
-        _routes[_routeKey(sourceChainId, destChainId)] = RouteConfig({
-            enabled:          enabled,
-            finalityVerifier: finalityVerifier,
-            settlementModule: settlementModule
-        });
+        _routes[_routeKey(sourceChainId, destChainId)] =
+            RouteConfig({enabled: enabled, finalityVerifier: finalityVerifier, settlementModule: settlementModule});
 
         emit RouteSet(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule);
     }
@@ -124,12 +117,7 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // =========================================================================
 
     /// @inheritdoc IRouteRegistry
-    function getRoute(uint256 sourceChainId, uint256 destChainId)
-        external
-        view
-        override
-        returns (RouteConfig memory)
-    {
+    function getRoute(uint256 sourceChainId, uint256 destChainId) external view override returns (RouteConfig memory) {
         return _routes[_routeKey(sourceChainId, destChainId)];
     }
 
@@ -138,11 +126,7 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // =========================================================================
 
     /// @inheritdoc IRouteRegistry
-    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
-        external
-        override
-        onlyBridge
-    {
+    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData) external override onlyBridge {
         RouteConfig memory route = _routes[_routeKey(ctx.sourceChainId, ctx.destChainId)];
         if (!route.enabled) revert RouteNotEnabled(ctx.sourceChainId, ctx.destChainId);
 
@@ -153,11 +137,11 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     /// @dev Verifier runs first (view-only finality check). A reverting
     ///      verifier short-circuits the settlement-module call so no state
     ///      mutation happens unless finality is proven.
-    function beforeFundsOut(
-        FundsOutContext calldata ctx,
-        bytes            calldata proof,
-        bytes            calldata settlementData
-    ) external override onlyBridge {
+    function beforeFundsOut(FundsOutContext calldata ctx, bytes calldata proof, bytes calldata settlementData)
+        external
+        override
+        onlyBridge
+    {
         RouteConfig memory route = _routes[_routeKey(ctx.sourceChainId, ctx.destChainId)];
         if (!route.enabled) revert RouteNotEnabled(ctx.sourceChainId, ctx.destChainId);
 
@@ -172,11 +156,7 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     /// @dev Canonical route key derivation. Using `abi.encode` (not
     ///      `encodePacked`) keeps the hash collision-free for arbitrary
     ///      `uint256` inputs.
-    function _routeKey(uint256 sourceChainId, uint256 destChainId)
-        internal
-        pure
-        returns (bytes32)
-    {
+    function _routeKey(uint256 sourceChainId, uint256 destChainId) internal pure returns (bytes32) {
         return keccak256(abi.encode(sourceChainId, destChainId));
     }
 }

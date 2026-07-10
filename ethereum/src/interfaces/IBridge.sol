@@ -15,7 +15,7 @@ interface IBridge {
     error AddressTooLong(uint256 length, uint256 maxLength);
     error ProofTooLong(uint256 length, uint256 maxLength);
     error SettlementDataTooLong(uint256 length, uint256 maxLength);
-    error InsufficientChainLiquidity(uint256 chainId, uint256 requested, uint256 available);    
+    error InsufficientChainLiquidity(uint256 chainId, uint256 requested, uint256 available);
     error InvalidOutflowLimit();
     error InvalidRouteRegistryAddress();
     error InvalidCommissionManagerAddress();
@@ -85,7 +85,7 @@ interface IBridge {
         uint256 nativeCommission,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string  destinationAddress
+        string destinationAddress
     );
 
     /// @param recipient          Recipient on this chain.
@@ -105,7 +105,7 @@ interface IBridge {
         uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string  sourceAddress
+        string sourceAddress
     );
 
     // =========================================================================
@@ -123,9 +123,9 @@ interface IBridge {
     function fundsIn(
         uint256 amount,
         uint256 destinationChainId,
-        string  calldata destinationAddress,
+        string calldata destinationAddress,
         uint256 operationId,
-        bytes   calldata settlementData
+        bytes calldata settlementData
     ) external payable;
 
     /// @notice Adapter-only overload. Used by `UtexoLZAdapter.lzCompose` to
@@ -138,9 +138,9 @@ interface IBridge {
         uint256 amount,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string  calldata destinationAddress,
+        string calldata destinationAddress,
         uint256 operationId,
-        bytes   calldata settlementData
+        bytes calldata settlementData
     ) external payable;
 
     // =========================================================================
@@ -164,9 +164,9 @@ interface IBridge {
         uint256 burnId;
         uint256 sourceChainId;
         uint256 destinationChainId;
-        string  sourceAddress;
-        bytes   proof;
-        bytes   settlementData;
+        string sourceAddress;
+        bytes proof;
+        bytes settlementData;
     }
 
     /// @notice Release tokens to a recipient. Only callable by owner

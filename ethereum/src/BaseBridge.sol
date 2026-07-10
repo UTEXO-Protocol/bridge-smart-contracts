@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { IERC20 } from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
-import { SafeERC20 } from '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import { BridgeBase } from './BridgeBase.sol';
+import {BridgeBase} from "./BridgeBase.sol";
 
 /// @title BaseBridge
 /// @notice Minimal single-token bridge for lock/unlock operations.
@@ -24,12 +24,7 @@ contract BaseBridge is BridgeBase {
     /// @param amount          Amount of tokens released.
     /// @param operationId     Backend-assigned operation identifier.
     /// @param sourceAddress   Sender address on the source chain (e.g. RGB address).
-    event FundsOut(
-        address indexed recipient,
-        uint256 amount,
-        uint256 indexed operationId,
-        string  sourceAddress
-    );
+    event FundsOut(address indexed recipient, uint256 amount, uint256 indexed operationId, string sourceAddress);
 
     // =========================================================================
     // Constructor
@@ -45,10 +40,7 @@ contract BaseBridge is BridgeBase {
     /// @notice Lock tokens in the bridge to initiate a transfer to the destination chain.
     /// @param amount      Amount of tokens to lock.
     /// @param operationId Backend-assigned operation identifier included in the event.
-    function fundsIn(
-        uint256 amount,
-        uint256 operationId
-    ) external whenNotPaused {
+    function fundsIn(uint256 amount, uint256 operationId) external whenNotPaused {
         IERC20(TOKEN).safeTransferFrom(msg.sender, address(this), amount);
 
         emit FundsIn(msg.sender, operationId, amount);
@@ -63,12 +55,11 @@ contract BaseBridge is BridgeBase {
     /// @param amount        Amount of tokens to release.
     /// @param operationId   Backend-assigned operation identifier included in the event.
     /// @param sourceAddress Sender address on the source chain (e.g. RGB address).
-    function fundsOut(
-        address recipient,
-        uint256 amount,
-        uint256 operationId,
-        string  calldata sourceAddress
-    ) external onlyOwner whenOutflowNotPaused {
+    function fundsOut(address recipient, uint256 amount, uint256 operationId, string calldata sourceAddress)
+        external
+        onlyOwner
+        whenOutflowNotPaused
+    {
         if (recipient == address(0)) revert InvalidRecipientAddress();
         if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 

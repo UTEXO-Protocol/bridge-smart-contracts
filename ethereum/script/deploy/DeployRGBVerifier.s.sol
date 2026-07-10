@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Script, console2 } from 'forge-std/Script.sol';
-import { RGBVerifier } from '../../src/verifiers/RGBVerifier.sol';
+import {Script, console2} from "forge-std/Script.sol";
+import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
 
 /// @title DeployRGBVerifier
 /// @notice Deploys the RGB-route finality verifier (thin wrapper around the
@@ -20,14 +20,14 @@ import { RGBVerifier } from '../../src/verifiers/RGBVerifier.sol';
 ///     --rpc-url $RPC_URL --broadcast --verify
 contract DeployRGBVerifier is Script {
     function run() external returns (RGBVerifier verifier) {
-        uint256 pk       = vm.envUint('PRIVATE_KEY');
-        address btcRelay = vm.envAddress('BTC_RELAY_ADDRESS');
+        uint256 pk = vm.envUint("PRIVATE_KEY");
+        address btcRelay = vm.envAddress("BTC_RELAY_ADDRESS");
 
         vm.startBroadcast(pk);
         verifier = new RGBVerifier(btcRelay);
         vm.stopBroadcast();
 
-        console2.log('RGBVerifier deployed at:', address(verifier));
-        console2.log('BtcRelay (immutable):   ', verifier.btcRelay());
+        console2.log("RGBVerifier deployed at:", address(verifier));
+        console2.log("BtcRelay (immutable):   ", verifier.btcRelay());
     }
 }

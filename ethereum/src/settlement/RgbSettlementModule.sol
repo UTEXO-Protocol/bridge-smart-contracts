@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { ISettlementModule } from '../interfaces/ISettlementModule.sol';
-import { FundsInContext, FundsOutContext } from '../interfaces/RouteTypes.sol';
+import {ISettlementModule} from "../interfaces/ISettlementModule.sol";
+import {FundsInContext, FundsOutContext} from "../interfaces/RouteTypes.sol";
 
 /// @title RgbSettlementModule
 /// @notice `ISettlementModule` for the RGB → Arbitrum route. Records the
@@ -119,7 +119,10 @@ contract RgbSettlementModule is ISettlementModule {
     ///      Reverts `DuplicateOperationId` if a non-zero record already
     ///      exists under the same id. `settlementData` is ignored for this
     ///      module — the canonical fundsIn data is taken from `ctx`.
-    function onFundsIn(FundsInContext calldata ctx, bytes calldata /* settlementData */)
+    function onFundsIn(
+        FundsInContext calldata ctx,
+        bytes calldata /* settlementData */
+    )
         external
         override
         onlyRouteRegistry
@@ -132,20 +135,23 @@ contract RgbSettlementModule is ISettlementModule {
     /// @dev Decodes `settlementData` as `(uint256[] operationIds, uint256[] amounts)`
     ///      and verifies every referenced mint: each `operationId` must exist
     ///      and its recorded amount must equal the supplied amount.
-    function beforeFundsOut(FundsOutContext calldata /* ctx */, bytes calldata settlementData)
+    function beforeFundsOut(
+        FundsOutContext calldata,
+        /* ctx */
+        bytes calldata settlementData
+    )
         external
         view
         override
         onlyRouteRegistry
     {
-        (uint256[] memory operationIds, uint256[] memory amounts) =
-            abi.decode(settlementData, (uint256[], uint256[]));
+        (uint256[] memory operationIds, uint256[] memory amounts) = abi.decode(settlementData, (uint256[], uint256[]));
 
         if (operationIds.length != amounts.length) revert SettlementDataLengthMismatch();
 
         for (uint256 i = 0; i < operationIds.length; i++) {
             uint256 recorded = fundsInRecords[operationIds[i]];
-            if (recorded == 0)          revert FundsInNotFound(operationIds[i]);
+            if (recorded == 0) revert FundsInNotFound(operationIds[i]);
             if (recorded != amounts[i]) revert AmountMismatch(operationIds[i], amounts[i], recorded);
         }
     }

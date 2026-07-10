@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Test } from 'forge-std/Test.sol';
+import {Test} from "forge-std/Test.sol";
 
-import { RGBVerifier } from '../src/verifiers/RGBVerifier.sol';
-import { FundsOutContext } from '../src/interfaces/RouteTypes.sol';
-import { MockBtcRelay } from './mocks/MockBtcRelay.sol';
+import {RGBVerifier} from "../src/verifiers/RGBVerifier.sol";
+import {FundsOutContext} from "../src/interfaces/RouteTypes.sol";
+import {MockBtcRelay} from "./mocks/MockBtcRelay.sol";
 
 contract RGBVerifierTest is Test {
     MockBtcRelay btcRelay;
     RGBVerifier verifier;
 
-    address token = makeAddr('token');
-    address recipient = makeAddr('recipient');
+    address token = makeAddr("token");
+    address recipient = makeAddr("recipient");
 
     uint256 constant SOURCE_CHAIN_ID = 1_000_001;
     uint256 constant DEST_CHAIN_ID = 42161;
@@ -20,9 +20,9 @@ contract RGBVerifierTest is Test {
     uint256 constant BURN_ID = 9_001;
 
     uint256 constant LOW_CONFIRMATION_HEIGHT = 850_000;
-    bytes32 constant LOW_CONFIRMATION_COMMITMENT = keccak256('low-confirmation-block');
+    bytes32 constant LOW_CONFIRMATION_COMMITMENT = keccak256("low-confirmation-block");
     uint256 constant HIGH_CONFIRMATION_HEIGHT = 860_000;
-    bytes32 constant HIGH_CONFIRMATION_COMMITMENT = keccak256('high-confirmation-block');
+    bytes32 constant HIGH_CONFIRMATION_COMMITMENT = keccak256("high-confirmation-block");
 
     function setUp() public {
         btcRelay = new MockBtcRelay();
@@ -31,13 +31,13 @@ contract RGBVerifierTest is Test {
 
     function _ctx() internal view returns (FundsOutContext memory) {
         return FundsOutContext({
-            token:         token,
-            recipient:     recipient,
-            amount:        AMOUNT,
-            burnId:        BURN_ID,
+            token: token,
+            recipient: recipient,
+            amount: AMOUNT,
+            burnId: BURN_ID,
             sourceChainId: SOURCE_CHAIN_ID,
-            destChainId:   DEST_CHAIN_ID,
-            sourceAddress: 'rgb:sender/utxo1src'
+            destChainId: DEST_CHAIN_ID,
+            sourceAddress: "rgb:sender/utxo1src"
         });
     }
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { OutflowRateLimiter } from '../../src/libraries/OutflowRateLimiter.sol';
+import {OutflowRateLimiter} from "../../src/libraries/OutflowRateLimiter.sol";
 
 /// @title OutflowRateLimiterHarness
 /// @notice Thin external wrapper around the `OutflowRateLimiter` library so its
@@ -57,19 +57,9 @@ contract OutflowRateLimiterHarness {
 
     // ----- test setup helper -----
 
-    function setRaw(
-        uint128 tokens,
-        uint32 lastUpdated,
-        bool isEnabled,
-        uint128 capacity,
-        uint128 rate
-    ) external {
+    function setRaw(uint128 tokens, uint32 lastUpdated, bool isEnabled, uint128 capacity, uint128 rate) external {
         bucket = OutflowRateLimiter.Bucket({
-            tokens: tokens,
-            lastUpdated: lastUpdated,
-            isEnabled: isEnabled,
-            capacity: capacity,
-            rate: rate
+            tokens: tokens, lastUpdated: lastUpdated, isEnabled: isEnabled, capacity: capacity, rate: rate
         });
     }
 }

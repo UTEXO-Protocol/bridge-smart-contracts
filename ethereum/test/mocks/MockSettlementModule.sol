@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { IERC20 } from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import { ISettlementModule } from '../../src/interfaces/ISettlementModule.sol';
-import { FundsInContext, FundsOutContext } from '../../src/interfaces/RouteTypes.sol';
+import {ISettlementModule} from "../../src/interfaces/ISettlementModule.sol";
+import {FundsInContext, FundsOutContext} from "../../src/interfaces/RouteTypes.sol";
 
 /// @title MockSettlementModule
 /// @notice Test stub for `ISettlementModule`. Records call counts and the
@@ -29,7 +29,7 @@ contract MockSettlementModule is ISettlementModule {
     address public lastRecipient;
     uint256 public lastAmount;
     uint256 public lastBurnId;
-    bytes   public lastSettlementData;
+    bytes public lastSettlementData;
 
     address public balanceProbeToken;
     address public balanceProbeTarget;
@@ -49,31 +49,25 @@ contract MockSettlementModule is ISettlementModule {
     }
 
     /// @inheritdoc ISettlementModule
-    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
-        external
-        override
-    {
+    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData) external override {
         if (shouldRevertOnFundsIn) revert MockModuleForcedRevert();
-        onFundsInCount     += 1;
-        lastSender          = ctx.sender;
-        lastOperationId     = ctx.operationId;
-        lastNetAmount       = ctx.netAmount;
-        lastSettlementData  = settlementData;
+        onFundsInCount += 1;
+        lastSender = ctx.sender;
+        lastOperationId = ctx.operationId;
+        lastNetAmount = ctx.netAmount;
+        lastSettlementData = settlementData;
         if (balanceProbeToken != address(0)) {
             lastObservedBalanceOnFundsIn = IERC20(balanceProbeToken).balanceOf(balanceProbeTarget);
         }
     }
 
     /// @inheritdoc ISettlementModule
-    function beforeFundsOut(FundsOutContext calldata ctx, bytes calldata settlementData)
-        external
-        override
-    {
+    function beforeFundsOut(FundsOutContext calldata ctx, bytes calldata settlementData) external override {
         if (shouldRevertOnBeforeFundsOut) revert MockModuleForcedRevert();
         beforeFundsOutCount += 1;
-        lastRecipient        = ctx.recipient;
-        lastAmount           = ctx.amount;
-        lastBurnId           = ctx.burnId;
-        lastSettlementData   = settlementData;
+        lastRecipient = ctx.recipient;
+        lastAmount = ctx.amount;
+        lastBurnId = ctx.burnId;
+        lastSettlementData = settlementData;
     }
 }

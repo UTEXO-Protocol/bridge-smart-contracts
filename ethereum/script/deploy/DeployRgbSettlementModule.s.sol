@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Script, console2 } from 'forge-std/Script.sol';
-import { RgbSettlementModule } from '../../src/settlement/RgbSettlementModule.sol';
+import {Script, console2} from "forge-std/Script.sol";
+import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol";
 
 /// @title DeployRgbSettlementModule
 /// @notice Deploys the RGB-route settlement module. Holds the `fundsInRecords`
@@ -26,14 +26,14 @@ import { RgbSettlementModule } from '../../src/settlement/RgbSettlementModule.so
 ///     --rpc-url $RPC_URL --broadcast --verify
 contract DeployRgbSettlementModuleScript is Script {
     function run() external returns (RgbSettlementModule module) {
-        uint256 pk            = vm.envUint('PRIVATE_KEY');
-        address routeRegistry = vm.envAddress('ROUTE_REGISTRY_ADDRESS');
+        uint256 pk = vm.envUint("PRIVATE_KEY");
+        address routeRegistry = vm.envAddress("ROUTE_REGISTRY_ADDRESS");
 
         vm.startBroadcast(pk);
         module = new RgbSettlementModule(routeRegistry);
         vm.stopBroadcast();
 
-        console2.log('RgbSettlementModule deployed at:', address(module));
-        console2.log('RouteRegistry (immutable):      ', module.routeRegistry());
+        console2.log("RgbSettlementModule deployed at:", address(module));
+        console2.log("RouteRegistry (immutable):      ", module.routeRegistry());
     }
 }

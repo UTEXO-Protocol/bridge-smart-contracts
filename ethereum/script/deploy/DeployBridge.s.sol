@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Script, console2 } from 'forge-std/Script.sol';
-import { Bridge } from '../../src/Bridge.sol';
+import {Script, console2} from "forge-std/Script.sol";
+import {Bridge} from "../../src/Bridge.sol";
 
 /// @title DeployBridge
 /// @notice Deploys the UTEXO Bridge. Deployer is the initial owner.
@@ -41,23 +41,23 @@ import { Bridge } from '../../src/Bridge.sol';
 ///     --rpc-url $RPC_URL --broadcast --verify
 contract DeployBridge is Script {
     function run() external returns (Bridge bridge) {
-        uint256 pk                = vm.envUint('PRIVATE_KEY');
-        address usdt0             = vm.envAddress('USDT0_ADDRESS');
-        address routeRegistry     = vm.envAddress('ROUTE_REGISTRY_ADDRESS');
-        address commissionManager = vm.envAddress('COMMISSION_MANAGER');
-        address lzAdapter         = vm.envOr('LZ_ADAPTER', address(0));
-        uint256 minFundsInAmount  = vm.envUint('MIN_FUNDS_IN_AMOUNT');
+        uint256 pk = vm.envUint("PRIVATE_KEY");
+        address usdt0 = vm.envAddress("USDT0_ADDRESS");
+        address routeRegistry = vm.envAddress("ROUTE_REGISTRY_ADDRESS");
+        address commissionManager = vm.envAddress("COMMISSION_MANAGER");
+        address lzAdapter = vm.envOr("LZ_ADAPTER", address(0));
+        uint256 minFundsInAmount = vm.envUint("MIN_FUNDS_IN_AMOUNT");
 
         vm.startBroadcast(pk);
         bridge = new Bridge(usdt0, routeRegistry, payable(commissionManager), lzAdapter, minFundsInAmount);
         vm.stopBroadcast();
 
-        console2.log('Bridge deployed at:  ', address(bridge));
-        console2.log('Owner (deployer):    ', bridge.owner());
-        console2.log('Token:               ', bridge.TOKEN());
-        console2.log('RouteRegistry:       ', address(bridge.routeRegistry()));
-        console2.log('CommissionManager:   ', address(bridge.commissionManager()));
-        console2.log('LZ adapter:          ', bridge.lzAdapter());
-        console2.log('Min fundsIn amount:  ', bridge.minFundsInAmount());
+        console2.log("Bridge deployed at:  ", address(bridge));
+        console2.log("Owner (deployer):    ", bridge.owner());
+        console2.log("Token:               ", bridge.TOKEN());
+        console2.log("RouteRegistry:       ", address(bridge.routeRegistry()));
+        console2.log("CommissionManager:   ", address(bridge.commissionManager()));
+        console2.log("LZ adapter:          ", bridge.lzAdapter());
+        console2.log("Min fundsIn amount:  ", bridge.minFundsInAmount());
     }
 }

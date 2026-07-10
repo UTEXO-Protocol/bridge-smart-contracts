@@ -37,7 +37,7 @@ struct FundsInContext {
     uint256 operationId;
     uint256 sourceChainId;
     uint256 destChainId;
-    string  destAddress;
+    string destAddress;
 }
 
 /// @notice Canonical context for a `Bridge.fundsOut` call. Built by Bridge
@@ -62,7 +62,7 @@ struct FundsOutContext {
     uint256 burnId;
     uint256 sourceChainId;
     uint256 destChainId;
-    string  sourceAddress;
+    string sourceAddress;
 }
 
 /// @notice Per-route configuration stored in `RouteRegistry`.
@@ -78,7 +78,7 @@ struct FundsOutContext {
 /// @param settlementModule   Contract that owns route-specific accounting
 ///                           (e.g. RGB `fundsInRecords`). State-mutating.
 struct RouteConfig {
-    bool    enabled;
+    bool enabled;
     address finalityVerifier;
     address settlementModule;
 }

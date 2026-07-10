@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { IBtcRelayView } from '../../src/interfaces/IBtcRelayView.sol';
+import {IBtcRelayView} from "../../src/interfaces/IBtcRelayView.sol";
 
 /// @title MockBtcRelay
 /// @notice Minimal mock of the Atomiq BtcRelay for testing.
 ///         Stores (height, commitmentHash) => confirmations.
 contract MockBtcRelay is IBtcRelayView {
     mapping(bytes32 => uint256) private _blocks;
-    uint32  private _blockHeight;
+    uint32 private _blockHeight;
     uint224 private _chainwork;
 
     /// @notice Register a block so verifyBlockheaderHash returns the given confirmations.
@@ -30,12 +30,14 @@ contract MockBtcRelay is IBtcRelayView {
     }
 
     /// @inheritdoc IBtcRelayView
-    function verifyBlockheaderHash(
-        uint256 height,
-        bytes32 commitmentHash
-    ) external view override returns (uint256 confirmations) {
+    function verifyBlockheaderHash(uint256 height, bytes32 commitmentHash)
+        external
+        view
+        override
+        returns (uint256 confirmations)
+    {
         confirmations = _blocks[_key(height, commitmentHash)];
-        require(confirmations > 0, 'verify: block commitment');
+        require(confirmations > 0, "verify: block commitment");
     }
 
     /// @inheritdoc IBtcRelayView

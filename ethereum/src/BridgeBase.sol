@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Ownable } from '@openzeppelin/contracts/access/Ownable.sol';
-import { Ownable2Step } from '@openzeppelin/contracts/access/Ownable2Step.sol';
-import { SafeERC20, IERC20 } from '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
-import { Pausable } from '@openzeppelin/contracts/utils/Pausable.sol';
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /// @title BridgeBase
 /// @notice Abstract base contract shared by BaseBridge and Bridge.
@@ -41,11 +41,7 @@ abstract contract BridgeBase is Ownable2Step, Pausable {
     /// @param sender      Address that deposited the tokens.
     /// @param operationId Backend-assigned operation identifier.
     /// @param amount      Amount of tokens locked.
-    event FundsIn(
-        address indexed sender,
-        uint256 indexed operationId,
-        uint256 amount
-    );
+    event FundsIn(address indexed sender, uint256 indexed operationId, uint256 amount);
 
     /// @notice Emitted when the outflow (withdrawal) path is frozen.
     /// @dev The inflow path reuses OpenZeppelin `Pausable`, which emits its own
@@ -99,10 +95,14 @@ abstract contract BridgeBase is Ownable2Step, Pausable {
     ///      through the timelocked `MultisigProxy` propose -> execute path
     ///      (`PauseInflow` operation), giving the federation an observation
     ///      window before it takes effect.
-    function pauseInflow() external onlyOwner { _pause(); }
+    function pauseInflow() external onlyOwner {
+        _pause();
+    }
 
     /// @notice Resume the inflow (deposit) path.
-    function unpauseInflow() external onlyOwner { _unpause(); }
+    function unpauseInflow() external onlyOwner {
+        _unpause();
+    }
 
     /// @notice Emergency freeze of BOTH inflow and outflow, set atomically.
     /// @dev No-timelock control for incident response. On the production

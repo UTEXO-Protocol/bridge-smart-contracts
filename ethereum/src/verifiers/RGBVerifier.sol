@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { IFinalityVerifier } from '../interfaces/IFinalityVerifier.sol';
-import { FundsOutContext }   from '../interfaces/RouteTypes.sol';
-import { IBtcRelayView }     from '../interfaces/IBtcRelayView.sol';
+import {IFinalityVerifier} from "../interfaces/IFinalityVerifier.sol";
+import {FundsOutContext} from "../interfaces/RouteTypes.sol";
+import {IBtcRelayView} from "../interfaces/IBtcRelayView.sol";
 
 /// @title RGBVerifier
 /// @notice `IFinalityVerifier` for the RGB → Arbitrum route. Confirms that
