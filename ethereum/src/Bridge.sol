@@ -57,6 +57,19 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///         inclusion proof stays well under this).
     uint256 public constant MAX_PROOF_LENGTH = 1024;
 
+    /// @notice Upper bound on the `settlementData` byte length on both the
+    ///         `fundsIn` and `fundsOut` paths. `settlementData` is forwarded to
+    ///         the route settlement module, which may decode and iterate it
+    ///         (e.g. `RgbSettlementModule.beforeFundsOut` walks the
+    ///         `(operationIds, amounts)` arrays it carries), so an unbounded blob
+    ///         would let that loop inflate until it exceeds the block gas limit
+    ///         and bricks the call. `settlementData` encodes as ~`128 + 64 * n`
+    ///         bytes for `n` records, so 4096 bytes admits ~62 records — ample
+    ///         headroom while keeping any settlement loop bounded. Enforced on
+    ///         `fundsIn` too as defence-in-depth: current inbound modules ignore
+    ///         `settlementData`, but a future module could iterate it.
+    uint256 public constant MAX_SETTLEMENT_DATA_LENGTH = 4096;
+
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
@@ -147,11 +160,24 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
     /// @inheritdoc IBridge
     /// @dev Owner is `MultisigProxy`; federation governance gates this call
-    ///      on its M-of-N timelock flow.
+    ///      on its M-of-N timelock flow. Rotation only — rejects `address(0)`
+    ///      so an accidental zero cannot silently close the path; use
+    ///      `disableLZAdapter` for an explicit, separately-logged shutdown.
     function setLZAdapter(address newAdapter) external override onlyOwner {
+        if (newAdapter == address(0)) revert InvalidLZAdapter();
         address old = lzAdapter;
         lzAdapter = newAdapter;
         emit LZAdapterUpdated(old, newAdapter);
+    }
+
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`. Explicit disable, emitting
+    ///      `LZAdapterDisabled` so monitoring can tell a shutdown from a
+    ///      rotation.
+    function disableLZAdapter() external override onlyOwner {
+        address old = lzAdapter;
+        lzAdapter = address(0);
+        emit LZAdapterDisabled(old);
     }
 
     /// @inheritdoc IBridge
@@ -276,6 +302,9 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             revert AddressTooLong(bytes(fundsOutParams.sourceAddress).length, MAX_ADDRESS_LENGTH);
         }
         if (fundsOutParams.proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(fundsOutParams.proof.length, MAX_PROOF_LENGTH);
+        if (fundsOutParams.settlementData.length > MAX_SETTLEMENT_DATA_LENGTH) {
+            revert SettlementDataTooLong(fundsOutParams.settlementData.length, MAX_SETTLEMENT_DATA_LENGTH);
+        }
         if (fundsOutParams.amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 
         // Common replay guard. Set the flag before any external interaction
@@ -405,6 +434,9 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
         if (bytes(destinationAddress).length > MAX_ADDRESS_LENGTH) {
             revert AddressTooLong(bytes(destinationAddress).length, MAX_ADDRESS_LENGTH);
+        }
+        if (settlementData.length > MAX_SETTLEMENT_DATA_LENGTH) {
+            revert SettlementDataTooLong(settlementData.length, MAX_SETTLEMENT_DATA_LENGTH);
         }
         if (sourceChainId      == 0)               revert InvalidSourceChainId();
         if (destinationChainId == 0)               revert InvalidDestinationChainId();

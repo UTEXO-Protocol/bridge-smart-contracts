@@ -14,11 +14,13 @@ interface IBridge {
     error InvalidMinFundsInAmount();
     error AddressTooLong(uint256 length, uint256 maxLength);
     error ProofTooLong(uint256 length, uint256 maxLength);
+    error SettlementDataTooLong(uint256 length, uint256 maxLength);
     error InsufficientChainLiquidity(uint256 chainId, uint256 requested, uint256 available);    
     error InvalidOutflowLimit();
     error InvalidRouteRegistryAddress();
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();
+    error InvalidLZAdapter();
     error BurnIdAlreadyConsumed(uint256 burnId);
     error NativeValueMismatch();
 
@@ -26,10 +28,16 @@ interface IBridge {
     // Events
     // =========================================================================
 
-    /// @notice Emitted on every successful `setLZAdapter`.
+    /// @notice Emitted on every successful `setLZAdapter` (rotation to a
+    ///         non-zero adapter).
     /// @param oldAdapter Previous trusted adapter (zero before first set).
-    /// @param newAdapter New trusted adapter (zero disables the adapter overload).
+    /// @param newAdapter New trusted adapter (always non-zero).
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
+
+    /// @notice Emitted on `disableLZAdapter` — the inbound adapter path is
+    ///         explicitly closed (distinct from a rotation).
+    /// @param oldAdapter Adapter that was cleared.
+    event LZAdapterDisabled(address indexed oldAdapter);
 
     /// @notice Emitted on every successful `setRouteRegistry`.
     /// @param oldRegistry Previous registry (the constructor-supplied value
@@ -70,7 +78,7 @@ interface IBridge {
     /// @param destinationAddress Target address on the destination chain.
     event BridgeFundsIn(
         address indexed sender,
-        uint256 operationId,
+        uint256 indexed operationId,
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
@@ -94,7 +102,7 @@ interface IBridge {
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
-        uint256 burnId,
+        uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string  sourceAddress
@@ -172,10 +180,16 @@ interface IBridge {
     // External — admin (called via MultisigProxy)
     // =========================================================================
 
-    /// @notice Updates the trusted LayerZero adapter address. Owner-only
-    ///         (MultisigProxy in production). Passing `address(0)` disables
-    ///         the adapter overload until a non-zero address is set again.
+    /// @notice Rotates the trusted LayerZero adapter to a new non-zero address.
+    ///         Owner-only (MultisigProxy in production). Reverts
+    ///         `InvalidLZAdapter` on `address(0)` — use `disableLZAdapter` to
+    ///         close the adapter overload.
     function setLZAdapter(address newAdapter) external;
+
+    /// @notice Explicitly clears the trusted LayerZero adapter (closes the
+    ///         adapter `fundsIn` overload). Owner-only. Emits `LZAdapterDisabled`,
+    ///         distinct from the `LZAdapterUpdated` rotation event.
+    function disableLZAdapter() external;
 
     /// @notice Updates the `RouteRegistry` reference Bridge dispatches
     ///         `onFundsIn` / `beforeFundsOut` through. Owner-only.

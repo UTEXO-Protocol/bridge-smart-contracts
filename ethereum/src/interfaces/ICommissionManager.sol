@@ -58,7 +58,6 @@ interface ICommissionManager {
     error RenounceOwnershipBlocked();
 
     // --- Chainlink-related ---
-    error InvalidEthUsdFeed();
     error EthUsdFeedNotSet();
     error InvalidPrice();
     error StalePrice();
