@@ -451,8 +451,16 @@ contract BridgeTest is Test {
     }
 
     function test_fundsOut_revertsOnZeroAmount() public {
-        // fundsOut has no minimum — only the zero-amount no-op guard, which
-        // fires before the burn-id and balance checks.
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, TX_ID, '');
+
+        FundsOutRollbackSnapshot memory before_ =
+            _snapshotFundsOutRollback(TX_ID, BURN_ID, RGB_CHAIN_ID);
+
+        assertEq(before_.record, AMOUNT, 'pre rgb record');
+        assertEq(before_.lockedLiquidity, AMOUNT, 'pre locked liquidity');
+        assertFalse(before_.burnConsumed, 'pre burn id');
+
         vm.expectRevert(IBridge.ZeroAmount.selector);
         vm.prank(multisig);
         _fundsOut(
@@ -460,6 +468,8 @@ contract BridgeTest is Test {
             RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR,
             _proof(), _settlement(_singleFundsInId())
         );
+
+        _assertFundsOutRollbackSnapshot(before_, TX_ID, BURN_ID, RGB_CHAIN_ID);
     }
 
     // --- R-I-08: dust / below-minimum on the inbound path ---
@@ -1952,6 +1962,157 @@ contract BridgeTest is Test {
     // ========================================================================
     // fundsOut — rollback snapshots
     // ========================================================================
+
+    struct FundsOutRollbackSnapshot {
+        uint256 bridgeToken;
+        uint256 recipientToken;
+        uint256 cmToken;
+        uint256 cmPool;
+        uint256 nativePool;
+        uint256 record;
+        bool    burnConsumed;
+        uint256 lockedLiquidity;
+        uint256 chainOutflow;
+        uint256 globalOutflow;
+    }
+
+    function _snapshotFundsOutRollback(uint256 operationId, uint256 burnId, uint256 sourceChainId)
+        internal
+        view
+        returns (FundsOutRollbackSnapshot memory s)
+    {
+        s.bridgeToken     = usdt0.balanceOf(address(bridge));
+        s.recipientToken  = usdt0.balanceOf(recipient);
+        s.cmToken         = usdt0.balanceOf(address(cm));
+        s.cmPool          = cm.tokenCommissionPool(address(usdt0));
+        s.nativePool      = cm.nativeCommissionPool();
+        s.record          = rgbModule.fundsInRecords(operationId);
+        s.burnConsumed    = bridge.consumedBurnIds(burnId);
+        s.lockedLiquidity = bridge.lockedLiquidity(sourceChainId);
+        s.chainOutflow    = bridge.availableOutflow(sourceChainId);
+        s.globalOutflow   = bridge.availableGlobalOutflow();
+    }
+
+    function _assertFundsOutRollbackSnapshot(
+        FundsOutRollbackSnapshot memory before_,
+        uint256 operationId,
+        uint256 burnId,
+        uint256 sourceChainId
+    ) internal view {
+        assertEq(usdt0.balanceOf(address(bridge)), before_.bridgeToken, 'bridge token unchanged');
+        assertEq(usdt0.balanceOf(recipient),       before_.recipientToken, 'recipient token unchanged');
+        assertEq(usdt0.balanceOf(address(cm)),     before_.cmToken, 'cm token unchanged');
+        assertEq(cm.tokenCommissionPool(address(usdt0)), before_.cmPool, 'cm pool unchanged');
+        assertEq(cm.nativeCommissionPool(),        before_.nativePool, 'native pool unchanged');
+        assertEq(rgbModule.fundsInRecords(operationId), before_.record, 'rgb record unchanged');
+        assertEq(bridge.consumedBurnIds(burnId),   before_.burnConsumed, 'burn id unchanged');
+        assertEq(bridge.lockedLiquidity(sourceChainId), before_.lockedLiquidity, 'liquidity unchanged');
+        assertEq(bridge.availableOutflow(sourceChainId), before_.chainOutflow, 'chain bucket unchanged');
+        assertEq(bridge.availableGlobalOutflow(),  before_.globalOutflow, 'global bucket unchanged');
+    }
+
+    function test_fundsOut_revertPathsLeaveStateUnchanged() public {
+        uint256 amount = 50e18;
+        uint256 operationId = TX_ID + 70_000;
+
+        vm.prank(user);
+        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, operationId, '');
+
+        for (uint8 failureMode = 0; failureMode < 6; failureMode++) {
+            uint256 snapshotId = vm.snapshotState();
+            _assertFundsOutRevertPathLeavesStateUnchanged(
+                amount,
+                operationId,
+                BURN_ID + failureMode,
+                failureMode
+            );
+            assertTrue(vm.revertToStateAndDelete(snapshotId), 'scenario snapshot restored');
+        }
+    }
+
+    function _assertFundsOutRevertPathLeavesStateUnchanged(
+        uint256 amount,
+        uint256 operationId,
+        uint256 burnId,
+        uint8 failureMode
+    ) internal {
+        uint256 sourceChainId = RGB_CHAIN_ID;
+        bytes memory proof = _proof();
+        bytes memory expectedRevert;
+
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = operationId;
+        uint256[] memory amounts = _one(amount);
+
+        if (failureMode == 0) {
+            proof = abi.encode(uint256(999_999), keccak256('unknown-block'));
+            expectedRevert = bytes('verify: block commitment');
+        } else if (failureMode == 1) {
+            amounts[0] = amount + 1;
+            expectedRevert = abi.encodeWithSelector(
+                RgbSettlementModule.AmountMismatch.selector,
+                operationId,
+                amount + 1,
+                amount
+            );
+        } else if (failureMode == 2) {
+            sourceChainId = RGB_CHAIN_ID + 999;
+            vm.prank(deployer);
+            routeRegistry.setRoute(sourceChainId, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+            expectedRevert = abi.encodeWithSelector(
+                IBridge.InsufficientChainLiquidity.selector,
+                sourceChainId,
+                amount,
+                uint256(0)
+            );
+        } else if (failureMode == 3) {
+            vm.prank(multisig);
+            bridge.setOutflowLimit(RGB_CHAIN_ID, amount - 1, 1);
+            expectedRevert = abi.encodeWithSelector(
+                OutflowRateLimiter.TokenRequestAboveCapacity.selector,
+                amount - 1,
+                amount,
+                address(usdt0)
+            );
+        } else if (failureMode == 4) {
+            vm.prank(multisig);
+            bridge.setGlobalOutflowLimit(amount - 1, 1);
+            expectedRevert = abi.encodeWithSelector(
+                OutflowRateLimiter.AggregateRequestAboveCapacity.selector,
+                amount - 1,
+                amount
+            );
+        } else {
+            _setFundsOutTokenRule(400); // positive token fee, so commission forwarding is reached
+            vm.prank(deployer);
+            cm.setBridgeAddress(makeAddr('wrong-bridge-for-funds-out'));
+            expectedRevert = abi.encodeWithSelector(ICommissionManager.OnlyBridge.selector);
+        }
+
+        FundsOutRollbackSnapshot memory before_ =
+            _snapshotFundsOutRollback(operationId, burnId, sourceChainId);
+
+        assertEq(before_.record, amount, 'pre rgb record');
+        assertFalse(before_.burnConsumed, 'pre burn id');
+
+        // Each mode fails after the burn-id mark and, for the later modes, after
+        // liquidity and/or bucket debits. The whole fundsOut transaction must
+        // roll back to the exact snapshot.
+        vm.expectRevert(expectedRevert);
+        vm.prank(multisig);
+        _fundsOut(
+            recipient,
+            amount,
+            burnId,
+            sourceChainId,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            proof,
+            _settlementWithAmounts(ids, amounts)
+        );
+
+        _assertFundsOutRollbackSnapshot(before_, operationId, burnId, sourceChainId);
+    }
 
     function test_fundsOut_verifierRevertRollsBackBurnIdAndRecords() public {
         vm.prank(user);
