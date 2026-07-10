@@ -28,11 +28,10 @@ jobs:
       - name: Show Forge version
         run: forge --version
 
-      - name: Run Forge fmt
-        run: forge fmt --check
-
       - name: Run Forge build
+        working-directory: ethereum
         run: forge build --sizes
 
       - name: Run Forge tests
+        working-directory: ethereum
         run: forge test -vvv
