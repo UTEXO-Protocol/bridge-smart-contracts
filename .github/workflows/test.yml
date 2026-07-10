@@ -24,9 +24,15 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
 
       - name: Show Forge version
         run: forge --version
+
+      - name: Run Forge fmt
+        working-directory: ethereum
+        run: forge fmt --check
 
       - name: Run Forge build
         working-directory: ethereum
