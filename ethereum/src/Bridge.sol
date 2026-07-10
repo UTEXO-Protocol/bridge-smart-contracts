@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { IERC20 }            from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
-import { SafeERC20 }         from '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
-import { ReentrancyGuard }   from '@openzeppelin/contracts/utils/ReentrancyGuard.sol';
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import { BridgeBase }         from './BridgeBase.sol';
-import { IBridge }            from './interfaces/IBridge.sol';
-import { ICommissionManager } from './interfaces/ICommissionManager.sol';
-import { IRouteRegistry }     from './interfaces/IRouteRegistry.sol';
-import { FundsInContext, FundsOutContext } from './interfaces/RouteTypes.sol';
-import { OutflowRateLimiter } from './libraries/OutflowRateLimiter.sol';
+import {BridgeBase} from "./BridgeBase.sol";
+import {IBridge} from "./interfaces/IBridge.sol";
+import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
+import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
+import {FundsInContext, FundsOutContext} from "./interfaces/RouteTypes.sol";
+import {OutflowRateLimiter} from "./libraries/OutflowRateLimiter.sol";
 
 /// @title Bridge
 /// @notice Production bridge for locking USDT0 on Arbitrum and unlocking it
@@ -138,20 +138,20 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///                           token smallest units. Must be non-zero; it can
     ///                           be retuned later via `setMinFundsInAmount`.
     constructor(
-        address          usdt0_,
-        address          routeRegistry_,
-        address payable  commissionManager_,
-        address          lzAdapter_,
-        uint256          minFundsInAmount_
+        address usdt0_,
+        address routeRegistry_,
+        address payable commissionManager_,
+        address lzAdapter_,
+        uint256 minFundsInAmount_
     ) BridgeBase(usdt0_) {
-        if (routeRegistry_     == address(0)) revert InvalidRouteRegistryAddress();
+        if (routeRegistry_ == address(0)) revert InvalidRouteRegistryAddress();
         if (commissionManager_ == address(0)) revert InvalidCommissionManagerAddress();
-        if (minFundsInAmount_  == 0)          revert InvalidMinFundsInAmount();
+        if (minFundsInAmount_ == 0) revert InvalidMinFundsInAmount();
 
-        routeRegistry     = routeRegistry_;
+        routeRegistry = routeRegistry_;
         commissionManager = ICommissionManager(commissionManager_);
-        lzAdapter         = lzAdapter_;
-        minFundsInAmount  = minFundsInAmount_;
+        lzAdapter = lzAdapter_;
+        minFundsInAmount = minFundsInAmount_;
     }
 
     // =========================================================================
@@ -204,11 +204,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
     /// @inheritdoc IBridge
     /// @dev Owner is `MultisigProxy`; federation gates this on its timelock flow.
-    function setOutflowLimit(uint256 chainId, uint256 capacity, uint256 refillRate)
-        external
-        override
-        onlyOwner
-    {
+    function setOutflowLimit(uint256 chainId, uint256 capacity, uint256 refillRate) external override onlyOwner {
         if (chainId == 0) revert InvalidOutflowLimit();
         OutflowRateLimiter.Settings memory cfg = _buildOutflowConfig(capacity, refillRate);
         OutflowRateLimiter.validate(cfg, false);
@@ -218,11 +214,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
     /// @inheritdoc IBridge
     /// @dev Owner is `MultisigProxy`; federation gates this on its timelock flow.
-    function setGlobalOutflowLimit(uint256 capacity, uint256 refillRate)
-        external
-        override
-        onlyOwner
-    {
+    function setGlobalOutflowLimit(uint256 capacity, uint256 refillRate) external override onlyOwner {
         OutflowRateLimiter.Settings memory cfg = _buildOutflowConfig(capacity, refillRate);
         OutflowRateLimiter.validate(cfg, false);
         globalBucket.configurePrimed(cfg);
@@ -247,18 +239,12 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     function fundsIn(
         uint256 amount,
         uint256 destinationChainId,
-        string  calldata destinationAddress,
+        string calldata destinationAddress,
         uint256 operationId,
-        bytes   calldata settlementData
+        bytes calldata settlementData
     ) external payable override whenNotPaused nonReentrant {
         _fundsIn(
-            _msgSender(),
-            amount,
-            block.chainid,
-            destinationChainId,
-            destinationAddress,
-            operationId,
-            settlementData
+            _msgSender(), amount, block.chainid, destinationChainId, destinationAddress, operationId, settlementData
         );
     }
 
@@ -267,18 +253,12 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 amount,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string  calldata destinationAddress,
+        string calldata destinationAddress,
         uint256 operationId,
-        bytes   calldata settlementData
+        bytes calldata settlementData
     ) external payable override whenNotPaused nonReentrant onlyLZAdapter {
         _fundsIn(
-            _msgSender(),
-            amount,
-            sourceChainId,
-            destinationChainId,
-            destinationAddress,
-            operationId,
-            settlementData
+            _msgSender(), amount, sourceChainId, destinationChainId, destinationAddress, operationId, settlementData
         );
     }
 
@@ -294,14 +274,16 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         nonReentrant
         whenOutflowNotPaused
     {
-        if (fundsOutParams.amount             == 0)                       revert ZeroAmount();
-        if (fundsOutParams.recipient          == address(0))              revert InvalidRecipientAddress();
-        if (fundsOutParams.sourceChainId      == 0)                       revert InvalidSourceChainId();
-        if (fundsOutParams.destinationChainId == 0)                       revert InvalidDestinationChainId();
+        if (fundsOutParams.amount == 0) revert ZeroAmount();
+        if (fundsOutParams.recipient == address(0)) revert InvalidRecipientAddress();
+        if (fundsOutParams.sourceChainId == 0) revert InvalidSourceChainId();
+        if (fundsOutParams.destinationChainId == 0) revert InvalidDestinationChainId();
         if (bytes(fundsOutParams.sourceAddress).length > MAX_ADDRESS_LENGTH) {
             revert AddressTooLong(bytes(fundsOutParams.sourceAddress).length, MAX_ADDRESS_LENGTH);
         }
-        if (fundsOutParams.proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(fundsOutParams.proof.length, MAX_PROOF_LENGTH);
+        if (fundsOutParams.proof.length > MAX_PROOF_LENGTH) {
+            revert ProofTooLong(fundsOutParams.proof.length, MAX_PROOF_LENGTH);
+        }
         if (fundsOutParams.settlementData.length > MAX_SETTLEMENT_DATA_LENGTH) {
             revert SettlementDataTooLong(fundsOutParams.settlementData.length, MAX_SETTLEMENT_DATA_LENGTH);
         }
@@ -338,33 +320,27 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // Quote commission. NATIVE on fundsOut is unrepresentable: the
         // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
         // so `nativeCommission` is always 0 on this path. The value is ignored here.
-        (
-            uint256 tokenCommission,
-            ,
-            uint256 netAmount
-        ) = commissionManager.calculateFundsOutCommission(
-            fundsOutParams.sourceChainId,
-            fundsOutParams.destinationChainId,
-            TOKEN,
-            fundsOutParams.amount
+        (uint256 tokenCommission,, uint256 netAmount) = commissionManager.calculateFundsOutCommission(
+            fundsOutParams.sourceChainId, fundsOutParams.destinationChainId, TOKEN, fundsOutParams.amount
         );
 
         // Delegate route-specific finality verification + settlement-state
         // mutation to the configured plugins. The registry runs the verifier
         // (view-only) first; if it reverts, no settlement-module write happens.
-        IRouteRegistry(routeRegistry).beforeFundsOut(
-            FundsOutContext({
-                token:         TOKEN,
-                recipient:     fundsOutParams.recipient,
-                amount:        fundsOutParams.amount,
-                burnId:        fundsOutParams.burnId,
+        IRouteRegistry(routeRegistry)
+            .beforeFundsOut(
+                FundsOutContext({
+                token: TOKEN,
+                recipient: fundsOutParams.recipient,
+                amount: fundsOutParams.amount,
+                burnId: fundsOutParams.burnId,
                 sourceChainId: fundsOutParams.sourceChainId,
-                destChainId:   fundsOutParams.destinationChainId,
+                destChainId: fundsOutParams.destinationChainId,
                 sourceAddress: fundsOutParams.sourceAddress
             }),
-            fundsOutParams.proof,
-            fundsOutParams.settlementData
-        );
+                fundsOutParams.proof,
+                fundsOutParams.settlementData
+            );
 
         // Forward token commission to the CommissionManager pool.
         if (tokenCommission != 0) {
@@ -388,12 +364,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     }
 
     /// @inheritdoc IBridge
-    function renounceOwnership()
-        public
-        view
-        override(BridgeBase, IBridge)
-        onlyOwner
-    {
+    function renounceOwnership() public view override(BridgeBase, IBridge) onlyOwner {
         revert RenounceOwnershipBlocked();
     }
 
@@ -414,23 +385,25 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         return OutflowRateLimiter.Settings({
             isEnabled: true,
             // forge-lint: disable-next-line(unsafe-typecast)
-            capacity:  uint128(capacity),
+            capacity: uint128(capacity),
             // forge-lint: disable-next-line(unsafe-typecast)
-            rate:      uint128(refillRate)
+            rate: uint128(refillRate)
         });
     }
 
     /// @dev Shared body for both `fundsIn` overloads.
     function _fundsIn(
-        address          from,
-        uint256          amount,
-        uint256          sourceChainId,
-        uint256          destinationChainId,
-        string  memory   destinationAddress,
-        uint256          operationId,
-        bytes   calldata settlementData
+        address from,
+        uint256 amount,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string memory destinationAddress,
+        uint256 operationId,
+        bytes calldata settlementData
     ) private {
-        if (amount < minFundsInAmount)             revert AmountBelowMinimum(amount, minFundsInAmount);
+        if (amount < minFundsInAmount) {
+            revert AmountBelowMinimum(amount, minFundsInAmount);
+        }
         if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
         if (bytes(destinationAddress).length > MAX_ADDRESS_LENGTH) {
             revert AddressTooLong(bytes(destinationAddress).length, MAX_ADDRESS_LENGTH);
@@ -438,19 +411,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (settlementData.length > MAX_SETTLEMENT_DATA_LENGTH) {
             revert SettlementDataTooLong(settlementData.length, MAX_SETTLEMENT_DATA_LENGTH);
         }
-        if (sourceChainId      == 0)               revert InvalidSourceChainId();
-        if (destinationChainId == 0)               revert InvalidDestinationChainId();
+        if (sourceChainId == 0) revert InvalidSourceChainId();
+        if (destinationChainId == 0) revert InvalidDestinationChainId();
 
-        (
-            uint256 tokenCommission,
-            uint256 nativeCommission,
-            uint256 netAmount
-        ) = commissionManager.calculateFundsInCommission(
-            sourceChainId,
-            destinationChainId,
-            TOKEN,
-            amount
-        );
+        (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
+            commissionManager.calculateFundsInCommission(sourceChainId, destinationChainId, TOKEN, amount);
 
         // Native payment must match the quote exactly (includes the zero-native case).
         if (msg.value != nativeCommission) revert NativeValueMismatch();
@@ -459,19 +424,20 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         IERC20(TOKEN).safeTransferFrom(from, address(this), amount);
 
         // Delegate per-route inbound bookkeeping.
-        IRouteRegistry(routeRegistry).onFundsIn(
-            FundsInContext({
-                token:         TOKEN,
-                sender:        from,
-                grossAmount:   amount,
-                netAmount:     netAmount,
-                operationId:   operationId,
+        IRouteRegistry(routeRegistry)
+            .onFundsIn(
+                FundsInContext({
+                token: TOKEN,
+                sender: from,
+                grossAmount: amount,
+                netAmount: netAmount,
+                operationId: operationId,
                 sourceChainId: sourceChainId,
-                destChainId:   destinationChainId,
-                destAddress:   destinationAddress
+                destChainId: destinationChainId,
+                destAddress: destinationAddress
             }),
-            settlementData
-        );
+                settlementData
+            );
 
         // Isolated liquidity: credit the net deposit to its destination
         // chain's bucket. A later `fundsOut` from that chain can release at most
@@ -486,7 +452,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
         // Forward native commission, if any, to the CommissionManager pool.
         if (nativeCommission != 0) {
-            (bool ok, ) = address(commissionManager).call{ value: nativeCommission }('');
+            (bool ok,) = address(commissionManager).call{value: nativeCommission}("");
             if (!ok) revert NativeValueMismatch();
         }
 

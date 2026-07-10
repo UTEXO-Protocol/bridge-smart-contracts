@@ -16,15 +16,14 @@ uint256 constant CompactBlockHeaderByteLength = 48;
  * - uint32 nonce
  */
 library CompactBlockHeaderImpl {
-
-    function verifyOutOfBounds(bytes calldata self, uint256 offset) pure internal {
+    function verifyOutOfBounds(bytes calldata self, uint256 offset) internal pure {
         require(self.length >= offset + CompactBlockHeaderByteLength, "BlockHeader: out of bounds");
     }
 
     //Getters
 
     //Gets the timestamp of the blockheader, NOTE: This doesn't check whether the offset is out of bounds!
-    function timestamp(bytes calldata self, uint256 offset) pure internal returns (uint32 result) {
+    function timestamp(bytes calldata self, uint256 offset) internal pure returns (uint32 result) {
         assembly ("memory-safe") {
             result := shr(224, calldataload(add(add(self.offset, offset), 36)))
         }
@@ -32,10 +31,9 @@ library CompactBlockHeaderImpl {
     }
 
     //Gets the nBits of the blockheader in little-endian format, NOTE: This doesn't check whether the offset is out of bounds!
-    function nBitsLE(bytes calldata self, uint256 offset) pure internal returns (uint32 result) {
+    function nBitsLE(bytes calldata self, uint256 offset) internal pure returns (uint32 result) {
         assembly ("memory-safe") {
             result := shr(224, calldataload(add(add(self.offset, offset), 40)))
         }
     }
-    
 }

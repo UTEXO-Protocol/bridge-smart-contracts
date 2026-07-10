@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { IBridge } from './IBridge.sol';
+import {IBridge} from "./IBridge.sol";
 
 /// @title IMultisigProxy
 /// @notice Two-level ECDSA multisig proxy that owns the Bridge and the CommissionManager.
@@ -35,7 +35,6 @@ import { IBridge } from './IBridge.sol';
 ///      EIP-712 DOMAIN
 ///      name: "MultisigProxy"  version: "1"  chainId  verifyingContract
 interface IMultisigProxy {
-
     // =========================================================================
     // Errors
     // =========================================================================
@@ -79,27 +78,32 @@ interface IMultisigProxy {
     // =========================================================================
 
     enum OperationType {
-        AdminExecute,                    // 0  — generic call into Bridge
-        UpdateEnclaveSigners,            // 1  — replace the enclave signer set + threshold
-        UpdateFederationSigners,         // 2  — replace the federation signer set + threshold
-        UpdateBridge,                    // 3  — repoint the owned Bridge address
-        SetCommissionRecipient,          // 4  — set the pinned commission payout recipient
-        SetTimelockDuration,             // 5  — change the governance timelock (>= MIN_TIMELOCK)
-        AdminExecuteCommissionManager,   // 6  — generic call into CommissionManager
-        WithdrawTokenCommissionCM,       // 7  — CM.withdrawTokenCommission -> commissionRecipient
-        WithdrawNativeCommissionCM,      // 8  — CM.withdrawNativeCommission -> commissionRecipient
-        UpdateCommissionManager,         // 9  — migrate to a new CommissionManager address
-        AdminExecuteAdapter,             // 10 — generic call into LZAdapter (setTrustedEntrypoint, refundStuckFunds, …)
-        UpdateLZAdapter,                 // 11 — rotate the routing target for AdminExecuteAdapter
-        SetRoute,                        // 12 — RouteRegistry.setRoute(src, dst, enabled, verifier, module)
-        UpdateRouteRegistry,             // 13 — Bridge.setRouteRegistry(newRouteRegistry)
-        PauseInflow,                     // 14 — Bridge.pauseInflow()  (planned inflow-only freeze, timelocked)
-        UnpauseInflow,                   // 15 — Bridge.unpauseInflow()
-        DisableLZAdapter,                // 16 — clear the routing target (explicit disable, distinct from UpdateLZAdapter rotation)
-        AdminExecuteRouteRegistry        // 17 — generic call into RouteRegistry (transferOwnership/acceptOwnership, setRoute, …)
+        AdminExecute, // 0  — generic call into Bridge
+        UpdateEnclaveSigners, // 1  — replace the enclave signer set + threshold
+        UpdateFederationSigners, // 2  — replace the federation signer set + threshold
+        UpdateBridge, // 3  — repoint the owned Bridge address
+        SetCommissionRecipient, // 4  — set the pinned commission payout recipient
+        SetTimelockDuration, // 5  — change the governance timelock (>= MIN_TIMELOCK)
+        AdminExecuteCommissionManager, // 6  — generic call into CommissionManager
+        WithdrawTokenCommissionCM, // 7  — CM.withdrawTokenCommission -> commissionRecipient
+        WithdrawNativeCommissionCM, // 8  — CM.withdrawNativeCommission -> commissionRecipient
+        UpdateCommissionManager, // 9  — migrate to a new CommissionManager address
+        AdminExecuteAdapter, // 10 — generic call into LZAdapter (setTrustedEntrypoint, refundStuckFunds, …)
+        UpdateLZAdapter, // 11 — rotate the routing target for AdminExecuteAdapter
+        SetRoute, // 12 — RouteRegistry.setRoute(src, dst, enabled, verifier, module)
+        UpdateRouteRegistry, // 13 — Bridge.setRouteRegistry(newRouteRegistry)
+        PauseInflow, // 14 — Bridge.pauseInflow()  (planned inflow-only freeze, timelocked)
+        UnpauseInflow, // 15 — Bridge.unpauseInflow()
+        DisableLZAdapter, // 16 — clear the routing target (explicit disable, distinct from UpdateLZAdapter rotation)
+        AdminExecuteRouteRegistry // 17 — generic call into RouteRegistry (transferOwnership/acceptOwnership, setRoute, …)
     }
 
-    enum ProposalStatus { None, Pending, Executed, Cancelled }
+    enum ProposalStatus {
+        None,
+        Pending,
+        Executed,
+        Cancelled
+    }
 
     /// @notice Business parameters for `lzFundsOut`, bundled to keep the call
     ///         within stack limits. Signed as the EIP-712 `TeeLzFundsOut` struct
@@ -109,13 +113,13 @@ interface IMultisigProxy {
         uint256 burnId;
         uint256 sourceChainId;
         uint256 destinationChainId;
-        string  sourceAddress;
-        bytes   proof;
-        bytes   settlementData;
-        uint32  dstEid;
+        string sourceAddress;
+        bytes proof;
+        bytes settlementData;
+        uint32 dstEid;
         bytes32 recipient;
         uint256 minAmountLD;
-        bytes   extraOptions;
+        bytes extraOptions;
     }
 
     struct Proposal {
@@ -134,11 +138,7 @@ interface IMultisigProxy {
     // TEE — typed enclave releases
     event FundsOutExecuted(uint256 indexed nonce, uint256 enclaveBitmap);
     event LzFundsOutExecuted(
-        uint256 indexed nonce,
-        uint256 enclaveBitmap,
-        uint32  dstEid,
-        bytes32 recipient,
-        uint256 amount
+        uint256 indexed nonce, uint256 enclaveBitmap, uint32 dstEid, bytes32 recipient, uint256 amount
     );
 
     // Federation proposals
@@ -203,20 +203,10 @@ interface IMultisigProxy {
     // =========================================================================
 
     /// @notice Emergency pause the Bridge. Instant, no timelock.
-    function emergencyPause(
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external;
+    function emergencyPause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
     /// @notice Emergency unpause the Bridge. Instant, no timelock.
-    function emergencyUnpause(
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external;
+    function emergencyUnpause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
     // =========================================================================
     // Federation propose (Phase 1 — timelock)
@@ -274,7 +264,6 @@ interface IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32);
-
 
     /// @notice Propose changing the timelock duration.
     /// @dev opData = abi.encode(uint256 newDuration)
@@ -378,12 +367,9 @@ interface IMultisigProxy {
     ///         (explicit disable, emits `LZAdapterDisabled` — distinct from a
     ///         rotation via `proposeUpdateLZAdapter`).
     /// @dev opData is empty.
-    function proposeDisableLZAdapter(
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32);
+    function proposeDisableLZAdapter(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs)
+        external
+        returns (bytes32);
 
     /// @notice Propose registering or updating a route in the Bridge's
     ///         RouteRegistry.
@@ -397,7 +383,7 @@ interface IMultisigProxy {
     function proposeSetRoute(
         uint256 sourceChainId,
         uint256 destChainId,
-        bool    enabled,
+        bool enabled,
         address finalityVerifier,
         address settlementModule,
         uint256 nonce,
@@ -425,21 +411,15 @@ interface IMultisigProxy {
     ///      bridge upgrade / liquidity migration. Runs through the timelocked
     ///      propose -> execute path. For an immediate freeze of BOTH paths use
     ///      `emergencyPause`. Carries no payload (opData is empty).
-    function proposePauseInflow(
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32);
+    function proposePauseInflow(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs)
+        external
+        returns (bytes32);
 
     /// @notice Propose resuming the inflow path on Bridge (`unpauseInflow`).
     /// @dev Reverses `proposePauseInflow`. Timelocked. Carries no payload.
-    function proposeUnpauseInflow(
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32);
+    function proposeUnpauseInflow(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs)
+        external
+        returns (bytes32);
 
     // =========================================================================
     // Cancel & Execute
@@ -464,11 +444,10 @@ interface IMultisigProxy {
     // =========================================================================
 
     /// @notice Verify that `signature` over `digest` was produced by the enclave signer at `signerIndex`.
-    function verifyEnclaveSignature(
-        bytes32 digest,
-        bytes calldata signature,
-        uint256 signerIndex
-    ) external view returns (bool);
+    function verifyEnclaveSignature(bytes32 digest, bytes calldata signature, uint256 signerIndex)
+        external
+        view
+        returns (bool);
 
     function teeNonce() external view returns (uint256);
     function bridge() external view returns (address);

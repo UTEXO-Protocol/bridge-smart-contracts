@@ -1,27 +1,27 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Test } from 'forge-std/Test.sol';
+import {Test} from "forge-std/Test.sol";
 
-import { Bridge } from '../src/Bridge.sol';
-import { CommissionManager } from '../src/CommissionManager.sol';
-import { MultisigProxy } from '../src/MultisigProxy.sol';
-import { IMultisigProxy } from '../src/interfaces/IMultisigProxy.sol';
-import { IBridge }        from '../src/interfaces/IBridge.sol';
-import { RouteRegistry } from '../src/RouteRegistry.sol';
-import { RGBVerifier } from '../src/verifiers/RGBVerifier.sol';
-import { RgbSettlementModule } from '../src/settlement/RgbSettlementModule.sol';
+import {Bridge} from "../src/Bridge.sol";
+import {CommissionManager} from "../src/CommissionManager.sol";
+import {MultisigProxy} from "../src/MultisigProxy.sol";
+import {IMultisigProxy} from "../src/interfaces/IMultisigProxy.sol";
+import {IBridge} from "../src/interfaces/IBridge.sol";
+import {RouteRegistry} from "../src/RouteRegistry.sol";
+import {RGBVerifier} from "../src/verifiers/RGBVerifier.sol";
+import {RgbSettlementModule} from "../src/settlement/RgbSettlementModule.sol";
 import {
     CommissionConfig,
     CommissionSide,
     CommissionCurrency,
     ICommissionManager
-} from '../src/interfaces/ICommissionManager.sol';
+} from "../src/interfaces/ICommissionManager.sol";
 
-import { MockERC20 }        from './mocks/MockERC20.sol';
-import { MockBtcRelay }     from './mocks/MockBtcRelay.sol';
-import { MockAggregatorV3 } from './mocks/MockAggregatorV3.sol';
-import { MultisigHelper }   from './mocks/MultisigHelper.sol';
+import {MockERC20} from "./mocks/MockERC20.sol";
+import {MockBtcRelay} from "./mocks/MockBtcRelay.sol";
+import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
+import {MultisigHelper} from "./mocks/MultisigHelper.sol";
 
 /// @title IntegrationTest
 /// @notice End-to-end lifecycle:
@@ -41,10 +41,10 @@ contract IntegrationTest is Test {
     // Actors
     // =========================================================================
 
-    address deployer           = makeAddr('deployer');
-    address user               = makeAddr('user');
-    address recipient          = makeAddr('recipient');
-    address commissionReceiver = makeAddr('commissionReceiver');
+    address deployer = makeAddr("deployer");
+    address user = makeAddr("user");
+    address recipient = makeAddr("recipient");
+    address commissionReceiver = makeAddr("commissionReceiver");
 
     uint256 encPk1 = 0xE1;
     uint256 encPk2 = 0xE2;
@@ -52,47 +52,51 @@ contract IntegrationTest is Test {
     uint256 fedPk1 = 0xF1;
     uint256 fedPk2 = 0xF2;
     uint256 fedPk3 = 0xF3;
-    address encA1; address encA2; address encA3;
-    address fedA1; address fedA2; address fedA3;
+    address encA1;
+    address encA2;
+    address encA3;
+    address fedA1;
+    address fedA2;
+    address fedA3;
 
     // =========================================================================
     // System
     // =========================================================================
 
-    MockERC20           token;
-    MockBtcRelay        btcRelay;
-    MockAggregatorV3    ethUsdFeed;
-    CommissionManager   cm;
-    RouteRegistry       routeRegistry;
-    RGBVerifier         rgbVerifier;
+    MockERC20 token;
+    MockBtcRelay btcRelay;
+    MockAggregatorV3 ethUsdFeed;
+    CommissionManager cm;
+    RouteRegistry routeRegistry;
+    RGBVerifier rgbVerifier;
     RgbSettlementModule rgbModule;
-    Bridge              bridge;
-    MultisigProxy       proxy;
-    bytes32             domainSep;
+    Bridge bridge;
+    MultisigProxy proxy;
+    bytes32 domainSep;
 
     // =========================================================================
     // Constants
     // =========================================================================
 
-    uint256 constant SOURCE_CHAIN_ID = 31337;     // foundry default block.chainid
-    uint256 constant RGB_CHAIN_ID    = 1_000_001; // backend-assigned for RGB
+    uint256 constant SOURCE_CHAIN_ID = 31337; // foundry default block.chainid
+    uint256 constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
 
     uint256 constant USER_DEPOSIT = 100 ether; // 100 tokens gross
     // FUNDS_IN route: 2% token commission (stablePercent = 200, multiplier = 100 → 200/100/100 = 2%).
-    uint256 constant FUNDS_IN_PERCENT  = 200;
-    uint8   constant FUNDS_IN_MULT     = 100;
+    uint256 constant FUNDS_IN_PERCENT = 200;
+    uint8 constant FUNDS_IN_MULT = 100;
     // FUNDS_OUT route: 1% token commission (stablePercent = 100, multiplier = 100 → 1%).
     uint256 constant FUNDS_OUT_PERCENT = 100;
-    uint8   constant FUNDS_OUT_MULT    = 100;
+    uint8 constant FUNDS_OUT_MULT = 100;
 
-    uint256 constant TX_ID_IN  = 42;
-    uint256 constant BURN_ID   = 9_001;
+    uint256 constant TX_ID_IN = 42;
+    uint256 constant BURN_ID = 9_001;
 
-    uint256 constant BLOCK_HEIGHT      = 850_000;
-    bytes32 constant COMMITMENT_HASH   = keccak256('integration-btc-block');
+    uint256 constant BLOCK_HEIGHT = 850_000;
+    bytes32 constant COMMITMENT_HASH = keccak256("integration-btc-block");
     uint256 constant BTC_CONFIRMATIONS = 6;
 
-    uint256 constant TIMELOCK     = 1 hours;
+    uint256 constant TIMELOCK = 1 hours;
     uint256 constant MIN_TIMELOCK = 1 hours; // floor passed to the proxy constructor in tests
 
     // =========================================================================
@@ -107,7 +111,7 @@ contract IntegrationTest is Test {
         uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string  sourceAddress
+        string sourceAddress
     );
 
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
@@ -117,10 +121,14 @@ contract IntegrationTest is Test {
     // =========================================================================
 
     function setUp() public {
-        encA1 = vm.addr(encPk1); encA2 = vm.addr(encPk2); encA3 = vm.addr(encPk3);
-        fedA1 = vm.addr(fedPk1); fedA2 = vm.addr(fedPk2); fedA3 = vm.addr(fedPk3);
+        encA1 = vm.addr(encPk1);
+        encA2 = vm.addr(encPk2);
+        encA3 = vm.addr(encPk3);
+        fedA1 = vm.addr(fedPk1);
+        fedA2 = vm.addr(fedPk2);
+        fedA3 = vm.addr(fedPk3);
 
-        token    = new MockERC20('Mock USDT0', 'USDT0');
+        token = new MockERC20("Mock USDT0", "USDT0");
         btcRelay = new MockBtcRelay();
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, BTC_CONFIRMATIONS);
 
@@ -138,12 +146,12 @@ contract IntegrationTest is Test {
         // they share the same `currentNonce + 2` prediction.
         vm.startPrank(deployer);
 
-        uint64  currentNonce    = vm.getNonce(deployer);
+        uint64 currentNonce = vm.getNonce(deployer);
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        cm            = new CommissionManager(predictedBridge);
+        cm = new CommissionManager(predictedBridge);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
-        bridge        = new Bridge(
+        bridge = new Bridge(
             address(token),
             address(routeRegistry),
             payable(address(cm)),
@@ -152,34 +160,25 @@ contract IntegrationTest is Test {
         );
 
         rgbVerifier = new RGBVerifier(address(btcRelay));
-        rgbModule   = new RgbSettlementModule(address(routeRegistry));
+        rgbModule = new RgbSettlementModule(address(routeRegistry));
 
         // Register both directions of the RGB route, using the same verifier
         // and settlement module. Inbound (SOURCE → RGB) never calls verify;
         // outbound (RGB → SOURCE) runs the BtcRelay check.
-        routeRegistry.setRoute(
-            SOURCE_CHAIN_ID, RGB_CHAIN_ID,
-            true, address(rgbVerifier), address(rgbModule)
-        );
-        routeRegistry.setRoute(
-            RGB_CHAIN_ID, SOURCE_CHAIN_ID,
-            true, address(rgbVerifier), address(rgbModule)
-        );
+        routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+        routeRegistry.setRoute(RGB_CHAIN_ID, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
 
         address[] memory enc = new address[](3);
-        enc[0] = encA1; enc[1] = encA2; enc[2] = encA3;
+        enc[0] = encA1;
+        enc[1] = encA2;
+        enc[2] = encA3;
         address[] memory fed = new address[](3);
-        fed[0] = fedA1; fed[1] = fedA2; fed[2] = fedA3;
+        fed[0] = fedA1;
+        fed[1] = fedA2;
+        fed[2] = fedA3;
 
-        proxy = new MultisigProxy(
-            address(bridge),
-            address(cm),
-            enc, 2,
-            fed, 2,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
-        );
+        proxy =
+            new MultisigProxy(address(bridge), address(cm), enc, 2, fed, 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
 
         // Outflow rate limits: configure generous buckets while
         // the deployer still owns the Bridge, so the release path is enabled
@@ -199,18 +198,18 @@ contract IntegrationTest is Test {
         bridge.acceptOwnership();
 
         // Invariants from deployment.
-        assertEq(address(bridge),                       predictedBridge,        'bridge prediction');
-        assertEq(cm.bridgeAddress(),                    address(bridge),        'CM.bridgeAddress');
-        assertEq(address(bridge.commissionManager()),   address(cm),            'bridge.commissionManager');
-        assertEq(address(bridge.routeRegistry()),       address(routeRegistry), 'bridge.routeRegistry');
-        assertEq(routeRegistry.bridge(),                address(bridge),        'routeRegistry.bridge');
-        assertEq(rgbModule.routeRegistry(),             address(routeRegistry), 'rgbModule.routeRegistry');
-        assertEq(rgbVerifier.btcRelay(),                address(btcRelay),      'rgbVerifier.btcRelay');
-        assertEq(bridge.owner(),                        address(proxy),         'bridge owner');
-        assertEq(cm.owner(),                            address(proxy),         'cm owner');
-        assertEq(routeRegistry.owner(),                 deployer,               'registry owner (deployer)');
-        assertEq(proxy.bridge(),                        address(bridge),        'proxy.bridge');
-        assertEq(proxy.commissionManager(),             address(cm),            'proxy.commissionManager');
+        assertEq(address(bridge), predictedBridge, "bridge prediction");
+        assertEq(cm.bridgeAddress(), address(bridge), "CM.bridgeAddress");
+        assertEq(address(bridge.commissionManager()), address(cm), "bridge.commissionManager");
+        assertEq(address(bridge.routeRegistry()), address(routeRegistry), "bridge.routeRegistry");
+        assertEq(routeRegistry.bridge(), address(bridge), "routeRegistry.bridge");
+        assertEq(rgbModule.routeRegistry(), address(routeRegistry), "rgbModule.routeRegistry");
+        assertEq(rgbVerifier.btcRelay(), address(btcRelay), "rgbVerifier.btcRelay");
+        assertEq(bridge.owner(), address(proxy), "bridge owner");
+        assertEq(cm.owner(), address(proxy), "cm owner");
+        assertEq(routeRegistry.owner(), deployer, "registry owner (deployer)");
+        assertEq(proxy.bridge(), address(bridge), "proxy.bridge");
+        assertEq(proxy.commissionManager(), address(cm), "proxy.commissionManager");
 
         domainSep = proxy.DOMAIN_SEPARATOR();
 
@@ -232,13 +231,15 @@ contract IntegrationTest is Test {
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
                 ICommissionManager.setCommissionRule.selector,
-                SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token),
+                SOURCE_CHAIN_ID,
+                RGB_CHAIN_ID,
+                address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_IN_PERCENT,
-                    multiplier:    FUNDS_IN_MULT,
-                    side:          CommissionSide.FUNDS_IN,
-                    currency:      CommissionCurrency.TOKEN,
-                    isSet:         true
+                    multiplier: FUNDS_IN_MULT,
+                    side: CommissionSide.FUNDS_IN,
+                    currency: CommissionCurrency.TOKEN,
+                    isSet: true
                 })
             )
         );
@@ -246,13 +247,15 @@ contract IntegrationTest is Test {
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
                 ICommissionManager.setCommissionRule.selector,
-                RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token),
+                RGB_CHAIN_ID,
+                SOURCE_CHAIN_ID,
+                address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_OUT_PERCENT,
-                    multiplier:    FUNDS_OUT_MULT,
-                    side:          CommissionSide.FUNDS_OUT,
-                    currency:      CommissionCurrency.TOKEN,
-                    isSet:         true
+                    multiplier: FUNDS_OUT_MULT,
+                    side: CommissionSide.FUNDS_OUT,
+                    currency: CommissionCurrency.TOKEN,
+                    isSet: true
                 })
             )
         );
@@ -260,8 +263,8 @@ contract IntegrationTest is Test {
         // Sanity: CM now quotes commission for both routes.
         (uint256 tInQuote,, uint256 netIn) =
             cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT);
-        assertEq(tInQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, 'quote in');
-        assertEq(netIn,    USER_DEPOSIT - tInQuote, 'net in');
+        assertEq(tInQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, "quote in");
+        assertEq(netIn, USER_DEPOSIT - tInQuote, "net in");
 
         // -------------------------------------------------------------------------
         // 2. User fundsIn — TOKEN commission routed to CM; the RGB settlement
@@ -273,19 +276,19 @@ contract IntegrationTest is Test {
         bridge.fundsIn(
             USER_DEPOSIT,
             RGB_CHAIN_ID,
-            'rgb:asset1qp0y3mq/utxo1abc',
+            "rgb:asset1qp0y3mq/utxo1abc",
             TX_ID_IN,
-            ''   // settlementData ignored by RgbSettlementModule on inbound
+            "" // settlementData ignored by RgbSettlementModule on inbound
         );
 
         uint256 tokenCommissionIn = tInQuote;
-        uint256 netBridgedIn      = netIn;
+        uint256 netBridgedIn = netIn;
 
-        assertEq(token.balanceOf(user),                  userBefore - USER_DEPOSIT, 'user debited gross');
-        assertEq(token.balanceOf(address(bridge)),       netBridgedIn,              'bridge keeps net');
-        assertEq(token.balanceOf(address(cm)),           tokenCommissionIn,         'cm got commission');
-        assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn,         'cm pool mirrors balance');
-        assertEq(rgbModule.fundsInRecords(TX_ID_IN),     netBridgedIn,              'record stores net');
+        assertEq(token.balanceOf(user), userBefore - USER_DEPOSIT, "user debited gross");
+        assertEq(token.balanceOf(address(bridge)), netBridgedIn, "bridge keeps net");
+        assertEq(token.balanceOf(address(cm)), tokenCommissionIn, "cm got commission");
+        assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn, "cm pool mirrors balance");
+        assertEq(rgbModule.fundsInRecords(TX_ID_IN), netBridgedIn, "record stores net");
 
         // -------------------------------------------------------------------------
         // 3. TEE-signed fundsOut — RGBVerifier checks the BtcRelay header, the
@@ -293,34 +296,32 @@ contract IntegrationTest is Test {
         //    amount (no consumption), Bridge releases `netBridgedIn` from the
         //    pool. 1% outbound commission to CM, the rest to recipient.
         // -------------------------------------------------------------------------
-        uint256[] memory fundsInIds     = new uint256[](1);
-        fundsInIds[0]     = TX_ID_IN;
+        uint256[] memory fundsInIds = new uint256[](1);
+        fundsInIds[0] = TX_ID_IN;
         uint256[] memory fundsInAmounts = new uint256[](1);
-        fundsInAmounts[0] = netBridgedIn;   // must equal the recorded mint amount
+        fundsInAmounts[0] = netBridgedIn; // must equal the recorded mint amount
 
-        bytes memory proof          = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
+        bytes memory proof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH);
         bytes memory settlementData = abi.encode(fundsInIds, fundsInAmounts);
 
         IBridge.FundsOutParams memory params = IBridge.FundsOutParams(
             recipient,
-            netBridgedIn,          // amount = full bridged pool from this deposit
+            netBridgedIn, // amount = full bridged pool from this deposit
             BURN_ID,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
-            'rgb:sender/utxo1src',
+            "rgb:sender/utxo1src",
             proof,
             settlementData
         );
 
-        uint256 outNonce    = proxy.teeNonce();
+        uint256 outNonce = proxy.teeNonce();
         uint256 outDeadline = block.timestamp + 1 hours;
-        bytes32 outDigest   = MultisigHelper.digestTeeFundsOut(
-            domainSep, params, outNonce, outDeadline
-        );
+        bytes32 outDigest = MultisigHelper.digestTeeFundsOut(domainSep, params, outNonce, outDeadline);
         bytes[] memory teeSigs = _signEnclave2of3(outDigest); // signers 0 and 1
 
         uint256 tokenCommissionOut = netBridgedIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
-        uint256 netOut             = netBridgedIn - tokenCommissionOut;
+        uint256 netOut = netBridgedIn - tokenCommissionOut;
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
@@ -331,33 +332,32 @@ contract IntegrationTest is Test {
             BURN_ID,
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
-            'rgb:sender/utxo1src'
+            "rgb:sender/utxo1src"
         );
 
         proxy.fundsOutCall(params, outNonce, outDeadline, 3, teeSigs);
 
-        assertEq(token.balanceOf(address(bridge)),       0,                                      'bridge drained');
-        assertEq(token.balanceOf(recipient),             netOut,                                 'recipient got net');
-        assertEq(token.balanceOf(address(cm)),           tokenCommissionIn + tokenCommissionOut, 'cm accrued both fees');
-        assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn + tokenCommissionOut, 'cm pool mirrors');
-        assertEq(rgbModule.fundsInRecords(TX_ID_IN),     netBridgedIn,                           'fundsIn record unchanged (permanent)');
-        assertTrue(bridge.consumedBurnIds(BURN_ID),                                              'burnId recorded');
+        assertEq(token.balanceOf(address(bridge)), 0, "bridge drained");
+        assertEq(token.balanceOf(recipient), netOut, "recipient got net");
+        assertEq(token.balanceOf(address(cm)), tokenCommissionIn + tokenCommissionOut, "cm accrued both fees");
+        assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn + tokenCommissionOut, "cm pool mirrors");
+        assertEq(rgbModule.fundsInRecords(TX_ID_IN), netBridgedIn, "fundsIn record unchanged (permanent)");
+        assertTrue(bridge.consumedBurnIds(BURN_ID), "burnId recorded");
 
         // -------------------------------------------------------------------------
         // 4. Federation withdraws ERC-20 commission from CM to commissionReceiver.
         // -------------------------------------------------------------------------
         uint256 totalCommission = tokenCommissionIn + tokenCommissionOut;
 
-        uint256 wdNonce    = proxy.proposalNonce();
+        uint256 wdNonce = proxy.proposalNonce();
         uint256 wdDeadline = block.timestamp + 7 days;
-        bytes32 wdDigest   = MultisigHelper.digestProposeWithdrawTokenCommissionCM(
+        bytes32 wdDigest = MultisigHelper.digestProposeWithdrawTokenCommissionCM(
             domainSep, address(token), totalCommission, wdNonce, wdDeadline
         );
         bytes[] memory fedSigs = _signFed2of3(wdDigest);
 
-        bytes32 proposalId = proxy.proposeWithdrawTokenCommissionCM(
-            address(token), totalCommission, wdNonce, wdDeadline, 3, fedSigs
-        );
+        bytes32 proposalId =
+            proxy.proposeWithdrawTokenCommissionCM(address(token), totalCommission, wdNonce, wdDeadline, 3, fedSigs);
 
         // Move past the timelock.
         vm.warp(block.timestamp + TIMELOCK + 1);
@@ -373,17 +373,13 @@ contract IntegrationTest is Test {
         // 5. Final invariants: bridge empty, CM empty, recipient holds netOut,
         //    commissionReceiver holds the full aggregated commission.
         // -------------------------------------------------------------------------
-        assertEq(token.balanceOf(address(bridge)),         0,                'bridge still empty');
-        assertEq(token.balanceOf(address(cm)),             0,                'cm drained');
-        assertEq(cm.tokenCommissionPool(address(token)),   0,                'cm pool drained');
-        assertEq(token.balanceOf(recipient),               netOut,           'recipient unchanged');
-        assertEq(token.balanceOf(commissionReceiver),      totalCommission,  'commissionReceiver paid');
+        assertEq(token.balanceOf(address(bridge)), 0, "bridge still empty");
+        assertEq(token.balanceOf(address(cm)), 0, "cm drained");
+        assertEq(cm.tokenCommissionPool(address(token)), 0, "cm pool drained");
+        assertEq(token.balanceOf(recipient), netOut, "recipient unchanged");
+        assertEq(token.balanceOf(commissionReceiver), totalCommission, "commissionReceiver paid");
         // Token conservation: user-deducted == everything distributed.
-        assertEq(
-            token.balanceOf(recipient) + token.balanceOf(commissionReceiver),
-            USER_DEPOSIT,
-            'token conservation'
-        );
+        assertEq(token.balanceOf(recipient) + token.balanceOf(commissionReceiver), USER_DEPOSIT, "token conservation");
     }
 
     // =========================================================================
@@ -396,70 +392,59 @@ contract IntegrationTest is Test {
         // via federation governance — the same path production will use.
         ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);
         _proposeAndExecuteCmAdminCall(
-            abi.encodeWithSelector(
-                ICommissionManager.setEthUsdFeed.selector,
-                address(ethUsdFeed),
-                uint256(1 days)
-            )
+            abi.encodeWithSelector(ICommissionManager.setEthUsdFeed.selector, address(ethUsdFeed), uint256(1 days))
         );
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(
                 ICommissionManager.setCommissionRule.selector,
-                SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token),
+                SOURCE_CHAIN_ID,
+                RGB_CHAIN_ID,
+                address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_IN_PERCENT,
-                    multiplier:    FUNDS_IN_MULT,
-                    side:          CommissionSide.FUNDS_IN,
-                    currency:      CommissionCurrency.NATIVE,
-                    isSet:         true
+                    multiplier: FUNDS_IN_MULT,
+                    side: CommissionSide.FUNDS_IN,
+                    currency: CommissionCurrency.NATIVE,
+                    isSet: true
                 })
             )
         );
 
         (, uint256 nativeQuote, uint256 netQuote) =
             cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT);
-        assertEq(netQuote, USER_DEPOSIT, 'NATIVE: full amount bridges');
+        assertEq(netQuote, USER_DEPOSIT, "NATIVE: full amount bridges");
         // 2% of USER_DEPOSIT in token units, converted to wei via the feed.
         uint256 stableFee = USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT;
-        assertEq(nativeQuote, cm.convertTokenFeeToNative(stableFee, 18), 'native quote matches feed');
+        assertEq(nativeQuote, cm.convertTokenFeeToNative(stableFee, 18), "native quote matches feed");
 
         vm.deal(user, nativeQuote);
 
         vm.prank(user);
-        bridge.fundsIn{ value: nativeQuote }(
-            USER_DEPOSIT,
-            RGB_CHAIN_ID,
-            'rgb:asset1qp0y3mq/utxo1abc',
-            TX_ID_IN,
-            ''
-        );
+        bridge.fundsIn{value: nativeQuote}(USER_DEPOSIT, RGB_CHAIN_ID, "rgb:asset1qp0y3mq/utxo1abc", TX_ID_IN, "");
 
-        assertEq(token.balanceOf(address(bridge)),    USER_DEPOSIT, 'bridge got full token amount');
-        assertEq(token.balanceOf(address(cm)),        0,            'cm no token commission');
-        assertEq(address(cm).balance,                 nativeQuote,  'cm got native commission');
-        assertEq(cm.nativeCommissionPool(),           nativeQuote,  'cm native pool');
-        assertEq(rgbModule.fundsInRecords(TX_ID_IN),  USER_DEPOSIT, 'record stores full amount');
+        assertEq(token.balanceOf(address(bridge)), USER_DEPOSIT, "bridge got full token amount");
+        assertEq(token.balanceOf(address(cm)), 0, "cm no token commission");
+        assertEq(address(cm).balance, nativeQuote, "cm got native commission");
+        assertEq(cm.nativeCommissionPool(), nativeQuote, "cm native pool");
+        assertEq(rgbModule.fundsInRecords(TX_ID_IN), USER_DEPOSIT, "record stores full amount");
 
         // Federation withdraws native commission.
-        uint256 wdNonce    = proxy.proposalNonce();
+        uint256 wdNonce = proxy.proposalNonce();
         uint256 wdDeadline = block.timestamp + 7 days;
-        bytes32 wdDigest   = MultisigHelper.digestProposeWithdrawNativeCommissionCM(
-            domainSep, nativeQuote, wdNonce, wdDeadline
-        );
+        bytes32 wdDigest =
+            MultisigHelper.digestProposeWithdrawNativeCommissionCM(domainSep, nativeQuote, wdNonce, wdDeadline);
         bytes[] memory fedSigs = _signFed2of3(wdDigest);
 
-        bytes32 proposalId = proxy.proposeWithdrawNativeCommissionCM(
-            nativeQuote, wdNonce, wdDeadline, 3, fedSigs
-        );
+        bytes32 proposalId = proxy.proposeWithdrawNativeCommissionCM(nativeQuote, wdNonce, wdDeadline, 3, fedSigs);
 
         vm.warp(block.timestamp + TIMELOCK + 1);
 
         uint256 receiverBefore = commissionReceiver.balance;
         proxy.executeProposal(proposalId, abi.encode(nativeQuote));
 
-        assertEq(address(cm).balance,                         0,           'cm native drained');
-        assertEq(cm.nativeCommissionPool(),                   0,           'cm pool drained');
-        assertEq(commissionReceiver.balance - receiverBefore, nativeQuote, 'receiver paid in native');
+        assertEq(address(cm).balance, 0, "cm native drained");
+        assertEq(cm.nativeCommissionPool(), 0, "cm pool drained");
+        assertEq(commissionReceiver.balance - receiverBefore, nativeQuote, "receiver paid in native");
     }
 
     // =========================================================================
@@ -469,20 +454,16 @@ contract IntegrationTest is Test {
     /// @dev Proposes `callData` as an AdminExecuteCommissionManager op, waits
     ///      out the timelock, and executes. Used by tests to configure the CM.
     function _proposeAndExecuteCmAdminCall(bytes memory callData) internal {
-        uint256 nonce    = proxy.proposalNonce();
+        uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 7 days;
 
         bytes4 selector;
         assembly { selector := mload(add(callData, 32)) }
 
-        bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(
-            domainSep, selector, callData, nonce, deadline
-        );
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(domainSep, selector, callData, nonce, deadline);
         bytes[] memory sigs = _signFed2of3(digest);
 
-        bytes32 proposalId = proxy.proposeAdminExecuteCommissionManager(
-            callData, nonce, deadline, 3, sigs
-        );
+        bytes32 proposalId = proxy.proposeAdminExecuteCommissionManager(callData, nonce, deadline, 3, sigs);
 
         vm.warp(block.timestamp + TIMELOCK + 1);
         proxy.executeProposal(proposalId, callData);
@@ -490,13 +471,15 @@ contract IntegrationTest is Test {
 
     function _signEnclave2of3(bytes32 digest) internal view returns (bytes[] memory sigs) {
         uint256[] memory pks = new uint256[](2);
-        pks[0] = encPk1; pks[1] = encPk2;
+        pks[0] = encPk1;
+        pks[1] = encPk2;
         sigs = MultisigHelper.signAll(vm, digest, pks);
     }
 
     function _signFed2of3(bytes32 digest) internal view returns (bytes[] memory sigs) {
         uint256[] memory pks = new uint256[](2);
-        pks[0] = fedPk1; pks[1] = fedPk2;
+        pks[0] = fedPk1;
+        pks[1] = fedPk2;
         sigs = MultisigHelper.signAll(vm, digest, pks);
     }
 }

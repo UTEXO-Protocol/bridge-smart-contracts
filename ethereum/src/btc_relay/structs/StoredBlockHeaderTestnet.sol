@@ -23,75 +23,78 @@ uint256 constant StoredBlockHeaderByteLength = 160;
 uint256 constant BitcoinBlockHeaderByteLength = 80;
 
 library StoredBlockHeaderImpl {
-
     using CompactBlockHeaderImpl for bytes;
 
-    function fromCalldata(bytes calldata data, uint256 offset) pure internal returns (StoredBlockHeader memory storedHeader) {
-        require(data.length >= StoredBlockHeaderByteLength+offset, "StoredBlockHeader: out of bounds");
+    function fromCalldata(bytes calldata data, uint256 offset)
+        internal
+        pure
+        returns (StoredBlockHeader memory storedHeader)
+    {
+        require(data.length >= StoredBlockHeaderByteLength + offset, "StoredBlockHeader: out of bounds");
         assembly ("memory-safe") {
             calldatacopy(mload(storedHeader), add(data.offset, offset), StoredBlockHeaderByteLength) //Store stored header data
         }
     }
 
     //Getters
-    function header_version(StoredBlockHeader memory self) pure internal returns (uint32 result) {
+    function header_version(StoredBlockHeader memory self) internal pure returns (uint32 result) {
         assembly ("memory-safe") {
             result := shr(224, mload(mload(self)))
         }
         result = Endianness.reverseUint32(result);
     }
 
-    function header_previousBlockhash(StoredBlockHeader memory self) pure internal returns (bytes32 result) {
+    function header_previousBlockhash(StoredBlockHeader memory self) internal pure returns (bytes32 result) {
         assembly ("memory-safe") {
             result := mload(add(mload(self), 4))
         }
     }
 
-    function header_merkleRoot(StoredBlockHeader memory self) pure internal returns (bytes32 result) {
+    function header_merkleRoot(StoredBlockHeader memory self) internal pure returns (bytes32 result) {
         assembly ("memory-safe") {
             result := mload(add(mload(self), 36))
         }
     }
 
-    function header_timestamp(StoredBlockHeader memory self) pure internal returns (uint32 result) {
+    function header_timestamp(StoredBlockHeader memory self) internal pure returns (uint32 result) {
         assembly ("memory-safe") {
             result := shr(224, mload(add(mload(self), 68)))
         }
         result = Endianness.reverseUint32(result);
     }
 
-    function header_nBitsLE(StoredBlockHeader memory self) pure internal returns (uint32 result) {
+    function header_nBitsLE(StoredBlockHeader memory self) internal pure returns (uint32 result) {
         assembly ("memory-safe") {
             result := shr(224, mload(add(mload(self), 72)))
         }
     }
 
-    function header_nonce(StoredBlockHeader memory self) pure internal returns (uint32 result) {
+    function header_nonce(StoredBlockHeader memory self) internal pure returns (uint32 result) {
         assembly ("memory-safe") {
             result := shr(224, mload(add(mload(self), 76)))
         }
         result = Endianness.reverseUint32(result);
     }
 
-    function chainWork(StoredBlockHeader memory self) pure internal returns (uint256 result) {
+    function chainWork(StoredBlockHeader memory self) internal pure returns (uint256 result) {
         assembly ("memory-safe") {
             result := mload(add(mload(self), 80))
         }
     }
 
-    function blockHeight(StoredBlockHeader memory self) pure internal returns (uint32 result) {
+    function blockHeight(StoredBlockHeader memory self) internal pure returns (uint32 result) {
         assembly ("memory-safe") {
             result := shr(224, mload(add(mload(self), 112)))
         }
     }
 
-    function lastDiffAdjustment(StoredBlockHeader memory self) pure internal returns (uint32 result) {
+    function lastDiffAdjustment(StoredBlockHeader memory self) internal pure returns (uint32 result) {
         assembly ("memory-safe") {
             result := shr(224, mload(add(mload(self), 116)))
         }
     }
 
-    function previousBlockTimestamps(StoredBlockHeader memory self) pure internal returns (uint32[10] memory result) {
+    function previousBlockTimestamps(StoredBlockHeader memory self) internal pure returns (uint32[10] memory result) {
         assembly ("memory-safe") {
             let ptr := mload(self)
             let prevBlockTimestampsArray1 := mload(add(ptr, 120)) //offset(120) Stores first 8 last block timestamps
@@ -110,7 +113,7 @@ library StoredBlockHeaderImpl {
     }
 
     //Functions
-    function header_blockhash(StoredBlockHeader memory self) view internal returns (bytes32 result) {
+    function header_blockhash(StoredBlockHeader memory self) internal view returns (bytes32 result) {
         assembly ("memory-safe") {
             //Invoke first sha256 hash on the memory region now storing the current blockheader, destination is scratch space at 0x00
             pop(staticcall(gas(), 0x02, mload(self), BitcoinBlockHeaderByteLength, 0x00, 32))
@@ -122,14 +125,18 @@ library StoredBlockHeaderImpl {
         }
     }
 
-    function hash(StoredBlockHeader memory self) pure internal returns (bytes32 result) {
+    function hash(StoredBlockHeader memory self) internal pure returns (bytes32 result) {
         assembly ("memory-safe") {
             result := keccak256(mload(self), StoredBlockHeaderByteLength)
         }
     }
 
     //Writes new blockheader to the stored header memory and computes the double sha256 hash of this new blockheader
-    function writeHeaderAndGetDblSha256Hash(StoredBlockHeader memory self, bytes calldata headers, uint256 offset) private view returns (bytes32 result) {
+    function writeHeaderAndGetDblSha256Hash(StoredBlockHeader memory self, bytes calldata headers, uint256 offset)
+        private
+        view
+        returns (bytes32 result)
+    {
         assembly ("memory-safe") {
             let ptr := mload(self)
 
@@ -152,9 +159,11 @@ library StoredBlockHeaderImpl {
         }
     }
 
-    function updateChain(
-        StoredBlockHeader memory self, bytes calldata headers, uint256 offset, uint256 timestamp
-    ) internal view returns (bytes32 blockHash) {
+    function updateChain(StoredBlockHeader memory self, bytes calldata headers, uint256 offset, uint256 timestamp)
+        internal
+        view
+        returns (bytes32 blockHash)
+    {
         //We don't check whether pevious header matches since submitted headers are submitted
         // without previousBlockHash fields, which is instead taken automatically from the
         // current StoredBlockHeader, this allows us to save at least 512 gas on calldata
@@ -169,21 +178,21 @@ library StoredBlockHeaderImpl {
         uint256 newTarget = Nbits.toTarget(newNbits);
 
         //Skip difficulty adjustment enforcement on testnet!
-        if(currBlockHeight % DIFFICULTY_ADJUSTMENT_INTERVAL == 0) {
-        //     //Compute new nbits, bitcoin uses the timestamp of the last block in the epoch to re-target PoW difficulty
-        //     // https://github.com/bitcoin/bitcoin/blob/78dae8caccd82cfbfd76557f1fb7d7557c7b5edb/src/pow.cpp#L49
-        //     uint256 computedNbits;
-        //     (newTarget, computedNbits) = Difficulty.computeNewTarget(
-        //         prevBlockTimestamp,
-        //         _lastDiffAdjustment,
-        //         header_nBitsLE(self),
-        //         clampTarget
-        //     );
-        //     require(newNbits == computedNbits, "updateChain: new nbits");
-        //     //Even though timestamp of the last block in epoch is used to re-target PoW difficulty, the first
-        //     // block in a new epoch is used as last_diff_adjustment, the time it takes to mine the first block
-        //     // in every epoch is therefore not taken into consideration when retargetting PoW - one of many
-        //     // bitcoin's quirks
+        if (currBlockHeight % DIFFICULTY_ADJUSTMENT_INTERVAL == 0) {
+            //     //Compute new nbits, bitcoin uses the timestamp of the last block in the epoch to re-target PoW difficulty
+            //     // https://github.com/bitcoin/bitcoin/blob/78dae8caccd82cfbfd76557f1fb7d7557c7b5edb/src/pow.cpp#L49
+            //     uint256 computedNbits;
+            //     (newTarget, computedNbits) = Difficulty.computeNewTarget(
+            //         prevBlockTimestamp,
+            //         _lastDiffAdjustment,
+            //         header_nBitsLE(self),
+            //         clampTarget
+            //     );
+            //     require(newNbits == computedNbits, "updateChain: new nbits");
+            //     //Even though timestamp of the last block in epoch is used to re-target PoW difficulty, the first
+            //     // block in a new epoch is used as last_diff_adjustment, the time it takes to mine the first block
+            //     // in every epoch is therefore not taken into consideration when retargetting PoW - one of many
+            //     // bitcoin's quirks
             _lastDiffAdjustment = currBlockTimestamp;
         }
         // } else {
@@ -217,12 +226,15 @@ library StoredBlockHeaderImpl {
             count := add(count, gt(currBlockTimestamp, and(prevBlockTimestampsArray2, 0xffffffff)))
         }
         require(count > 5, "updateChain: timestamp median");
-        require(currBlockTimestamp < timestamp + MAX_FUTURE_BLOCKTIME, 'updateChain: timestamp future');
+        require(currBlockTimestamp < timestamp + MAX_FUTURE_BLOCKTIME, "updateChain: timestamp future");
 
         //Update prev block timestamps
         assembly {
             prevBlockTimestampsArray1 := shl(32, prevBlockTimestampsArray1) //Shift to the left, to remove oldest timestamp
-            prevBlockTimestampsArray1 := or(prevBlockTimestampsArray1, and(shr(32, prevBlockTimestampsArray2), 0xffffffff)) //Push timestamp from arr2 to arr1
+            prevBlockTimestampsArray1 := or(
+                prevBlockTimestampsArray1,
+                and(shr(32, prevBlockTimestampsArray2), 0xffffffff)
+            ) //Push timestamp from arr2 to arr1
             prevBlockTimestampsArray2 := shl(32, prevBlockTimestampsArray2) //Shift to the left
             prevBlockTimestampsArray2 := or(prevBlockTimestampsArray2, prevBlockTimestamp) //Add previous block timestamp
         }
@@ -236,7 +248,8 @@ library StoredBlockHeaderImpl {
 
             //Write chainwork at offset 80..112
             mstore(add(ptr, 80), _chainWork)
-            mstore(add(ptr, 112), 
+            mstore(
+                add(ptr, 112),
                 or(
                     or(
                         shl(224, currBlockHeight), //Current block height at offset 112..116
@@ -247,13 +260,10 @@ library StoredBlockHeaderImpl {
             )
             //Ensure we don't write outside the region of the stored blockheader byte array, so we
             // have a little bit of an overlap here
-            mstore(add(ptr, 128), 
-                or(
-                    shl(64, prevBlockTimestampsArray1),
-                    and(prevBlockTimestampsArray2, 0xffffffffffffffff)
-                )
+            mstore(
+                add(ptr, 128),
+                or(shl(64, prevBlockTimestampsArray1), and(prevBlockTimestampsArray2, 0xffffffffffffffff))
             )
         }
     }
-
 }

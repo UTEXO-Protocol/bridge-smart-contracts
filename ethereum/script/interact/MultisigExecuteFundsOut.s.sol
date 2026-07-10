@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Script, console2 } from 'forge-std/Script.sol';
-import { MultisigProxy } from '../../src/MultisigProxy.sol';
-import { IBridge }       from '../../src/interfaces/IBridge.sol';
-import { MultisigHelper } from '../../test/mocks/MultisigHelper.sol';
+import {Script, console2} from "forge-std/Script.sol";
+import {MultisigProxy} from "../../src/MultisigProxy.sol";
+import {IBridge} from "../../src/interfaces/IBridge.sol";
+import {MultisigHelper} from "../../test/mocks/MultisigHelper.sol";
 
 /// @title MultisigExecuteFundsOut
 /// @notice Signs a Bridge.fundsOut() release locally with enclave private keys
@@ -34,45 +34,40 @@ import { MultisigHelper } from '../../test/mocks/MultisigHelper.sol';
 ///   DEADLINE_OFFSET          — seconds from now (e.g. 3600)
 contract MultisigExecuteFundsOut is Script {
     function _loadParams() internal view returns (IBridge.FundsOutParams memory p) {
-        p.recipient     = vm.envAddress('RECIPIENT');
-        p.amount        = vm.envUint('AMOUNT');
-        p.burnId        = vm.envUint('BURN_ID');
-        p.sourceChainId      = vm.envUint('SOURCE_CHAIN_ID');
-        p.destinationChainId = vm.envUint('DESTINATION_CHAIN_ID');
-        p.sourceAddress      = vm.envString('SOURCE_ADDRESS');
+        p.recipient = vm.envAddress("RECIPIENT");
+        p.amount = vm.envUint("AMOUNT");
+        p.burnId = vm.envUint("BURN_ID");
+        p.sourceChainId = vm.envUint("SOURCE_CHAIN_ID");
+        p.destinationChainId = vm.envUint("DESTINATION_CHAIN_ID");
+        p.sourceAddress = vm.envString("SOURCE_ADDRESS");
 
         // proof = abi.encode(blockHeight, commitmentHash) — RGBVerifier layout.
-        p.proof = abi.encode(
-            vm.envUint('BLOCK_HEIGHT'),
-            vm.envBytes32('COMMITMENT_HASH')
-        );
+        p.proof = abi.encode(vm.envUint("BLOCK_HEIGHT"), vm.envBytes32("COMMITMENT_HASH"));
 
         // settlementData = abi.encode(uint256[] fundsInIds) — RgbSettlementModule layout.
-        p.settlementData = abi.encode(vm.envUint('FUNDS_IN_IDS', ','));
+        p.settlementData = abi.encode(vm.envUint("FUNDS_IN_IDS", ","));
     }
 
     function run() external {
-        MultisigProxy proxy = MultisigProxy(vm.envAddress('PROXY_ADDRESS'));
+        MultisigProxy proxy = MultisigProxy(vm.envAddress("PROXY_ADDRESS"));
 
         IBridge.FundsOutParams memory params = _loadParams();
 
-        uint256 nonce    = proxy.teeNonce();
-        uint256 deadline = block.timestamp + vm.envUint('DEADLINE_OFFSET');
-        uint256 bitmap   = vm.envUint('ENCLAVE_BITMAP');
+        uint256 nonce = proxy.teeNonce();
+        uint256 deadline = block.timestamp + vm.envUint("DEADLINE_OFFSET");
+        uint256 bitmap = vm.envUint("ENCLAVE_BITMAP");
 
-        bytes32 digest = MultisigHelper.digestTeeFundsOut(
-            proxy.DOMAIN_SEPARATOR(), params, nonce, deadline
-        );
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, vm.envUint('ENCLAVE_PKS', ','));
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(proxy.DOMAIN_SEPARATOR(), params, nonce, deadline);
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, vm.envUint("ENCLAVE_PKS", ","));
 
-        console2.log('Submitting fundsOutCall() with nonce:', nonce);
-        console2.log('Deadline:                            ', deadline);
-        console2.log('Bitmap:                              ', bitmap);
+        console2.log("Submitting fundsOutCall() with nonce:", nonce);
+        console2.log("Deadline:                            ", deadline);
+        console2.log("Bitmap:                              ", bitmap);
 
-        vm.startBroadcast(vm.envUint('PRIVATE_KEY'));
+        vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
         proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
         vm.stopBroadcast();
 
-        console2.log('fundsOutCall() succeeded. New nonce:', proxy.teeNonce());
+        console2.log("fundsOutCall() succeeded. New nonce:", proxy.teeNonce());
     }
 }

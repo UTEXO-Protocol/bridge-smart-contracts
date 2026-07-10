@@ -1,24 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { ECDSA }  from '@openzeppelin/contracts/utils/cryptography/ECDSA.sol';
-import { IERC20 } from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
-import { IMultisigProxy } from './interfaces/IMultisigProxy.sol';
-import { IBridge }        from './interfaces/IBridge.sol';
-import { IRouteRegistry } from './interfaces/IRouteRegistry.sol';
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IMultisigProxy} from "./interfaces/IMultisigProxy.sol";
+import {IBridge} from "./interfaces/IBridge.sol";
+import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
 
 /// @notice Minimal view of the LayerZero adapter's outbound entry point. The
 ///         adapter itself lives in the `utexo-usdt0-contracts` repo; this
 ///         interface pins the ABI `lzFundsOut` calls. Keep it in sync with
 ///         `UtexoLZAdapter.sendOut`.
 interface ILZAdapterSendOut {
-    function sendOut(
-        uint32  dstEid,
-        bytes32 recipient,
-        uint256 amount,
-        uint256 minAmountLD,
-        bytes   calldata extraOptions
-    ) external payable;
+    function sendOut(uint32 dstEid, bytes32 recipient, uint256 amount, uint256 minAmountLD, bytes calldata extraOptions)
+        external
+        payable;
 }
 
 /// @notice Minimal view of the Bridge's custodied-token getter. `Bridge`
@@ -101,94 +97,75 @@ contract MultisigProxy is IMultisigProxy {
     uint256 private immutable _cachedChainId;
     bytes32 private immutable _cachedDomainSeparator;
 
-    bytes32 private constant _DOMAIN_TYPEHASH = keccak256(
-        'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'
-    );
+    bytes32 private constant _DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
     // TEE — typed enclave release operations
     bytes32 private constant _TEE_FUNDS_OUT_TYPEHASH = keccak256(
-        'TeeFundsOut(address recipient,uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint256 nonce,uint256 deadline)'
+        "TeeFundsOut(address recipient,uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint256 nonce,uint256 deadline)"
     );
     bytes32 private constant _TEE_LZ_FUNDS_OUT_TYPEHASH = keccak256(
-        'TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)'
+        "TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)"
     );
 
     // Federation propose — typed EIP-712 structs per operation (Bridge side)
-    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_TYPEHASH = keccak256(
-        'ProposeAdminExecute(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
-    );
+    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_TYPEHASH =
+        keccak256("ProposeAdminExecute(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH = keccak256(
-        'ProposeUpdateEnclaveSigners(address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)'
+        "ProposeUpdateEnclaveSigners(address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)"
     );
     bytes32 private constant _PROPOSE_UPDATE_FEDERATION_SIGNERS_TYPEHASH = keccak256(
-        'ProposeUpdateFederationSigners(address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)'
+        "ProposeUpdateFederationSigners(address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)"
     );
-    bytes32 private constant _PROPOSE_UPDATE_BRIDGE_TYPEHASH = keccak256(
-        'ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH = keccak256(
-        'ProposeSetCommissionRecipient(address newRecipient,uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH = keccak256(
-        'ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)'
-    );
+    bytes32 private constant _PROPOSE_UPDATE_BRIDGE_TYPEHASH =
+        keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH =
+        keccak256("ProposeSetCommissionRecipient(address newRecipient,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
+        keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
 
     // Federation propose — CommissionManager side
     bytes32 private constant _PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH = keccak256(
-        'ProposeAdminExecuteCommissionManager(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
+        "ProposeAdminExecuteCommissionManager(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
     );
-    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH = keccak256(
-        'ProposeAdminExecuteRouteRegistry(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH = keccak256(
-        'ProposeWithdrawTokenCommissionCM(address token,uint256 amount,uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH = keccak256(
-        'ProposeWithdrawNativeCommissionCM(uint256 amount,uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH = keccak256(
-        'ProposeUpdateCommissionManager(address newCommissionManager,uint256 nonce,uint256 deadline)'
-    );
+    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH =
+        keccak256("ProposeAdminExecuteRouteRegistry(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH =
+        keccak256("ProposeWithdrawTokenCommissionCM(address token,uint256 amount,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH =
+        keccak256("ProposeWithdrawNativeCommissionCM(uint256 amount,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH =
+        keccak256("ProposeUpdateCommissionManager(address newCommissionManager,uint256 nonce,uint256 deadline)");
 
     // Federation propose — LZAdapter side
-    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH = keccak256(
-        'ProposeAdminExecuteAdapter(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH = keccak256(
-        'ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH = keccak256(
-        'ProposeDisableLZAdapter(uint256 nonce,uint256 deadline)'
-    );
+    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH =
+        keccak256("ProposeAdminExecuteAdapter(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH =
+        keccak256("ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH =
+        keccak256("ProposeDisableLZAdapter(uint256 nonce,uint256 deadline)");
 
     // Federation propose — RouteRegistry side
     bytes32 private constant _PROPOSE_SET_ROUTE_TYPEHASH = keccak256(
-        'ProposeSetRoute(uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)'
+        "ProposeSetRoute(uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)"
     );
-    bytes32 private constant _PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH = keccak256(
-        'ProposeUpdateRouteRegistry(address newRouteRegistry,uint256 nonce,uint256 deadline)'
-    );
+    bytes32 private constant _PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH =
+        keccak256("ProposeUpdateRouteRegistry(address newRouteRegistry,uint256 nonce,uint256 deadline)");
 
     // Cancel
-    bytes32 private constant _CANCEL_PROPOSAL_TYPEHASH = keccak256(
-        'CancelProposal(bytes32 proposalId,uint256 nonce,uint256 deadline)'
-    );
+    bytes32 private constant _CANCEL_PROPOSAL_TYPEHASH =
+        keccak256("CancelProposal(bytes32 proposalId,uint256 nonce,uint256 deadline)");
 
     // Emergency
-    bytes32 private constant _EMERGENCY_PAUSE_TYPEHASH = keccak256(
-        'EmergencyPause(uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _EMERGENCY_UNPAUSE_TYPEHASH = keccak256(
-        'EmergencyUnpause(uint256 nonce,uint256 deadline)'
-    );
+    bytes32 private constant _EMERGENCY_PAUSE_TYPEHASH = keccak256("EmergencyPause(uint256 nonce,uint256 deadline)");
+    bytes32 private constant _EMERGENCY_UNPAUSE_TYPEHASH =
+        keccak256("EmergencyUnpause(uint256 nonce,uint256 deadline)");
 
     // Federation propose — planned inflow-only pause (timelocked)
-    bytes32 private constant _PROPOSE_PAUSE_INFLOW_TYPEHASH = keccak256(
-        'ProposePauseInflow(uint256 nonce,uint256 deadline)'
-    );
-    bytes32 private constant _PROPOSE_UNPAUSE_INFLOW_TYPEHASH = keccak256(
-        'ProposeUnpauseInflow(uint256 nonce,uint256 deadline)'
-    );
+    bytes32 private constant _PROPOSE_PAUSE_INFLOW_TYPEHASH =
+        keccak256("ProposePauseInflow(uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_UNPAUSE_INFLOW_TYPEHASH =
+        keccak256("ProposeUnpauseInflow(uint256 nonce,uint256 deadline)");
 
     // =========================================================================
     // Constructor
@@ -254,7 +231,10 @@ contract MultisigProxy is IMultisigProxy {
 
         _verifySignatures(
             _hashTypedData(_fundsOutStructHash(params, nonce, deadline)),
-            enclaveBitmap, enclaveSigs, _enclaveSigners, enclaveThreshold
+            enclaveBitmap,
+            enclaveSigs,
+            _enclaveSigners,
+            enclaveThreshold
         );
 
         teeNonce++;
@@ -266,24 +246,26 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @dev EIP-712 struct hash for `TeeFundsOut`. Isolated in its own frame to
     ///      keep `fundsOutCall` within stack limits.
-    function _fundsOutStructHash(
-        IBridge.FundsOutParams calldata params,
-        uint256 nonce,
-        uint256 deadline
-    ) private pure returns (bytes32) {
-        return keccak256(abi.encode(
-            _TEE_FUNDS_OUT_TYPEHASH,
-            params.recipient,
-            params.amount,
-            params.burnId,
-            params.sourceChainId,
-            params.destinationChainId,
-            keccak256(bytes(params.sourceAddress)),
-            keccak256(params.proof),
-            keccak256(params.settlementData),
-            nonce,
-            deadline
-        ));
+    function _fundsOutStructHash(IBridge.FundsOutParams calldata params, uint256 nonce, uint256 deadline)
+        private
+        pure
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(
+                _TEE_FUNDS_OUT_TYPEHASH,
+                params.recipient,
+                params.amount,
+                params.burnId,
+                params.sourceChainId,
+                params.destinationChainId,
+                keccak256(bytes(params.sourceAddress)),
+                keccak256(params.proof),
+                keccak256(params.settlementData),
+                nonce,
+                deadline
+            )
+        );
     }
 
     /// @inheritdoc IMultisigProxy
@@ -307,7 +289,10 @@ contract MultisigProxy is IMultisigProxy {
 
         _verifySignatures(
             _hashTypedData(_lzFundsOutStructHash(params, nonce, deadline)),
-            enclaveBitmap, enclaveSigs, _enclaveSigners, enclaveThreshold
+            enclaveBitmap,
+            enclaveSigs,
+            _enclaveSigners,
+            enclaveThreshold
         );
 
         teeNonce++;
@@ -319,20 +304,23 @@ contract MultisigProxy is IMultisigProxy {
         {
             address token = IBridgeToken(bridge).TOKEN();
             uint256 balanceBefore = IERC20(token).balanceOf(adapter);
-            IBridge(bridge).fundsOut(IBridge.FundsOutParams({
-                recipient:          adapter,
-                amount:             params.amount,
-                burnId:             params.burnId,
-                sourceChainId:      params.sourceChainId,
-                destinationChainId: params.destinationChainId,
-                sourceAddress:      params.sourceAddress,
-                proof:              params.proof,
-                settlementData:     params.settlementData
-            }));
+            IBridge(bridge)
+                .fundsOut(
+                    IBridge.FundsOutParams({
+                    recipient: adapter,
+                    amount: params.amount,
+                    burnId: params.burnId,
+                    sourceChainId: params.sourceChainId,
+                    destinationChainId: params.destinationChainId,
+                    sourceAddress: params.sourceAddress,
+                    proof: params.proof,
+                    settlementData: params.settlementData
+                })
+                );
             delivered = IERC20(token).balanceOf(adapter) - balanceBefore;
         }
 
-        ILZAdapterSendOut(adapter).sendOut{ value: msg.value }(
+        ILZAdapterSendOut(adapter).sendOut{value: msg.value}(
             params.dstEid, params.recipient, delivered, params.minAmountLD, params.extraOptions
         );
 
@@ -341,35 +329,37 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @dev EIP-712 struct hash for `TeeLzFundsOut`. Isolated in its own frame
     ///      to keep `lzFundsOutCall` within stack limits.
-    function _lzFundsOutStructHash(
-        LzFundsOutParams calldata params,
-        uint256 nonce,
-        uint256 deadline
-    ) private pure returns (bytes32) {
+    function _lzFundsOutStructHash(LzFundsOutParams calldata params, uint256 nonce, uint256 deadline)
+        private
+        pure
+        returns (bytes32)
+    {
         // Built in two `abi.encode` halves joined with `bytes.concat`. Every
         // field is a 32-byte word (dynamic ones are pre-hashed), so the result
         // is byte-identical to encoding all fields at once, but each half is
         // shallow enough to compile without the optimizer (e.g. `forge coverage`).
-        return keccak256(bytes.concat(
-            abi.encode(
-                _TEE_LZ_FUNDS_OUT_TYPEHASH,
-                params.amount,
-                params.burnId,
-                params.sourceChainId,
-                params.destinationChainId,
-                keccak256(bytes(params.sourceAddress)),
-                keccak256(params.proof)
-            ),
-            abi.encode(
-                keccak256(params.settlementData),
-                params.dstEid,
-                params.recipient,
-                params.minAmountLD,
-                keccak256(params.extraOptions),
-                nonce,
-                deadline
+        return keccak256(
+            bytes.concat(
+                abi.encode(
+                    _TEE_LZ_FUNDS_OUT_TYPEHASH,
+                    params.amount,
+                    params.burnId,
+                    params.sourceChainId,
+                    params.destinationChainId,
+                    keccak256(bytes(params.sourceAddress)),
+                    keccak256(params.proof)
+                ),
+                abi.encode(
+                    keccak256(params.settlementData),
+                    params.dstEid,
+                    params.recipient,
+                    params.minAmountLD,
+                    keccak256(params.extraOptions),
+                    nonce,
+                    deadline
+                )
             )
-        ));
+        );
     }
 
     /// @dev Shared timing guard for the typed enclave methods: not expired, and
@@ -384,18 +374,11 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     /// @inheritdoc IMultisigProxy
-    function emergencyPause(
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external {
+    function emergencyPause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external {
         if (block.timestamp > deadline) revert Expired();
         if (nonce != proposalNonce) revert InvalidNonce();
 
-        bytes32 digest = _hashTypedData(
-            keccak256(abi.encode(_EMERGENCY_PAUSE_TYPEHASH, nonce, deadline))
-        );
+        bytes32 digest = _hashTypedData(keccak256(abi.encode(_EMERGENCY_PAUSE_TYPEHASH, nonce, deadline)));
         _verifySignatures(digest, fedBitmap, fedSigs, _federationSigners, federationThreshold);
 
         proposalNonce++;
@@ -403,31 +386,24 @@ contract MultisigProxy is IMultisigProxy {
         // Emergency freeze of BOTH inflow and outflow — no timelock, federation
         // signatures only. Also halts the enclave/TEE release path (it routes
         // through Bridge.fundsOut, now gated by whenOutflowNotPaused).
-        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('emergencyPauseAll()'));
+        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyPauseAll()"));
         _propagateRevert(ok, ret);
 
         emit EmergencyPaused(nonce, fedBitmap);
     }
 
     /// @inheritdoc IMultisigProxy
-    function emergencyUnpause(
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external {
+    function emergencyUnpause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external {
         if (block.timestamp > deadline) revert Expired();
         if (nonce != proposalNonce) revert InvalidNonce();
 
-        bytes32 digest = _hashTypedData(
-            keccak256(abi.encode(_EMERGENCY_UNPAUSE_TYPEHASH, nonce, deadline))
-        );
+        bytes32 digest = _hashTypedData(keccak256(abi.encode(_EMERGENCY_UNPAUSE_TYPEHASH, nonce, deadline)));
         _verifySignatures(digest, fedBitmap, fedSigs, _federationSigners, federationThreshold);
 
         proposalNonce++;
 
         // Lift the emergency freeze on BOTH inflow and outflow.
-        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('emergencyUnpauseAll()'));
+        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyUnpauseAll()"));
         _propagateRevert(ok, ret);
 
         emit EmergencyUnpaused(nonce, fedBitmap);
@@ -450,9 +426,8 @@ contract MultisigProxy is IMultisigProxy {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_ADMIN_EXECUTE_TYPEHASH, selector, keccak256(callData), nonce, deadline
-        ));
+        bytes32 structHash =
+            keccak256(abi.encode(_PROPOSE_ADMIN_EXECUTE_TYPEHASH, selector, keccak256(callData), nonce, deadline));
 
         return _propose(OperationType.AdminExecute, callData, nonce, deadline, structHash, fedBitmap, fedSigs);
     }
@@ -474,15 +449,20 @@ contract MultisigProxy is IMultisigProxy {
         _requireValidThreshold(newThreshold, newSigners.length);
         _validateSigners(newSigners);
 
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH,
-            _hashAddressArray(newSigners), newThreshold, nonce, deadline
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                _PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH, _hashAddressArray(newSigners), newThreshold, nonce, deadline
+            )
+        );
 
         return _propose(
             OperationType.UpdateEnclaveSigners,
             abi.encode(newSigners, newThreshold),
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
         );
     }
 
@@ -501,15 +481,24 @@ contract MultisigProxy is IMultisigProxy {
         _requireValidThreshold(newThreshold, newSigners.length);
         _validateSigners(newSigners);
 
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_UPDATE_FEDERATION_SIGNERS_TYPEHASH,
-            _hashAddressArray(newSigners), newThreshold, nonce, deadline
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                _PROPOSE_UPDATE_FEDERATION_SIGNERS_TYPEHASH,
+                _hashAddressArray(newSigners),
+                newThreshold,
+                nonce,
+                deadline
+            )
+        );
 
         return _propose(
             OperationType.UpdateFederationSigners,
             abi.encode(newSigners, newThreshold),
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
         );
     }
 
@@ -521,15 +510,10 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_UPDATE_BRIDGE_TYPEHASH, newBridge, nonce, deadline
-        ));
+        bytes32 structHash = keccak256(abi.encode(_PROPOSE_UPDATE_BRIDGE_TYPEHASH, newBridge, nonce, deadline));
 
-        return _propose(
-            OperationType.UpdateBridge,
-            abi.encode(newBridge),
-            nonce, deadline, structHash, fedBitmap, fedSigs
-        );
+        return
+            _propose(OperationType.UpdateBridge, abi.encode(newBridge), nonce, deadline, structHash, fedBitmap, fedSigs);
     }
 
     /// @inheritdoc IMultisigProxy
@@ -540,14 +524,18 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH, newRecipient, nonce, deadline
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH, newRecipient, nonce, deadline)
+        );
 
         return _propose(
             OperationType.SetCommissionRecipient,
             abi.encode(newRecipient),
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
         );
     }
 
@@ -559,14 +547,12 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH, newDuration, nonce, deadline
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH, newDuration, nonce, deadline)
+        );
 
         return _propose(
-            OperationType.SetTimelockDuration,
-            abi.encode(newDuration),
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            OperationType.SetTimelockDuration, abi.encode(newDuration), nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
 
@@ -587,14 +573,11 @@ contract MultisigProxy is IMultisigProxy {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, selector, keccak256(callData), nonce, deadline
-        ));
+        bytes32 structHash =
+            keccak256(abi.encode(_PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, selector, keccak256(callData), nonce, deadline));
 
         return _propose(
-            OperationType.AdminExecuteCommissionManager,
-            callData,
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            OperationType.AdminExecuteCommissionManager, callData, nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
 
@@ -611,15 +594,12 @@ contract MultisigProxy is IMultisigProxy {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH, selector, keccak256(callData), nonce, deadline
-        ));
-
-        return _propose(
-            OperationType.AdminExecuteRouteRegistry,
-            callData,
-            nonce, deadline, structHash, fedBitmap, fedSigs
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH, selector, keccak256(callData), nonce, deadline)
         );
+
+        return
+            _propose(OperationType.AdminExecuteRouteRegistry, callData, nonce, deadline, structHash, fedBitmap, fedSigs);
     }
 
     /// @inheritdoc IMultisigProxy
@@ -631,14 +611,18 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH, token, amount, nonce, deadline
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH, token, amount, nonce, deadline)
+        );
 
         return _propose(
             OperationType.WithdrawTokenCommissionCM,
             abi.encode(token, amount),
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
         );
     }
 
@@ -650,14 +634,18 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH, amount, nonce, deadline
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH, amount, nonce, deadline)
+        );
 
         return _propose(
             OperationType.WithdrawNativeCommissionCM,
             abi.encode(amount),
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
         );
     }
 
@@ -669,14 +657,18 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH, newCommissionManager, nonce, deadline
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH, newCommissionManager, nonce, deadline)
+        );
 
         return _propose(
             OperationType.UpdateCommissionManager,
             abi.encode(newCommissionManager),
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
         );
     }
 
@@ -697,15 +689,11 @@ contract MultisigProxy is IMultisigProxy {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, selector, keccak256(callData), nonce, deadline
-        ));
-
-        return _propose(
-            OperationType.AdminExecuteAdapter,
-            callData,
-            nonce, deadline, structHash, fedBitmap, fedSigs
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, selector, keccak256(callData), nonce, deadline)
         );
+
+        return _propose(OperationType.AdminExecuteAdapter, callData, nonce, deadline, structHash, fedBitmap, fedSigs);
     }
 
     /// @inheritdoc IMultisigProxy
@@ -716,33 +704,21 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH, newLZAdapter, nonce, deadline
-        ));
+        bytes32 structHash = keccak256(abi.encode(_PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH, newLZAdapter, nonce, deadline));
 
         return _propose(
-            OperationType.UpdateLZAdapter,
-            abi.encode(newLZAdapter),
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            OperationType.UpdateLZAdapter, abi.encode(newLZAdapter), nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
 
     /// @inheritdoc IMultisigProxy
-    function proposeDisableLZAdapter(
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH, nonce, deadline
-        ));
+    function proposeDisableLZAdapter(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs)
+        external
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(abi.encode(_PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH, nonce, deadline));
 
-        return _propose(
-            OperationType.DisableLZAdapter,
-            '',
-            nonce, deadline, structHash, fedBitmap, fedSigs
-        );
+        return _propose(OperationType.DisableLZAdapter, "", nonce, deadline, structHash, fedBitmap, fedSigs);
     }
 
     // =========================================================================
@@ -753,7 +729,7 @@ contract MultisigProxy is IMultisigProxy {
     function proposeSetRoute(
         uint256 sourceChainId,
         uint256 destChainId,
-        bool    enabled,
+        bool enabled,
         address finalityVerifier,
         address settlementModule,
         uint256 nonce,
@@ -761,16 +737,27 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_SET_ROUTE_TYPEHASH,
-            sourceChainId, destChainId, enabled, finalityVerifier, settlementModule,
-            nonce, deadline
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                _PROPOSE_SET_ROUTE_TYPEHASH,
+                sourceChainId,
+                destChainId,
+                enabled,
+                finalityVerifier,
+                settlementModule,
+                nonce,
+                deadline
+            )
+        );
 
         return _propose(
             OperationType.SetRoute,
             abi.encode(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule),
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
         );
     }
 
@@ -782,14 +769,18 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH, newRouteRegistry, nonce, deadline
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH, newRouteRegistry, nonce, deadline)
+        );
 
         return _propose(
             OperationType.UpdateRouteRegistry,
             abi.encode(newRouteRegistry),
-            nonce, deadline, structHash, fedBitmap, fedSigs
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
         );
     }
 
@@ -799,40 +790,24 @@ contract MultisigProxy is IMultisigProxy {
     ///      Runs through the timelocked propose -> execute path, so the
     ///      federation has an observation window. The emergency, no-timelock
     ///      freeze of BOTH paths is `emergencyPause` instead. Carries no payload.
-    function proposePauseInflow(
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_PAUSE_INFLOW_TYPEHASH, nonce, deadline
-        ));
+    function proposePauseInflow(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs)
+        external
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(abi.encode(_PROPOSE_PAUSE_INFLOW_TYPEHASH, nonce, deadline));
 
-        return _propose(
-            OperationType.PauseInflow,
-            '',
-            nonce, deadline, structHash, fedBitmap, fedSigs
-        );
+        return _propose(OperationType.PauseInflow, "", nonce, deadline, structHash, fedBitmap, fedSigs);
     }
 
     /// @inheritdoc IMultisigProxy
     /// @dev Resumes the inflow path, reversing `proposePauseInflow`. Timelocked.
-    function proposeUnpauseInflow(
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            _PROPOSE_UNPAUSE_INFLOW_TYPEHASH, nonce, deadline
-        ));
+    function proposeUnpauseInflow(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs)
+        external
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(abi.encode(_PROPOSE_UNPAUSE_INFLOW_TYPEHASH, nonce, deadline));
 
-        return _propose(
-            OperationType.UnpauseInflow,
-            '',
-            nonce, deadline, structHash, fedBitmap, fedSigs
-        );
+        return _propose(OperationType.UnpauseInflow, "", nonce, deadline, structHash, fedBitmap, fedSigs);
     }
 
     // =========================================================================
@@ -853,9 +828,7 @@ contract MultisigProxy is IMultisigProxy {
         Proposal storage p = _proposals[proposalId];
         if (p.status != ProposalStatus.Pending) revert NotPending();
 
-        bytes32 digest = _hashTypedData(
-            keccak256(abi.encode(_CANCEL_PROPOSAL_TYPEHASH, proposalId, nonce, deadline))
-        );
+        bytes32 digest = _hashTypedData(keccak256(abi.encode(_CANCEL_PROPOSAL_TYPEHASH, proposalId, nonce, deadline)));
         _verifySignatures(digest, fedBitmap, fedSigs, _federationSigners, federationThreshold);
 
         proposalNonce++;
@@ -890,16 +863,15 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     /// @inheritdoc IMultisigProxy
-    function verifyEnclaveSignature(
-        bytes32 digest,
-        bytes calldata signature,
-        uint256 signerIndex
-    ) external view returns (bool) {
+    function verifyEnclaveSignature(bytes32 digest, bytes calldata signature, uint256 signerIndex)
+        external
+        view
+        returns (bool)
+    {
         if (signerIndex >= _enclaveSigners.length) revert IndexOutOfRange();
         address recovered = ECDSA.recover(digest, signature);
         return recovered == _enclaveSigners[signerIndex];
     }
-
 
     /// @inheritdoc IMultisigProxy
     function getEnclaveSigners() external view returns (address[] memory) {
@@ -967,7 +939,6 @@ contract MultisigProxy is IMultisigProxy {
             // opData = raw bridge callData
             (bool ok, bytes memory ret) = bridge.call(opData);
             _propagateRevert(ok, ret);
-
         } else if (opType == OperationType.UpdateEnclaveSigners) {
             (address[] memory newSigners, uint256 newThreshold) = abi.decode(opData, (address[], uint256));
             if (newSigners.length == 0) revert NoSigners();
@@ -977,7 +948,6 @@ contract MultisigProxy is IMultisigProxy {
             _enclaveSigners = newSigners;
             enclaveThreshold = newThreshold;
             emit EnclaveSignersUpdated(newSigners, newThreshold);
-
         } else if (opType == OperationType.UpdateFederationSigners) {
             (address[] memory newSigners, uint256 newThreshold) = abi.decode(opData, (address[], uint256));
             if (newSigners.length == 0) revert NoSigners();
@@ -987,33 +957,28 @@ contract MultisigProxy is IMultisigProxy {
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
             emit FederationSignersUpdated(newSigners, newThreshold);
-
         } else if (opType == OperationType.UpdateBridge) {
             address newBridge = abi.decode(opData, (address));
             if (newBridge == address(0)) revert ZeroBridge();
             address oldBridge = bridge;
             bridge = newBridge;
             emit BridgeAddressUpdated(oldBridge, newBridge);
-
         } else if (opType == OperationType.SetCommissionRecipient) {
             address newRecipient = abi.decode(opData, (address));
             if (newRecipient == address(0)) revert ZeroRecipient();
             address old = commissionRecipient;
             commissionRecipient = newRecipient;
             emit CommissionRecipientUpdated(old, newRecipient);
-
         } else if (opType == OperationType.SetTimelockDuration) {
             uint256 newDuration = abi.decode(opData, (uint256));
             if (newDuration < MIN_TIMELOCK) revert TimelockTooShort();
             if (newDuration >= MAX_PROPOSAL_LIFETIME) revert TimelockTooLong();
             timelockDuration = newDuration;
             emit TimelockDurationUpdated(newDuration);
-
         } else if (opType == OperationType.AdminExecuteCommissionManager) {
             // opData = raw CommissionManager callData
             (bool ok, bytes memory ret) = commissionManager.call(opData);
             _propagateRevert(ok, ret);
-
         } else if (opType == OperationType.AdminExecuteRouteRegistry) {
             // opData = raw RouteRegistry callData. Registry resolved from Bridge
             // (single source of truth), same as SetRoute. Enables ownership
@@ -1023,74 +988,58 @@ contract MultisigProxy is IMultisigProxy {
             if (registry == address(0)) revert ZeroTarget();
             (bool ok, bytes memory ret) = registry.call(opData);
             _propagateRevert(ok, ret);
-
         } else if (opType == OperationType.WithdrawTokenCommissionCM) {
             (address token, uint256 amount) = abi.decode(opData, (address, uint256));
             address recipient = commissionRecipient;
             (bool ok, bytes memory ret) = commissionManager.call(
-                abi.encodeWithSignature(
-                    'withdrawTokenCommission(address,address,uint256)',
-                    token, recipient, amount
-                )
+                abi.encodeWithSignature("withdrawTokenCommission(address,address,uint256)", token, recipient, amount)
             );
             _propagateRevert(ok, ret);
             emit CommissionWithdrawn(token, amount, recipient);
-
         } else if (opType == OperationType.WithdrawNativeCommissionCM) {
             uint256 amount = abi.decode(opData, (uint256));
             address recipient = commissionRecipient;
             (bool ok, bytes memory ret) = commissionManager.call(
-                abi.encodeWithSignature(
-                    'withdrawNativeCommission(address,uint256)',
-                    recipient, amount
-                )
+                abi.encodeWithSignature("withdrawNativeCommission(address,uint256)", recipient, amount)
             );
             _propagateRevert(ok, ret);
             emit NativeCommissionWithdrawn(amount, recipient);
-
         } else if (opType == OperationType.UpdateCommissionManager) {
             address newCm = abi.decode(opData, (address));
             if (newCm == address(0)) revert ZeroCommissionManager();
             address old = commissionManager;
             commissionManager = newCm;
             emit CommissionManagerUpdated(old, newCm);
-
         } else if (opType == OperationType.AdminExecuteAdapter) {
             // opData = raw LZAdapter callData. The adapter must be wired in
             // first via UpdateLZAdapter; a zero target closes the path.
             if (lzAdapter == address(0)) revert ZeroTarget();
             (bool ok, bytes memory ret) = lzAdapter.call(opData);
             _propagateRevert(ok, ret);
-
         } else if (opType == OperationType.UpdateLZAdapter) {
             address newAdapter = abi.decode(opData, (address));
             if (newAdapter == address(0)) revert InvalidLZAdapter();
             address oldAdapter = lzAdapter;
             lzAdapter = newAdapter;
             emit LZAdapterUpdated(oldAdapter, newAdapter);
-
         } else if (opType == OperationType.DisableLZAdapter) {
             address oldAdapter = lzAdapter;
             lzAdapter = address(0);
             emit LZAdapterDisabled(oldAdapter);
-
         } else if (opType == OperationType.SetRoute) {
             // Forwards to RouteRegistry, looked up dynamically from Bridge to
             // keep registry pointer as a single source of truth.
             (
                 uint256 sourceChainId,
                 uint256 destChainId,
-                bool    enabled,
+                bool enabled,
                 address finalityVerifier,
                 address settlementModule
             ) = abi.decode(opData, (uint256, uint256, bool, address, address));
 
             address registry = IBridge(bridge).routeRegistry();
             if (registry == address(0)) revert ZeroTarget();
-            IRouteRegistry(registry).setRoute(
-                sourceChainId, destChainId, enabled, finalityVerifier, settlementModule
-            );
-
+            IRouteRegistry(registry).setRoute(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule);
         } else if (opType == OperationType.UpdateRouteRegistry) {
             // Rotates Bridge's `routeRegistry` immutable-shaped slot. The new
             // registry MUST be deployed with Bridge's address as its
@@ -1098,16 +1047,13 @@ contract MultisigProxy is IMultisigProxy {
             // `NotBridge` and the route plane goes dark.
             address newRegistry = abi.decode(opData, (address));
             IBridge(bridge).setRouteRegistry(newRegistry);
-
         } else if (opType == OperationType.PauseInflow) {
             // Planned inflow-only freeze (no payload). Withdrawals stay open.
-            (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('pauseInflow()'));
+            (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("pauseInflow()"));
             _propagateRevert(ok, ret);
-
         } else if (opType == OperationType.UnpauseInflow) {
-            (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature('unpauseInflow()'));
+            (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("unpauseInflow()"));
             _propagateRevert(ok, ret);
-
         } else {
             revert UnknownOperationType();
         }
@@ -1127,25 +1073,19 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @dev Cached domain separator on the original chain; rebuilt on a fork.
     function _domainSeparator() private view returns (bytes32) {
-        return block.chainid == _cachedChainId
-            ? _cachedDomainSeparator
-            : _buildDomainSeparator();
+        return block.chainid == _cachedChainId ? _cachedDomainSeparator : _buildDomainSeparator();
     }
 
     /// @dev Computes the EIP-712 domain separator over the current chain id.
     function _buildDomainSeparator() private view returns (bytes32) {
-        return keccak256(abi.encode(
-            _DOMAIN_TYPEHASH,
-            keccak256('MultisigProxy'),
-            keccak256('1'),
-            block.chainid,
-            address(this)
-        ));
+        return keccak256(
+            abi.encode(_DOMAIN_TYPEHASH, keccak256("MultisigProxy"), keccak256("1"), block.chainid, address(this))
+        );
     }
 
     /// @dev Wraps a struct hash into a full EIP-712 digest.
     function _hashTypedData(bytes32 structHash) private view returns (bytes32) {
-        return keccak256(abi.encodePacked('\x19\x01', _domainSeparator(), structHash));
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
     /// @dev Verifies M-of-N bitmap signatures against the given signer set.

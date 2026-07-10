@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { FundsInContext, FundsOutContext, RouteConfig } from './RouteTypes.sol';
+import {FundsInContext, FundsOutContext, RouteConfig} from "./RouteTypes.sol";
 
 /// @title IRouteRegistry
 /// @notice Per-Bridge directory of routes and their plugin implementations.
@@ -57,9 +57,9 @@ interface IRouteRegistry {
     event RouteSet(
         uint256 indexed sourceChainId,
         uint256 indexed destChainId,
-        bool            enabled,
-        address         finalityVerifier,
-        address         settlementModule
+        bool enabled,
+        address finalityVerifier,
+        address settlementModule
     );
 
     // =========================================================================
@@ -77,7 +77,7 @@ interface IRouteRegistry {
     function setRoute(
         uint256 sourceChainId,
         uint256 destChainId,
-        bool    enabled,
+        bool enabled,
         address finalityVerifier,
         address settlementModule
     ) external;
@@ -89,10 +89,7 @@ interface IRouteRegistry {
     /// @notice Returns the current `RouteConfig` for the route key
     ///         `(sourceChainId, destChainId)`. Unset routes return the zero
     ///         struct (`enabled == false`).
-    function getRoute(uint256 sourceChainId, uint256 destChainId)
-        external
-        view
-        returns (RouteConfig memory);
+    function getRoute(uint256 sourceChainId, uint256 destChainId) external view returns (RouteConfig memory);
 
     // =========================================================================
     // Bridge-facing dispatchers
@@ -107,9 +104,5 @@ interface IRouteRegistry {
     ///         settlement module's `beforeFundsOut` hook, in that order, for
     ///         the route `(ctx.sourceChainId, ctx.destChainId)`. Reverts if
     ///         the route is not enabled. Callable only by `bridge`.
-    function beforeFundsOut(
-        FundsOutContext calldata ctx,
-        bytes            calldata proof,
-        bytes            calldata settlementData
-    ) external;
+    function beforeFundsOut(FundsOutContext calldata ctx, bytes calldata proof, bytes calldata settlementData) external;
 }

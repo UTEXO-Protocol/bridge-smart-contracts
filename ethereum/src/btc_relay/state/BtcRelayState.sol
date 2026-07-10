@@ -7,9 +7,8 @@ struct BtcRelayState {
 }
 
 library BtcRelayStateImpl {
-
     //Optimized read function, that reads all the values at once
-    function read(BtcRelayState storage self) view internal returns (uint32 blockHeight, uint224 chainWork) {
+    function read(BtcRelayState storage self) internal view returns (uint32 blockHeight, uint224 chainWork) {
         //The following assembly is equivalent to:
         // blockHeight = self.blockHeight;
         // chainWork = self.chainWork;
@@ -26,12 +25,8 @@ library BtcRelayStateImpl {
         // self.blockHeight = blockHeight;
         // self.chainWork = chainWork;
         assembly {
-            let value := or(
-                blockHeight,
-                shl(32, chainWork)
-            )
+            let value := or(blockHeight, shl(32, chainWork))
             sstore(self.slot, value)
         }
     }
-
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { FundsOutContext } from './RouteTypes.sol';
+import {FundsOutContext} from "./RouteTypes.sol";
 
 /// @title IFinalityVerifier
 /// @notice Pluggable, route-specific finality / proof verifier consumed by

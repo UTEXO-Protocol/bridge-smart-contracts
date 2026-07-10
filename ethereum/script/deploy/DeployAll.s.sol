@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Script, console2 } from 'forge-std/Script.sol';
+import {Script, console2} from "forge-std/Script.sol";
 
-import { Bridge }              from '../../src/Bridge.sol';
-import { CommissionManager }   from '../../src/CommissionManager.sol';
-import { MultisigProxy }       from '../../src/MultisigProxy.sol';
-import { RouteRegistry }       from '../../src/RouteRegistry.sol';
-import { RGBVerifier }         from '../../src/verifiers/RGBVerifier.sol';
-import { RgbSettlementModule } from '../../src/settlement/RgbSettlementModule.sol';
+import {Bridge} from "../../src/Bridge.sol";
+import {CommissionManager} from "../../src/CommissionManager.sol";
+import {MultisigProxy} from "../../src/MultisigProxy.sol";
+import {RouteRegistry} from "../../src/RouteRegistry.sol";
+import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
+import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol";
 
 /// @title DeployAll
 /// @notice Full production deploy flow.
@@ -54,31 +54,31 @@ contract DeployAll is Script {
     function run()
         external
         returns (
-            Bridge              bridge,
-            CommissionManager   cm,
-            RouteRegistry       routeRegistry,
-            RGBVerifier         rgbVerifier,
+            Bridge bridge,
+            CommissionManager cm,
+            RouteRegistry routeRegistry,
+            RGBVerifier rgbVerifier,
             RgbSettlementModule rgbModule,
-            MultisigProxy       proxy
+            MultisigProxy proxy
         )
     {
         // ---- 1. Load env --------------------------------------------------
-        uint256 pk             = vm.envUint('PRIVATE_KEY');
-        address usdt0          = vm.envAddress('USDT0_ADDRESS');
-        address btcRelay       = vm.envAddress('BTC_RELAY_ADDRESS');
-        address[] memory enc   = vm.envAddress('ENCLAVE_SIGNERS', ',');
-        uint256 encThr         = vm.envUint('ENCLAVE_THRESHOLD');
-        address[] memory fed   = vm.envAddress('FEDERATION_SIGNERS', ',');
-        uint256 fedThr         = vm.envUint('FEDERATION_THRESHOLD');
-        address commission     = vm.envAddress('COMMISSION_RECIPIENT');
-        uint256 timelock       = vm.envUint('TIMELOCK_DURATION');
-        uint256 minTimelock    = vm.envUint('MIN_TIMELOCK');
-        address ethUsdFeed     = vm.envOr('ETH_USD_FEED', address(0));
-        uint256 ethUsdHb       = vm.envOr('ETH_USD_HEARTBEAT', uint256(0));
-        uint256 minFundsIn     = vm.envUint('MIN_FUNDS_IN_AMOUNT');
+        uint256 pk = vm.envUint("PRIVATE_KEY");
+        address usdt0 = vm.envAddress("USDT0_ADDRESS");
+        address btcRelay = vm.envAddress("BTC_RELAY_ADDRESS");
+        address[] memory enc = vm.envAddress("ENCLAVE_SIGNERS", ",");
+        uint256 encThr = vm.envUint("ENCLAVE_THRESHOLD");
+        address[] memory fed = vm.envAddress("FEDERATION_SIGNERS", ",");
+        uint256 fedThr = vm.envUint("FEDERATION_THRESHOLD");
+        address commission = vm.envAddress("COMMISSION_RECIPIENT");
+        uint256 timelock = vm.envUint("TIMELOCK_DURATION");
+        uint256 minTimelock = vm.envUint("MIN_TIMELOCK");
+        address ethUsdFeed = vm.envOr("ETH_USD_FEED", address(0));
+        uint256 ethUsdHb = vm.envOr("ETH_USD_HEARTBEAT", uint256(0));
+        uint256 minFundsIn = vm.envUint("MIN_FUNDS_IN_AMOUNT");
 
-        address deployer    = vm.addr(pk);
-        uint64  startNonce  = vm.getNonce(deployer);
+        address deployer = vm.addr(pk);
+        uint64 startNonce = vm.getNonce(deployer);
 
         // Bridge sits at nonce + 2 (CM, RouteRegistry, then Bridge).
         address predictedBridge = vm.computeCreateAddress(deployer, startNonce + 2);
@@ -94,32 +94,20 @@ contract DeployAll is Script {
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
 
         // ---- 4. Bridge (nonce n+2) ---------------------------------------
-        bridge = new Bridge(
-            usdt0,
-            address(routeRegistry),
-            payable(address(cm)),
-            address(0),
-            minFundsIn
-        );
+        bridge = new Bridge(usdt0, address(routeRegistry), payable(address(cm)), address(0), minFundsIn);
 
         // ---- 5. Route plugins (nonce n+3, n+4) ---------------------------
         rgbVerifier = new RGBVerifier(btcRelay);
-        rgbModule   = new RgbSettlementModule(address(routeRegistry));
+        rgbModule = new RgbSettlementModule(address(routeRegistry));
 
         // ---- 6. MultisigProxy (nonce n+5) --------------------------------
         proxy = new MultisigProxy(
-            address(bridge),
-            address(cm),
-            enc, encThr,
-            fed, fedThr,
-            commission,
-            timelock,
-            minTimelock
+            address(bridge), address(cm), enc, encThr, fed, fedThr, commission, timelock, minTimelock
         );
 
         // ---- 7. Wire optional ETH/USD feed before CM ownership transfer --
         if (ethUsdFeed != address(0)) {
-            require(ethUsdHb != 0, 'ETH_USD_HEARTBEAT must be set when ETH_USD_FEED is provided');
+            require(ethUsdHb != 0, "ETH_USD_HEARTBEAT must be set when ETH_USD_FEED is provided");
             cm.setEthUsdFeed(ethUsdFeed, ethUsdHb);
         }
 
@@ -131,38 +119,40 @@ contract DeployAll is Script {
         vm.stopBroadcast();
 
         // ---- 9. Summary --------------------------------------------------
-        console2.log('CommissionManager deployed at:  ', address(cm));
-        console2.log('RouteRegistry deployed at:      ', address(routeRegistry));
-        console2.log('Bridge deployed at:             ', address(bridge));
-        console2.log('RGBVerifier deployed at:        ', address(rgbVerifier));
-        console2.log('RgbSettlementModule deployed at:', address(rgbModule));
-        console2.log('MultisigProxy deployed at:      ', address(proxy));
+        console2.log("CommissionManager deployed at:  ", address(cm));
+        console2.log("RouteRegistry deployed at:      ", address(routeRegistry));
+        console2.log("Bridge deployed at:             ", address(bridge));
+        console2.log("RGBVerifier deployed at:        ", address(rgbVerifier));
+        console2.log("RgbSettlementModule deployed at:", address(rgbModule));
+        console2.log("MultisigProxy deployed at:      ", address(proxy));
         if (ethUsdFeed != address(0)) {
-            console2.log('ETH/USD feed wired:             ', ethUsdFeed);
-            console2.log('ETH/USD heartbeat (s):          ', ethUsdHb);
+            console2.log("ETH/USD feed wired:             ", ethUsdFeed);
+            console2.log("ETH/USD heartbeat (s):          ", ethUsdHb);
         } else {
-            console2.log('ETH/USD feed:                   ', 'UNSET (NATIVE quotes will revert until governance wires one)');
+            console2.log(
+                "ETH/USD feed:                   ", "UNSET (NATIVE quotes will revert until governance wires one)"
+            );
         }
 
         // ---- 10. Invariant checks ---------------------------------------
-        require(address(bridge) == predictedBridge,         'Bridge address prediction mismatch');
-        require(routeRegistry.bridge() == address(bridge),  'RouteRegistry.bridge mismatch');
-        require(rgbModule.routeRegistry() == address(routeRegistry), 'RgbSettlementModule.routeRegistry mismatch');
-        require(bridge.routeRegistry() == address(routeRegistry),    'Bridge.routeRegistry mismatch');
-        require(cm.bridgeAddress() == address(bridge),      'CM.bridgeAddress mismatch');
-        require(bridge.owner() == address(proxy),           'Bridge ownership transfer failed');
-        require(cm.owner()     == address(proxy),           'CM ownership transfer failed');
-        require(routeRegistry.owner() == address(proxy),    'RouteRegistry ownership transfer failed');
+        require(address(bridge) == predictedBridge, "Bridge address prediction mismatch");
+        require(routeRegistry.bridge() == address(bridge), "RouteRegistry.bridge mismatch");
+        require(rgbModule.routeRegistry() == address(routeRegistry), "RgbSettlementModule.routeRegistry mismatch");
+        require(bridge.routeRegistry() == address(routeRegistry), "Bridge.routeRegistry mismatch");
+        require(cm.bridgeAddress() == address(bridge), "CM.bridgeAddress mismatch");
+        require(bridge.owner() == address(proxy), "Bridge ownership transfer failed");
+        require(cm.owner() == address(proxy), "CM ownership transfer failed");
+        require(routeRegistry.owner() == address(proxy), "RouteRegistry ownership transfer failed");
         if (ethUsdFeed != address(0)) {
-            require(cm.ethUsdFeed() == ethUsdFeed,          'CM.ethUsdFeed mismatch');
-            require(cm.ethUsdHeartbeat() == ethUsdHb,       'CM.ethUsdHeartbeat mismatch');
+            require(cm.ethUsdFeed() == ethUsdFeed, "CM.ethUsdFeed mismatch");
+            require(cm.ethUsdHeartbeat() == ethUsdHb, "CM.ethUsdHeartbeat mismatch");
         }
 
         // ---- 11. Post-deploy reminder -----------------------------------
-        console2.log('');
-        console2.log('Next step: federation must register routes via');
-        console2.log('  MultisigProxy.proposeSetRoute(src, dst, true, verifier, module)');
-        console2.log('for each supported (sourceChainId, destChainId) pair');
-        console2.log('before any fundsIn / fundsOut traffic is accepted.');
+        console2.log("");
+        console2.log("Next step: federation must register routes via");
+        console2.log("  MultisigProxy.proposeSetRoute(src, dst, true, verifier, module)");
+        console2.log("for each supported (sourceChainId, destChainId) pair");
+        console2.log("before any fundsIn / fundsOut traffic is accepted.");
     }
 }

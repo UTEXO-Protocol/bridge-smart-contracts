@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Script, console2 } from 'forge-std/Script.sol';
-import { CommissionManager } from '../../src/CommissionManager.sol';
+import {Script, console2} from "forge-std/Script.sol";
+import {CommissionManager} from "../../src/CommissionManager.sol";
 
 /// @title DeployCommissionManager
 /// @notice Deploys CommissionManager for an already-known Bridge address.
@@ -27,27 +27,27 @@ import { CommissionManager } from '../../src/CommissionManager.sol';
 ///     --rpc-url $RPC_URL --broadcast --verify
 contract DeployCommissionManager is Script {
     function run() external returns (CommissionManager cm) {
-        uint256 pk            = vm.envUint('PRIVATE_KEY');
-        address bridgeAddress = vm.envAddress('BRIDGE_ADDRESS');
-        address ethUsdFeed    = vm.envOr('ETH_USD_FEED', address(0));
-        uint256 ethUsdHb      = vm.envOr('ETH_USD_HEARTBEAT', uint256(0));
+        uint256 pk = vm.envUint("PRIVATE_KEY");
+        address bridgeAddress = vm.envAddress("BRIDGE_ADDRESS");
+        address ethUsdFeed = vm.envOr("ETH_USD_FEED", address(0));
+        uint256 ethUsdHb = vm.envOr("ETH_USD_HEARTBEAT", uint256(0));
 
         vm.startBroadcast(pk);
         cm = new CommissionManager(bridgeAddress);
         if (ethUsdFeed != address(0)) {
-            require(ethUsdHb != 0, 'ETH_USD_HEARTBEAT must be set when ETH_USD_FEED is provided');
+            require(ethUsdHb != 0, "ETH_USD_HEARTBEAT must be set when ETH_USD_FEED is provided");
             cm.setEthUsdFeed(ethUsdFeed, ethUsdHb);
         }
         vm.stopBroadcast();
 
-        console2.log('CommissionManager deployed at:', address(cm));
-        console2.log('Bridge address:               ', cm.bridgeAddress());
-        console2.log('Owner (deployer):             ', cm.owner());
+        console2.log("CommissionManager deployed at:", address(cm));
+        console2.log("Bridge address:               ", cm.bridgeAddress());
+        console2.log("Owner (deployer):             ", cm.owner());
         if (ethUsdFeed != address(0)) {
-            console2.log('ETH/USD feed wired:           ', ethUsdFeed);
-            console2.log('ETH/USD heartbeat (s):        ', ethUsdHb);
+            console2.log("ETH/USD feed wired:           ", ethUsdFeed);
+            console2.log("ETH/USD heartbeat (s):        ", ethUsdHb);
         } else {
-            console2.log('ETH/USD feed:                 ', 'UNSET (NATIVE quotes will revert until configured)');
+            console2.log("ETH/USD feed:                 ", "UNSET (NATIVE quotes will revert until configured)");
         }
     }
 }

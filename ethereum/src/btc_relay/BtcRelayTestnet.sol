@@ -2,7 +2,11 @@
 pragma solidity 0.8.35;
 
 import {ForkImpl, Fork} from "./state/Fork.sol";
-import {StoredBlockHeaderImpl, StoredBlockHeader, StoredBlockHeaderByteLength} from "./structs/StoredBlockHeaderTestnet.sol";
+import {
+    StoredBlockHeaderImpl,
+    StoredBlockHeader,
+    StoredBlockHeaderByteLength
+} from "./structs/StoredBlockHeaderTestnet.sol";
 import {CompactBlockHeaderByteLength} from "./structs/CompactBlockHeader.sol";
 import {BtcRelayState, BtcRelayStateImpl} from "./state/BtcRelayState.sol";
 import {Events} from "./Events.sol";
@@ -23,7 +27,6 @@ interface IBtcRelayView {
 }
 
 contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
-
     using StoredBlockHeaderImpl for StoredBlockHeader;
     using ForkImpl for Fork;
     using BtcRelayStateImpl for BtcRelayState;
@@ -47,23 +50,26 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
         bytes32 commitHash = storedHeader.hash();
         uint32 blockHeight = storedHeader.blockHeight();
         _mainChain[blockHeight] = commitHash;
-        _relayState.write(blockHeight, uint224(storedHeader.chainWork() & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff));
+        _relayState.write(
+            blockHeight, uint224(storedHeader.chainWork() & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
+        );
 
         //Emit event
         emit Events.StoreHeader(commitHash, storedHeader.header_blockhash());
     }
 
     //Internal functions
-    function _verifyBlockheaderHash(uint256 height, bytes32 commitmentHash) internal view returns (uint256 confirmations) {
+    function _verifyBlockheaderHash(uint256 height, bytes32 commitmentHash)
+        internal
+        view
+        returns (uint256 confirmations)
+    {
         uint256 mainBlockheight = _relayState.blockHeight;
         //Check that the block height isn't past the tip, this can happen if there is a reorg, where a shorter
         // chain becomes the cannonical one, this can happen due to the heaviest work rule (and not lonest chain rule)
-        require(height <= mainBlockheight, 'verify: future block');
+        require(height <= mainBlockheight, "verify: future block");
 
-        require(
-            _mainChain[height] == commitmentHash,
-            'verify: block commitment'
-        );
+        require(_mainChain[height] == commitmentHash, "verify: block commitment");
 
         confirmations = mainBlockheight - height + 1;
     }
@@ -73,14 +79,14 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
         require(data.length >= StoredBlockHeaderByteLength + CompactBlockHeaderByteLength, "submitMain: no headers");
 
         StoredBlockHeader memory storedHeader = StoredBlockHeaderImpl.fromCalldata(data, 0); //160-byte previous blockheader
-        
+
         //Verify stored header is latest committed
         uint32 blockHeight = _relayState.blockHeight;
         require(blockHeight == storedHeader.blockHeight(), "submitMain: block height");
         require(_mainChain[blockHeight] == storedHeader.hash(), "submitMain: block commitment");
 
         //Proccess new block headers, start at offset 160 and read 48-byte blockheaders
-        for(uint256 i = StoredBlockHeaderByteLength; i < data.length; i += CompactBlockHeaderByteLength) {
+        for (uint256 i = StoredBlockHeaderByteLength; i < data.length; i += CompactBlockHeaderByteLength) {
             //Process the blockheader
             bytes32 blockHash = storedHeader.updateChain(data, i, block.timestamp);
             blockHeight = storedHeader.blockHeight();
@@ -94,10 +100,11 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
         }
 
         //Update globals
-        _relayState.write(blockHeight, uint224(storedHeader.chainWork() & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff));
+        _relayState.write(
+            blockHeight, uint224(storedHeader.chainWork() & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
+        );
     }
 
-    
     function submitShortForkBlockheaders(bytes calldata data) external {
         require(data.length >= StoredBlockHeaderByteLength + CompactBlockHeaderByteLength, "submitMain: no headers");
 
@@ -114,7 +121,7 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
         //Proccess new block headers
         bytes32 commitHash;
         bytes32 blockHash;
-        for(uint256 i = StoredBlockHeaderByteLength; i < data.length; i += CompactBlockHeaderByteLength) {
+        for (uint256 i = StoredBlockHeaderByteLength; i < data.length; i += CompactBlockHeaderByteLength) {
             //Process the blockheader
             blockHash = storedHeader.updateChain(data, i, block.timestamp);
             blockHeight = storedHeader.blockHeight();
@@ -129,13 +136,15 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
 
         //Check if this fork's chainwork is higher than main chainwork
         uint256 newChainWork = storedHeader.chainWork();
-        require(newChainWork > chainWork, 'shortFork: not enough work');
+        require(newChainWork > chainWork, "shortFork: not enough work");
 
         //Emit chain re-org event
         emit Events.ChainReorg(commitHash, blockHash, 0, msg.sender, startHeight);
 
         //Update globals
-        _relayState.write(blockHeight, uint224(newChainWork & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff));
+        _relayState.write(
+            blockHeight, uint224(newChainWork & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
+        );
     }
 
     function submitForkBlockheaders(uint256 forkId, bytes calldata data) external {
@@ -148,7 +157,7 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
         (uint32 tipBlockHeight, uint256 chainWork) = _relayState.read();
         bytes32 commitHash = storedHeader.hash();
         uint256 forkStartBlockheight = fork.startHeight;
-        if(forkStartBlockheight==0) {
+        if (forkStartBlockheight == 0) {
             //Verify stored header is committed in the main chain
             uint256 storedHeaderBlockHeight = storedHeader.blockHeight();
             require(storedHeaderBlockHeight <= tipBlockHeight, "fork: future block");
@@ -168,7 +177,7 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
         bytes32 blockHash;
         uint32 forkTipBlockHeight;
         mapping(uint256 => bytes32) storage forkChain = fork.chain;
-        for(uint256 i = StoredBlockHeaderByteLength; i < data.length; i += CompactBlockHeaderByteLength) {
+        for (uint256 i = StoredBlockHeaderByteLength; i < data.length; i += CompactBlockHeaderByteLength) {
             //Process the blockheader
             blockHash = storedHeader.updateChain(data, i, block.timestamp);
             forkTipBlockHeight = storedHeader.blockHeight();
@@ -183,31 +192,33 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
 
         //Update tip height of the fork
         fork.tipHeight = forkTipBlockHeight;
-        
+
         //Check if this fork's chainwork is higher than main chainwork
         uint256 newChainWork = storedHeader.chainWork();
-        if(chainWork < newChainWork) {
+        if (chainWork < newChainWork) {
             //This fork has just overtaken the main chain in chainwork
             //Make this fork main chain
-            uint256 blockHeight = forkStartBlockheight-1;
-            
+            uint256 blockHeight = forkStartBlockheight - 1;
+
             //Make sure that the fork's root block is still committed
             require(_mainChain[blockHeight] == forkChain[blockHeight], "fork: reorg block commitment");
             delete forkChain[blockHeight];
 
             blockHeight++;
 
-            for(; blockHeight <= forkTipBlockHeight; blockHeight++) {
+            for (; blockHeight <= forkTipBlockHeight; blockHeight++) {
                 _mainChain[blockHeight] = forkChain[blockHeight];
                 delete forkChain[blockHeight];
             }
             fork.remove();
-            
+
             //Emit chain re-org event
             emit Events.ChainReorg(commitHash, blockHash, forkId, msg.sender, forkStartBlockheight);
 
             //Update globals
-            _relayState.write(forkTipBlockHeight, uint224(newChainWork & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff));
+            _relayState.write(
+                forkTipBlockHeight, uint224(newChainWork & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
+            );
         }
     }
 
@@ -219,12 +230,16 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
     function getBlockheight() external view returns (uint32 blockheight) {
         return _relayState.blockHeight;
     }
-    
+
     function verifyBlockheader(StoredBlockHeader memory storedHeader) external view returns (uint256 confirmations) {
         return _verifyBlockheaderHash(storedHeader.blockHeight(), storedHeader.hash());
     }
 
-    function verifyBlockheaderHash(uint256 height, bytes32 commitmentHash) external view returns (uint256 confirmations) {
+    function verifyBlockheaderHash(uint256 height, bytes32 commitmentHash)
+        external
+        view
+        returns (uint256 confirmations)
+    {
         return _verifyBlockheaderHash(height, commitmentHash);
     }
 
@@ -235,5 +250,4 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
     function getTipCommitHash() external view returns (bytes32) {
         return _mainChain[_relayState.blockHeight];
     }
-
 }

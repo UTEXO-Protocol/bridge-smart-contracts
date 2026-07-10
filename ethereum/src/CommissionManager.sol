@@ -119,19 +119,10 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
      * @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_IN`. NATIVE path uses
      *      `convertTokenFeeToNative` (Chainlink ETH/USD) and `IERC20Metadata(token).decimals()`.
      */
-    function calculateFundsInCommission(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token,
-        uint256 amount
-    )
+    function calculateFundsInCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
         external
         view
-        returns (
-            uint256 tokenCommission,
-            uint256 nativeCommission,
-            uint256 netAmount
-        )
+        returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)
     {
         bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
         CommissionConfig memory config = getEffectiveConfig(ruleKey);
@@ -155,10 +146,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             if (stableFee == 0) {
                 nativeCommission = 0;
             } else {
-                nativeCommission = convertTokenFeeToNative(
-                    stableFee,
-                    _tokenDecimals(token)
-                );
+                nativeCommission = convertTokenFeeToNative(stableFee, _tokenDecimals(token));
             }
             netAmount = amount; // Full amount bridges
         }
@@ -177,19 +165,10 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
      * @return netAmount User receives `amount - tokenCommission` for `TOKEN`; `amount` for `NATIVE` (fee separate).
      * @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_OUT`. See `calculateFundsInCommission` for rates/decimals.
      */
-    function calculateFundsOutCommission(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token,
-        uint256 amount
-    )
+    function calculateFundsOutCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
         external
         view
-        returns (
-            uint256 tokenCommission,
-            uint256 nativeCommission,
-            uint256 netAmount
-        )
+        returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)
     {
         bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
         CommissionConfig memory config = getEffectiveConfig(ruleKey);
@@ -212,10 +191,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             if (stableFee == 0) {
                 nativeCommission = 0;
             } else {
-                nativeCommission = convertTokenFeeToNative(
-                    stableFee,
-                    _tokenDecimals(token)
-                );
+                nativeCommission = convertTokenFeeToNative(stableFee, _tokenDecimals(token));
             }
             netAmount = amount;
         }
@@ -228,11 +204,11 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
      * @param multiplier Typically 100.
      * @return Fee in token smallest units.
      */
-    function calculateStableFee(
-        uint256 amount,
-        uint256 stablePercent,
-        uint256 multiplier
-    ) public pure returns (uint256) {
+    function calculateStableFee(uint256 amount, uint256 stablePercent, uint256 multiplier)
+        public
+        pure
+        returns (uint256)
+    {
         return (amount * stablePercent) / multiplier / multiplier;
     }
 
@@ -243,10 +219,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     ///         price     = ETH/USD scaled by 10^feedDecimals
     ///         nativeFee = (tokenFee_usd / price_usd_per_eth) * 10^18
     ///                   = tokenFee * 10^(18 - tokenDecimals + feedDecimals) / price
-    function convertTokenFeeToNative(
-        uint256 tokenFee,
-        uint256 tokenDecimals
-    ) public view returns (uint256 nativeFee) {
+    function convertTokenFeeToNative(uint256 tokenFee, uint256 tokenDecimals) public view returns (uint256 nativeFee) {
         if (tokenFee == 0) return 0;
         if (tokenDecimals > 18) revert TokenDecimalsTooLarge();
 
@@ -254,7 +227,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (feedAddr == address(0)) revert EthUsdFeedNotSet();
         AggregatorV3Interface feed = AggregatorV3Interface(feedAddr);
 
-        (, int256 answer, , uint256 updatedAt, ) = feed.latestRoundData();
+        (, int256 answer,, uint256 updatedAt,) = feed.latestRoundData();
         if (answer <= 0) revert InvalidPrice();
         if (block.timestamp - updatedAt > ethUsdHeartbeat) revert StalePrice();
 
@@ -383,11 +356,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
      * @param destChainId Route destination id.
      * @param token ERC-20 token (non-zero).
      */
-    function clearCommissionRule(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token
-    ) external onlyOwner {
+    function clearCommissionRule(uint256 sourceChainId, uint256 destChainId, address token) external onlyOwner {
         if (token == address(0)) revert InvalidToken();
         bytes32 key = buildRouteKey(sourceChainId, destChainId, token);
         delete commissionRules[key];
@@ -411,9 +380,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
      * @param ruleKey `buildRouteKey` output.
      * @return config Effective parameters for calculators.
      */
-    function getEffectiveConfig(
-        bytes32 ruleKey
-    ) internal view returns (CommissionConfig memory) {
+    function getEffectiveConfig(bytes32 ruleKey) internal view returns (CommissionConfig memory) {
         CommissionConfig memory config = commissionRules[ruleKey];
 
         if (config.isSet) {
@@ -421,14 +388,13 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         }
 
         // Fall back to global defaults
-        return
-            CommissionConfig({
-                stablePercent: globalStablePercent,
-                multiplier: globalMultiplier,
-                side: globalSide,
-                currency: globalCurrency,
-                isSet: true
-            });
+        return CommissionConfig({
+            stablePercent: globalStablePercent,
+            multiplier: globalMultiplier,
+            side: globalSide,
+            currency: globalCurrency,
+            isSet: true
+        });
     }
 
     /**
@@ -441,19 +407,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     function getGlobalDefaults()
         external
         view
-        returns (
-            uint256 stablePercent,
-            uint8 multiplier,
-            CommissionSide side,
-            CommissionCurrency currency
-        )
+        returns (uint256 stablePercent, uint8 multiplier, CommissionSide side, CommissionCurrency currency)
     {
-        return (
-            globalStablePercent,
-            globalMultiplier,
-            globalSide,
-            globalCurrency
-        );
+        return (globalStablePercent, globalMultiplier, globalSide, globalCurrency);
     }
 
     /**
@@ -463,11 +419,11 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
      * @param token ERC-20 token.
      * @return config Stored override or empty struct if never set.
      */
-    function getCommissionRule(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token
-    ) external view returns (CommissionConfig memory) {
+    function getCommissionRule(uint256 sourceChainId, uint256 destChainId, address token)
+        external
+        view
+        returns (CommissionConfig memory)
+    {
         bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
         return commissionRules[ruleKey];
     }
@@ -479,11 +435,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
      * @param token ERC-20 token address.
      * @return key `keccak256(abi.encode(sourceChainId, destChainId, token))`.
      */
-    function buildRouteKey(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token
-    ) public pure returns (bytes32) {
+    function buildRouteKey(uint256 sourceChainId, uint256 destChainId, address token) public pure returns (bytes32) {
         return keccak256(abi.encode(sourceChainId, destChainId, token));
     }
 
@@ -524,11 +476,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
      * @param amount Amount to send (≤ pool).
      * @dev `nonReentrant`; updates pool before `safeTransfer`.
      */
-    function withdrawTokenCommission(
-        address token,
-        address to,
-        uint256 amount
-    ) external onlyOwner nonReentrant {
+    function withdrawTokenCommission(address token, address to, uint256 amount) external onlyOwner nonReentrant {
         if (token == address(0)) revert InvalidToken();
         if (to == address(0)) revert InvalidRecipient();
         if (tokenCommissionPool[token] < amount) revert InsufficientBalance();
@@ -545,15 +493,12 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
      * @param amount Wei to send (≤ pool).
      * @dev `nonReentrant`; updates pool before native transfer.
      */
-    function withdrawNativeCommission(
-        address payable to,
-        uint256 amount
-    ) external onlyOwner nonReentrant {
+    function withdrawNativeCommission(address payable to, uint256 amount) external onlyOwner nonReentrant {
         if (to == address(0)) revert InvalidRecipient();
         if (nativeCommissionPool < amount) revert InsufficientBalance();
 
         nativeCommissionPool -= amount;
-        (bool success, ) = to.call{value: amount}("");
+        (bool success,) = to.call{value: amount}("");
         if (!success) revert NativeTransferFailed();
 
         emit NativeCommissionWithdrawn(to, amount);
@@ -588,7 +533,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (balance == 0) revert NoBalance();
 
         nativeCommissionPool = 0;
-        (bool success, ) = to.call{value: balance}("");
+        (bool success,) = to.call{value: balance}("");
         if (!success) revert NativeTransferFailed();
 
         emit NativeCommissionWithdrawn(to, balance);

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { IFinalityVerifier }  from '../interfaces/IFinalityVerifier.sol';
-import { FundsOutContext }    from '../interfaces/RouteTypes.sol';
+import {IFinalityVerifier} from "../interfaces/IFinalityVerifier.sol";
+import {FundsOutContext} from "../interfaces/RouteTypes.sol";
 
 /// @title NullVerifier
 /// @notice Explicit "no source-side proof required" `IFinalityVerifier`.

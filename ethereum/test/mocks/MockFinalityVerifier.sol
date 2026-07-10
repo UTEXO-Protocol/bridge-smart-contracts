@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { IFinalityVerifier } from '../../src/interfaces/IFinalityVerifier.sol';
-import { FundsOutContext }   from '../../src/interfaces/RouteTypes.sol';
+import {IFinalityVerifier} from "../../src/interfaces/IFinalityVerifier.sol";
+import {FundsOutContext} from "../../src/interfaces/RouteTypes.sol";
 
 /// @title MockFinalityVerifier
 /// @notice Test stub for `IFinalityVerifier`. The `verify` function is

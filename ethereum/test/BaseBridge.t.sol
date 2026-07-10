@@ -1,37 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Test } from 'forge-std/Test.sol';
-import { BaseBridge } from '../src/BaseBridge.sol';
-import { BridgeBase } from '../src/BridgeBase.sol';
-import { MockERC20 } from './mocks/MockERC20.sol';
-import { Ownable }   from '@openzeppelin/contracts/access/Ownable.sol';
-import { Pausable }  from '@openzeppelin/contracts/utils/Pausable.sol';
+import {Test} from "forge-std/Test.sol";
+import {BaseBridge} from "../src/BaseBridge.sol";
+import {BridgeBase} from "../src/BridgeBase.sol";
+import {MockERC20} from "./mocks/MockERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract BaseBridgeTest is Test {
     // Events re-declared locally for vm.expectEmit
     event FundsIn(address indexed sender, uint256 indexed operationId, uint256 amount);
-    event FundsOut(
-        address indexed recipient,
-        uint256 amount,
-        uint256 indexed operationId,
-        string  sourceAddress
-    );
+    event FundsOut(address indexed recipient, uint256 amount, uint256 indexed operationId, string sourceAddress);
 
     BaseBridge bridge;
-    MockERC20  token;
+    MockERC20 token;
 
-    address deployer  = makeAddr('deployer');
-    address user      = makeAddr('user');
-    address recipient = makeAddr('recipient');
-    address owner     = makeAddr('owner');
+    address deployer = makeAddr("deployer");
+    address user = makeAddr("user");
+    address recipient = makeAddr("recipient");
+    address owner = makeAddr("owner");
 
-    string  constant SRC_ADDR     = 'rgb:sender/utxo1src';
-    uint256 constant AMOUNT       = 100e18;
+    string constant SRC_ADDR = "rgb:sender/utxo1src";
+    uint256 constant AMOUNT = 100e18;
     uint256 constant OPERATION_ID = 42;
 
     function setUp() public {
-        token = new MockERC20('Mock Token', 'MOCK');
+        token = new MockERC20("Mock Token", "MOCK");
 
         vm.prank(deployer);
         bridge = new BaseBridge(address(token));
@@ -74,7 +69,7 @@ contract BaseBridgeTest is Test {
         bridge.fundsIn(AMOUNT, OPERATION_ID);
 
         assertEq(token.balanceOf(address(bridge)), AMOUNT);
-        assertEq(token.balanceOf(user),            userBefore - AMOUNT);
+        assertEq(token.balanceOf(user), userBefore - AMOUNT);
     }
 
     function test_fundsIn_emitsFundsIn() public {
@@ -86,7 +81,7 @@ contract BaseBridgeTest is Test {
     }
 
     function test_fundsIn_anyUserCanCall() public {
-        address stranger = makeAddr('stranger');
+        address stranger = makeAddr("stranger");
         token.mint(stranger, AMOUNT);
         vm.prank(stranger);
         token.approve(address(bridge), AMOUNT);
@@ -120,7 +115,7 @@ contract BaseBridgeTest is Test {
         vm.prank(owner);
         bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
 
-        assertEq(token.balanceOf(recipient),       AMOUNT);
+        assertEq(token.balanceOf(recipient), AMOUNT);
         assertEq(token.balanceOf(address(bridge)), 0);
     }
 
@@ -236,8 +231,8 @@ contract BaseBridgeTest is Test {
         vm.prank(owner);
         bridge.emergencyPauseAll();
 
-        assertTrue(bridge.paused(),        'inflow frozen');
-        assertTrue(bridge.outflowPaused(), 'outflow frozen');
+        assertTrue(bridge.paused(), "inflow frozen");
+        assertTrue(bridge.outflowPaused(), "outflow frozen");
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
@@ -255,8 +250,8 @@ contract BaseBridgeTest is Test {
         bridge.emergencyUnpauseAll();
         vm.stopPrank();
 
-        assertFalse(bridge.paused(),        'inflow resumed');
-        assertFalse(bridge.outflowPaused(), 'outflow resumed');
+        assertFalse(bridge.paused(), "inflow resumed");
+        assertFalse(bridge.outflowPaused(), "outflow resumed");
 
         vm.prank(user);
         bridge.fundsIn(AMOUNT, OPERATION_ID);
@@ -267,12 +262,12 @@ contract BaseBridgeTest is Test {
     ///      if inflow is already frozen via the planned path.
     function test_emergencyPauseAll_idempotentWhenInflowAlreadyPaused() public {
         vm.startPrank(owner);
-        bridge.pauseInflow();      // inflow already frozen
+        bridge.pauseInflow(); // inflow already frozen
         bridge.emergencyPauseAll(); // must not revert on the already-set inflow flag
         vm.stopPrank();
 
-        assertTrue(bridge.paused(),        'inflow still frozen');
-        assertTrue(bridge.outflowPaused(), 'outflow now frozen');
+        assertTrue(bridge.paused(), "inflow still frozen");
+        assertTrue(bridge.outflowPaused(), "outflow now frozen");
     }
 
     function test_pauseInflow_onlyOwner() public {
@@ -340,7 +335,7 @@ contract BaseBridgeTest is Test {
         vm.prank(owner);
         bridge.fundsOut(recipient, releaseAmount, OPERATION_ID, SRC_ADDR);
 
-        assertEq(token.balanceOf(recipient),       uint256(releaseAmount));
+        assertEq(token.balanceOf(recipient), uint256(releaseAmount));
         assertEq(token.balanceOf(address(bridge)), uint256(lockAmount) - uint256(releaseAmount));
     }
 }

@@ -69,35 +69,21 @@ interface ICommissionManager {
     event BridgeAddressUpdated(address indexed newBridge);
 
     event GlobalDefaultsUpdated(
-        uint256 stablePercent,
-        uint8 multiplier,
-        CommissionSide side,
-        CommissionCurrency currency
+        uint256 stablePercent, uint8 multiplier, CommissionSide side, CommissionCurrency currency
     );
 
     event CommissionRuleUpdated(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address indexed token,
-        CommissionConfig config
+        uint256 sourceChainId, uint256 destChainId, address indexed token, CommissionConfig config
     );
 
-    event CommissionRuleCleared(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address indexed token
-    );
+    event CommissionRuleCleared(uint256 sourceChainId, uint256 destChainId, address indexed token);
 
     event TokenCommissionReceived(address indexed token, uint256 amount);
     event NativeCommissionReceived(uint256 amount);
 
     event EthUsdFeedUpdated(address indexed feed, uint256 heartbeat);
 
-    event TokenCommissionWithdrawn(
-        address indexed token,
-        address indexed to,
-        uint256 amount
-    );
+    event TokenCommissionWithdrawn(address indexed token, address indexed to, uint256 amount);
     event NativeCommissionWithdrawn(address indexed to, uint256 amount);
 
     // ============ State getters ============
@@ -122,41 +108,27 @@ interface ICommissionManager {
 
     // ============ Core calculations ============
 
-    function calculateFundsInCommission(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token,
-        uint256 amount
-    )
+    function calculateFundsInCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
         external
         view
         returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount);
 
-    function calculateFundsOutCommission(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token,
-        uint256 amount
-    )
+    function calculateFundsOutCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
         external
         view
         returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount);
 
-    function calculateStableFee(
-        uint256 amount,
-        uint256 stablePercent,
-        uint256 multiplier
-    ) external pure returns (uint256);
+    function calculateStableFee(uint256 amount, uint256 stablePercent, uint256 multiplier)
+        external
+        pure
+        returns (uint256);
 
     /// @notice Convert a USD-denominated token fee (stablecoin, 1 token ≈ $1) to
     ///         native wei using the configured ETH/USD Chainlink feed. Reverts
     ///         `EthUsdFeedNotSet` when the feed is unconfigured, `InvalidPrice`
     ///         on non-positive answers, and `StalePrice` when `updatedAt` is
     ///         older than the configured heartbeat.
-    function convertTokenFeeToNative(
-        uint256 tokenFee,
-        uint256 tokenDecimals
-    ) external view returns (uint256 nativeFee);
+    function convertTokenFeeToNative(uint256 tokenFee, uint256 tokenDecimals) external view returns (uint256 nativeFee);
 
     // ============ Admin / config ============
 
@@ -182,35 +154,21 @@ interface ICommissionManager {
         CommissionConfig calldata config
     ) external;
 
-    function clearCommissionRule(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token
-    ) external;
+    function clearCommissionRule(uint256 sourceChainId, uint256 destChainId, address token) external;
 
     function setBridgeAddress(address newBridge) external;
 
     function getGlobalDefaults()
         external
         view
-        returns (
-            uint256 stablePercent,
-            uint8 multiplier,
-            CommissionSide side,
-            CommissionCurrency currency
-        );
+        returns (uint256 stablePercent, uint8 multiplier, CommissionSide side, CommissionCurrency currency);
 
-    function getCommissionRule(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token
-    ) external view returns (CommissionConfig memory);
+    function getCommissionRule(uint256 sourceChainId, uint256 destChainId, address token)
+        external
+        view
+        returns (CommissionConfig memory);
 
-    function buildRouteKey(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token
-    ) external pure returns (bytes32);
+    function buildRouteKey(uint256 sourceChainId, uint256 destChainId, address token) external pure returns (bytes32);
 
     // ============ Commission ingress (bridge) ============
 
@@ -221,11 +179,7 @@ interface ICommissionManager {
 
     // ============ Withdrawals (owner) ============
 
-    function withdrawTokenCommission(
-        address token,
-        address to,
-        uint256 amount
-    ) external;
+    function withdrawTokenCommission(address token, address to, uint256 amount) external;
 
     function withdrawNativeCommission(address payable to, uint256 amount) external;
 

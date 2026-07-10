@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { Test }                       from 'forge-std/Test.sol';
-import { Vm }                         from 'forge-std/Vm.sol';
-import { OutflowRateLimiter }         from '../src/libraries/OutflowRateLimiter.sol';
-import { OutflowRateLimiterHarness }  from './mocks/OutflowRateLimiterHarness.sol';
+import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
+import {OutflowRateLimiter} from "../src/libraries/OutflowRateLimiter.sol";
+import {OutflowRateLimiterHarness} from "./mocks/OutflowRateLimiterHarness.sol";
 
 /// @title OutflowRateLimiterTest
 /// @notice Standalone unit tests for the `OutflowRateLimiter` token-bucket
@@ -17,10 +17,10 @@ import { OutflowRateLimiterHarness }  from './mocks/OutflowRateLimiterHarness.so
 contract OutflowRateLimiterTest is Test {
     OutflowRateLimiterHarness harness;
 
-    address constant TOKEN     = address(0xBEEF);
+    address constant TOKEN = address(0xBEEF);
     address constant AGGREGATE = address(0); // sentinel selecting aggregate-scope errors
 
-    uint128 constant CAP  = 1_000;
+    uint128 constant CAP = 1_000;
     uint128 constant RATE = 10;
 
     function setUp() public {
@@ -33,16 +33,12 @@ contract OutflowRateLimiterTest is Test {
     // helpers
     // -------------------------------------------------------------------------
 
-    function _enabled(uint128 capacity, uint128 rate)
-        internal
-        pure
-        returns (OutflowRateLimiter.Settings memory)
-    {
-        return OutflowRateLimiter.Settings({ isEnabled: true, capacity: capacity, rate: rate });
+    function _enabled(uint128 capacity, uint128 rate) internal pure returns (OutflowRateLimiter.Settings memory) {
+        return OutflowRateLimiter.Settings({isEnabled: true, capacity: capacity, rate: rate});
     }
 
     function _disabled() internal pure returns (OutflowRateLimiter.Settings memory) {
-        return OutflowRateLimiter.Settings({ isEnabled: false, capacity: 0, rate: 0 });
+        return OutflowRateLimiter.Settings({isEnabled: false, capacity: 0, rate: 0});
     }
 
     function _prime(uint128 capacity, uint128 rate) internal {
@@ -81,8 +77,7 @@ contract OutflowRateLimiterTest is Test {
 
     /// @dev Covers `DisabledLimitHasValues`: disabled flag but non-zero fields.
     function test_validate_disabled_withValues_reverts() public {
-        OutflowRateLimiter.Settings memory s =
-            OutflowRateLimiter.Settings({ isEnabled: false, capacity: 5, rate: 0 });
+        OutflowRateLimiter.Settings memory s = OutflowRateLimiter.Settings({isEnabled: false, capacity: 5, rate: 0});
         vm.expectRevert(abi.encodeWithSelector(OutflowRateLimiter.DisabledLimitHasValues.selector, s));
         harness.validate(s, false);
     }
@@ -103,7 +98,7 @@ contract OutflowRateLimiterTest is Test {
 
     function test_configurePrimed_firstEnable_fillsToCapacity() public {
         _prime(CAP, RATE);
-        assertEq(harness.read().tokens, CAP, 'first enable should fill to capacity');
+        assertEq(harness.read().tokens, CAP, "first enable should fill to capacity");
         assertTrue(harness.read().isEnabled);
     }
 
@@ -112,7 +107,7 @@ contract OutflowRateLimiterTest is Test {
         _prime(CAP, RATE);
         harness.spend(400, TOKEN); // tokens -> 600
         harness.configurePrimed(_enabled(CAP, RATE)); // already enabled -> no refill
-        assertEq(harness.read().tokens, 600, 'second prime must carry over, not refill');
+        assertEq(harness.read().tokens, 600, "second prime must carry over, not refill");
     }
 
     /// @dev Lowering capacity clamps carried allowance (covers the `_min` clamp).
@@ -120,7 +115,7 @@ contract OutflowRateLimiterTest is Test {
         _prime(CAP, RATE);
         harness.spend(400, TOKEN); // tokens -> 600
         harness.configure(_enabled(500, RATE)); // new cap 500 < carried 600
-        assertEq(harness.read().tokens, 500, 'carried allowance clamped to new capacity');
+        assertEq(harness.read().tokens, 500, "carried allowance clamped to new capacity");
         assertEq(harness.read().capacity, 500);
     }
 
@@ -129,7 +124,7 @@ contract OutflowRateLimiterTest is Test {
         _prime(CAP, RATE);
         harness.spend(400, TOKEN); // tokens -> 600
         harness.configure(_enabled(2_000, RATE)); // new cap 2000 > carried 600
-        assertEq(harness.read().tokens, 600, 'carried allowance preserved below new capacity');
+        assertEq(harness.read().tokens, 600, "carried allowance preserved below new capacity");
         assertEq(harness.read().capacity, 2_000);
     }
 
@@ -158,9 +153,9 @@ contract OutflowRateLimiterTest is Test {
         harness.spend(0, TOKEN);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
-        assertEq(logs.length, 0, 'zero-amount spend must emit nothing');
-        assertEq(harness.read().tokens, CAP, 'tokens unchanged');
-        assertEq(harness.read().lastUpdated, lastUpdatedBefore, 'lastUpdated unchanged');
+        assertEq(logs.length, 0, "zero-amount spend must emit nothing");
+        assertEq(harness.read().tokens, CAP, "tokens unchanged");
+        assertEq(harness.read().lastUpdated, lastUpdatedBefore, "lastUpdated unchanged");
     }
 
     function test_spend_amountAboveCapacity_token_reverts() public {
@@ -174,9 +169,7 @@ contract OutflowRateLimiterTest is Test {
     /// @dev Covers the aggregate-scope (`token == address(0)`) above-capacity arm.
     function test_spend_amountAboveCapacity_aggregate_reverts() public {
         _prime(CAP, RATE);
-        vm.expectRevert(
-            abi.encodeWithSelector(OutflowRateLimiter.AggregateRequestAboveCapacity.selector, CAP, CAP + 1)
-        );
+        vm.expectRevert(abi.encodeWithSelector(OutflowRateLimiter.AggregateRequestAboveCapacity.selector, CAP, CAP + 1));
         harness.spend(CAP + 1, AGGREGATE);
     }
 
@@ -185,9 +178,7 @@ contract OutflowRateLimiterTest is Test {
         harness.spend(400, TOKEN); // available -> 600, same block (no refill)
 
         // request 800 > available 600; retryAfter = ceil((800-600)/10) = 20
-        vm.expectRevert(
-            abi.encodeWithSelector(OutflowRateLimiter.TokenOutflowThrottled.selector, 20, 600, TOKEN)
-        );
+        vm.expectRevert(abi.encodeWithSelector(OutflowRateLimiter.TokenOutflowThrottled.selector, 20, 600, TOKEN));
         harness.spend(800, TOKEN);
     }
 
@@ -195,9 +186,7 @@ contract OutflowRateLimiterTest is Test {
         _prime(CAP, RATE);
         harness.spend(400, AGGREGATE); // available -> 600
 
-        vm.expectRevert(
-            abi.encodeWithSelector(OutflowRateLimiter.AggregateOutflowThrottled.selector, 20, 600)
-        );
+        vm.expectRevert(abi.encodeWithSelector(OutflowRateLimiter.AggregateOutflowThrottled.selector, 20, 600));
         harness.spend(800, AGGREGATE);
     }
 
@@ -212,8 +201,8 @@ contract OutflowRateLimiterTest is Test {
         emit OutflowRateLimiter.AllowanceSpent(400);
         harness.spend(400, TOKEN);
 
-        assertEq(harness.read().tokens, 600, 'debited');
-        assertEq(harness.read().lastUpdated, uint32(block.timestamp), 'timestamp persisted');
+        assertEq(harness.read().tokens, 600, "debited");
+        assertEq(harness.read().lastUpdated, uint32(block.timestamp), "timestamp persisted");
     }
 
     /// @dev Partial refill: available grows by `elapsed * rate` below capacity.
@@ -223,8 +212,8 @@ contract OutflowRateLimiterTest is Test {
         assertEq(harness.read().tokens, 0);
 
         vm.warp(block.timestamp + 50); // +50s -> +500 available (still < capacity)
-        harness.spend(500, TOKEN);     // exactly the refilled amount
-        assertEq(harness.read().tokens, 0, 'spent all refilled allowance');
+        harness.spend(500, TOKEN); // exactly the refilled amount
+        assertEq(harness.read().tokens, 0, "spent all refilled allowance");
     }
 
     /// @dev Refill caps at capacity once enough time elapses.
@@ -233,7 +222,7 @@ contract OutflowRateLimiterTest is Test {
         harness.spend(CAP, TOKEN); // drain to 0
 
         vm.warp(block.timestamp + 10_000); // far beyond full-refill horizon
-        assertEq(harness.currentState().tokens, CAP, 'refill must cap at capacity');
+        assertEq(harness.currentState().tokens, CAP, "refill must cap at capacity");
         harness.spend(CAP, TOKEN); // a full-capacity spend now succeeds
         assertEq(harness.read().tokens, 0);
     }
@@ -252,32 +241,30 @@ contract OutflowRateLimiterTest is Test {
         vm.warp(block.timestamp + 5); // +5s -> +50 available
         OutflowRateLimiter.Bucket memory preview = harness.currentState();
 
-        assertEq(preview.tokens, 650, 'preview reflects accrued refill');
-        assertEq(preview.lastUpdated, uint32(block.timestamp), 'preview stamps now');
+        assertEq(preview.tokens, 650, "preview reflects accrued refill");
+        assertEq(preview.lastUpdated, uint32(block.timestamp), "preview stamps now");
         // storage is untouched by the view call
-        assertEq(harness.read().tokens, 600, 'storage tokens not mutated');
-        assertEq(harness.read().lastUpdated, persistedTs, 'storage timestamp not mutated');
+        assertEq(harness.read().tokens, 600, "storage tokens not mutated");
+        assertEq(harness.read().lastUpdated, persistedTs, "storage timestamp not mutated");
     }
 
     function test_preview_elapsedZero_returnsAvailable() public {
         _prime(CAP, RATE);
         harness.spend(400, TOKEN); // tokens -> 600, same block
-        assertEq(harness.currentState().tokens, 600, 'no elapsed time -> no refill');
+        assertEq(harness.currentState().tokens, 600, "no elapsed time -> no refill");
     }
 
     function test_preview_atCapacity_noRefill() public {
         _prime(CAP, RATE); // full at capacity
         vm.warp(block.timestamp + 100);
-        assertEq(harness.currentState().tokens, CAP, 'already full stays at capacity');
+        assertEq(harness.currentState().tokens, CAP, "already full stays at capacity");
     }
 
     /// @dev Covers `StoredAllowanceAboveCapacity`: a persisted allowance above
     ///      capacity (only constructable via raw setup) must revert on read.
     function test_preview_storedAllowanceAboveCapacity_reverts() public {
         harness.setRaw(2_000, uint32(block.timestamp), true, CAP, RATE); // tokens 2000 > cap 1000
-        vm.expectRevert(
-            abi.encodeWithSelector(OutflowRateLimiter.StoredAllowanceAboveCapacity.selector, 2_000, CAP)
-        );
+        vm.expectRevert(abi.encodeWithSelector(OutflowRateLimiter.StoredAllowanceAboveCapacity.selector, 2_000, CAP));
         harness.currentState();
     }
 
@@ -305,15 +292,15 @@ contract OutflowRateLimiterTest is Test {
     ///      never debits more than was available.
     function testFuzz_spend_withinBounds(uint128 capacity, uint128 rate, uint256 amount) public {
         capacity = uint128(bound(capacity, 2, type(uint128).max));
-        rate     = uint128(bound(rate, 1, capacity - 1)); // satisfy validate(): 0 < rate < capacity
-        amount   = bound(amount, 1, capacity);            // within capacity so it cannot exceed-capacity revert
+        rate = uint128(bound(rate, 1, capacity - 1)); // satisfy validate(): 0 < rate < capacity
+        amount = bound(amount, 1, capacity); // within capacity so it cannot exceed-capacity revert
 
         _prime(capacity, rate); // primed full -> available == capacity >= amount
         harness.spend(amount, TOKEN);
 
         OutflowRateLimiter.Bucket memory b = harness.read();
-        assertLe(b.tokens, capacity, 'tokens never exceed capacity');
-        assertEq(b.tokens, capacity - uint128(amount), 'debit is exact');
+        assertLe(b.tokens, capacity, "tokens never exceed capacity");
+        assertEq(b.tokens, capacity - uint128(amount), "debit is exact");
     }
 
     /// @dev Refill is monotonic in elapsed time and clamps at capacity.
@@ -324,10 +311,10 @@ contract OutflowRateLimiterTest is Test {
         vm.warp(ts + uint256(elapsed));
 
         uint256 available = harness.currentState().tokens;
-        assertLe(available, CAP, 'refill capped at capacity');
+        assertLe(available, CAP, "refill capped at capacity");
         // expected = min(elapsed * rate, capacity)
         uint256 expected = uint256(elapsed) * RATE;
         if (expected > CAP) expected = CAP;
-        assertEq(available, expected, 'refill equals elapsed * rate, capped');
+        assertEq(available, expected, "refill equals elapsed * rate, capped");
     }
 }
