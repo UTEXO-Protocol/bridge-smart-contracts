@@ -406,40 +406,38 @@ contract MultisigProxyTest is Test {
         view
         returns (LzSnapshot memory s)
     {
-        s.teeNonce      = proxy.teeNonce();
-        s.bridgeToken   = token.balanceOf(address(bridge));
-        s.adapterToken  = token.balanceOf(address(adapter));
-        s.oftToken      = token.balanceOf(oft);
-        s.cmToken       = token.balanceOf(address(cm));
-        s.cmPool        = cm.tokenCommissionPool(address(token));
-        s.nativePool    = cm.nativeCommissionPool();
-        s.record        = rgbModule.fundsInRecords(TX_ID);
-        s.proxyNative   = address(proxy).balance;
+        s.teeNonce = proxy.teeNonce();
+        s.bridgeToken = token.balanceOf(address(bridge));
+        s.adapterToken = token.balanceOf(address(adapter));
+        s.oftToken = token.balanceOf(oft);
+        s.cmToken = token.balanceOf(address(cm));
+        s.cmPool = cm.tokenCommissionPool(address(token));
+        s.nativePool = cm.nativeCommissionPool();
+        s.record = rgbModule.fundsInRecords(TX_ID);
+        s.proxyNative = address(proxy).balance;
         s.adapterNative = address(adapter).balance;
-        s.oftNative     = oft.balance;
-        s.adapterCalls  = adapter.sendOutCalls();
-        s.burnConsumed  = bridge.consumedBurnIds(burnId);
+        s.oftNative = oft.balance;
+        s.adapterCalls = adapter.sendOutCalls();
+        s.burnConsumed = bridge.consumedBurnIds(burnId);
     }
 
-    function _assertLzStateUnchanged(
-        LzSnapshot memory s,
-        MockOutboundLZAdapter adapter,
-        address oft,
-        uint256 burnId
-    ) internal view {
-        assertEq(proxy.teeNonce(),                 s.teeNonce,      'tee nonce unchanged');
-        assertEq(token.balanceOf(address(bridge)), s.bridgeToken,   'bridge token unchanged');
-        assertEq(token.balanceOf(address(adapter)), s.adapterToken, 'adapter token unchanged');
-        assertEq(token.balanceOf(oft),             s.oftToken,      'oft token unchanged');
-        assertEq(token.balanceOf(address(cm)),     s.cmToken,       'cm token unchanged');
-        assertEq(cm.tokenCommissionPool(address(token)), s.cmPool,  'cm pool unchanged');
-        assertEq(cm.nativeCommissionPool(),        s.nativePool,    'native pool unchanged');
-        assertEq(rgbModule.fundsInRecords(TX_ID),  s.record,        'record unchanged');
-        assertEq(address(proxy).balance,           s.proxyNative,   'proxy native unchanged');
-        assertEq(address(adapter).balance,         s.adapterNative, 'adapter native unchanged');
-        assertEq(oft.balance,                      s.oftNative,     'oft native unchanged');
-        assertEq(adapter.sendOutCalls(),           s.adapterCalls,  'adapter calls unchanged');
-        assertEq(bridge.consumedBurnIds(burnId),   s.burnConsumed,  'burn id unchanged');
+    function _assertLzStateUnchanged(LzSnapshot memory s, MockOutboundLZAdapter adapter, address oft, uint256 burnId)
+        internal
+        view
+    {
+        assertEq(proxy.teeNonce(), s.teeNonce, "tee nonce unchanged");
+        assertEq(token.balanceOf(address(bridge)), s.bridgeToken, "bridge token unchanged");
+        assertEq(token.balanceOf(address(adapter)), s.adapterToken, "adapter token unchanged");
+        assertEq(token.balanceOf(oft), s.oftToken, "oft token unchanged");
+        assertEq(token.balanceOf(address(cm)), s.cmToken, "cm token unchanged");
+        assertEq(cm.tokenCommissionPool(address(token)), s.cmPool, "cm pool unchanged");
+        assertEq(cm.nativeCommissionPool(), s.nativePool, "native pool unchanged");
+        assertEq(rgbModule.fundsInRecords(TX_ID), s.record, "record unchanged");
+        assertEq(address(proxy).balance, s.proxyNative, "proxy native unchanged");
+        assertEq(address(adapter).balance, s.adapterNative, "adapter native unchanged");
+        assertEq(oft.balance, s.oftNative, "oft native unchanged");
+        assertEq(adapter.sendOutCalls(), s.adapterCalls, "adapter calls unchanged");
+        assertEq(bridge.consumedBurnIds(burnId), s.burnConsumed, "burn id unchanged");
     }
 
     function _expectLzCallRevertUnchanged(
@@ -454,7 +452,7 @@ contract MultisigProxyTest is Test {
 
         vm.deal(address(this), LZ_NATIVE_FEE);
         vm.expectRevert(expectedRevert);
-        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
 
         _assertLzStateUnchanged(snap, adapter, oft, params.burnId);
     }
@@ -2313,7 +2311,7 @@ contract MultisigProxyTest is Test {
     }
 
     function test_lzFundsOutCall_successCannotReplayByNonceOrBurnId() public {
-        address mockOft = makeAddr('mockOft');
+        address mockOft = makeAddr("mockOft");
         MockOutboundLZAdapter adapter =
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
         _setLzAdapter(address(adapter));
@@ -2323,12 +2321,12 @@ contract MultisigProxyTest is Test {
         (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
 
         vm.deal(address(this), LZ_NATIVE_FEE);
-        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(proxy.teeNonce(), nonce + 1, 'first call consumed tee nonce');
-        assertTrue(bridge.consumedBurnIds(BURN_ID), 'first call consumed burn id');
-        assertEq(adapter.sendOutCalls(), 1, 'first call sent once');
-        assertEq(token.balanceOf(mockOft), AMOUNT, 'first call delivered tokens');
+        assertEq(proxy.teeNonce(), nonce + 1, "first call consumed tee nonce");
+        assertTrue(bridge.consumedBurnIds(BURN_ID), "first call consumed burn id");
+        assertEq(adapter.sendOutCalls(), 1, "first call sent once");
+        assertEq(token.balanceOf(mockOft), AMOUNT, "first call delivered tokens");
 
         vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
         proxy.lzFundsOutCall(params, nonce, deadline, bitmap, sigs);
@@ -2340,27 +2338,26 @@ contract MultisigProxyTest is Test {
 
         vm.deal(address(this), LZ_NATIVE_FEE);
         vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, BURN_ID));
-        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, freshNonce, deadline, freshBitmap, freshSigs);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, freshNonce, deadline, freshBitmap, freshSigs);
 
-        assertEq(proxy.teeNonce(), freshNonce, 'failed burn replay does not consume tee nonce');
-        assertEq(adapter.sendOutCalls(), 1, 'no second adapter send');
-        assertEq(token.balanceOf(mockOft), AMOUNT, 'no second delivery');
+        assertEq(proxy.teeNonce(), freshNonce, "failed burn replay does not consume tee nonce");
+        assertEq(adapter.sendOutCalls(), 1, "no second adapter send");
+        assertEq(token.balanceOf(mockOft), AMOUNT, "no second delivery");
     }
 
     function test_lzFundsOutCall_adapterRevertModes_rollBackBridgeState() public {
-        address mockOft = makeAddr('mockOft');
+        address mockOft = makeAddr("mockOft");
         MockOutboundLZAdapter adapter =
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
         _setLzAdapter(address(adapter));
 
-        IMultisigProxy.LzFundsOutParams memory params =
-            _lzFundsOutParams(AMOUNT, BURN_ID + 10, _fundsInIds());
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID + 10, _fundsInIds());
         params.recipient = bytes32(0);
-        _expectLzCallRevertUnchanged(params, adapter, mockOft, bytes('zero recipient'));
+        _expectLzCallRevertUnchanged(params, adapter, mockOft, bytes("zero recipient"));
 
         params = _lzFundsOutParams(AMOUNT, BURN_ID + 11, _fundsInIds());
         params.minAmountLD = AMOUNT + 1;
-        _expectLzCallRevertUnchanged(params, adapter, mockOft, bytes('min too high'));
+        _expectLzCallRevertUnchanged(params, adapter, mockOft, bytes("min too high"));
 
         address nonPayableOft = address(new NonPayableOft());
         MockOutboundLZAdapter failingFeeAdapter =
@@ -2368,7 +2365,7 @@ contract MultisigProxyTest is Test {
         _setLzAdapter(address(failingFeeAdapter));
 
         params = _lzFundsOutParams(AMOUNT, BURN_ID + 12, _fundsInIds());
-        _expectLzCallRevertUnchanged(params, failingFeeAdapter, nonPayableOft, bytes('oft fee'));
+        _expectLzCallRevertUnchanged(params, failingFeeAdapter, nonPayableOft, bytes("oft fee"));
 
         vm.prank(address(proxy));
         cm.setCommissionRule(
@@ -2385,25 +2382,24 @@ contract MultisigProxyTest is Test {
         );
         (uint256 tokenCommission,, uint256 netAmount) =
             cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
-        assertEq(tokenCommission, AMOUNT, 'sanity: full token commission');
-        assertEq(netAmount, 0, 'sanity: zero delivered amount');
+        assertEq(tokenCommission, AMOUNT, "sanity: full token commission");
+        assertEq(netAmount, 0, "sanity: zero delivered amount");
 
         MockOutboundLZAdapter zeroAmountAdapter =
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
         _setLzAdapter(address(zeroAmountAdapter));
 
         params = _lzFundsOutParams(AMOUNT, BURN_ID + 13, _fundsInIds());
-        _expectLzCallRevertUnchanged(params, zeroAmountAdapter, mockOft, bytes('zero amount'));
+        _expectLzCallRevertUnchanged(params, zeroAmountAdapter, mockOft, bytes("zero amount"));
     }
 
     function test_lzFundsOutCall_bridgeLegRevertModes_doNotCallAdapter() public {
-        address mockOft = makeAddr('mockOft');
+        address mockOft = makeAddr("mockOft");
         MockOutboundLZAdapter adapter =
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
         _setLzAdapter(address(adapter));
 
-        IMultisigProxy.LzFundsOutParams memory params =
-            _lzFundsOutParams(AMOUNT, BURN_ID + 20, _fundsInIds());
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID + 20, _fundsInIds());
         params.destinationChainId = SOURCE_CHAIN_ID + 99;
         _expectLzCallRevertUnchanged(
             params,
@@ -2417,10 +2413,7 @@ contract MultisigProxyTest is Test {
         unknownIds[0] = unknownId;
         params = _lzFundsOutParams(AMOUNT, BURN_ID + 21, unknownIds);
         _expectLzCallRevertUnchanged(
-            params,
-            adapter,
-            mockOft,
-            abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, unknownId)
+            params, adapter, mockOft, abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, unknownId)
         );
 
         uint256[] memory ids = _fundsInIds();
@@ -2433,38 +2426,24 @@ contract MultisigProxyTest is Test {
             adapter,
             mockOft,
             abi.encodeWithSelector(
-                RgbSettlementModule.AmountMismatch.selector,
-                TX_ID,
-                wrongAmounts[0],
-                rgbModule.fundsInRecords(TX_ID)
+                RgbSettlementModule.AmountMismatch.selector, TX_ID, wrongAmounts[0], rgbModule.fundsInRecords(TX_ID)
             )
         );
 
         params = _lzFundsOutParams(AMOUNT, BURN_ID + 23, _fundsInIds());
         params.sourceChainId = 0;
         _expectLzCallRevertUnchanged(
-            params,
-            adapter,
-            mockOft,
-            abi.encodeWithSelector(IBridge.InvalidSourceChainId.selector)
+            params, adapter, mockOft, abi.encodeWithSelector(IBridge.InvalidSourceChainId.selector)
         );
 
         params = _lzFundsOutParams(AMOUNT, BURN_ID + 24, _fundsInIds());
         params.destinationChainId = 0;
         _expectLzCallRevertUnchanged(
-            params,
-            adapter,
-            mockOft,
-            abi.encodeWithSelector(IBridge.InvalidDestinationChainId.selector)
+            params, adapter, mockOft, abi.encodeWithSelector(IBridge.InvalidDestinationChainId.selector)
         );
 
         params = _lzFundsOutParams(0, BURN_ID + 25, _fundsInIds());
-        _expectLzCallRevertUnchanged(
-            params,
-            adapter,
-            mockOft,
-            abi.encodeWithSelector(IBridge.ZeroAmount.selector)
-        );
+        _expectLzCallRevertUnchanged(params, adapter, mockOft, abi.encodeWithSelector(IBridge.ZeroAmount.selector));
     }
 
     // Flow-4 success coverage for duplicate RGB settlement ids when the first
@@ -2765,14 +2744,14 @@ contract MultisigProxyTest is Test {
 
         (uint256 tokenCommission,, uint256 netAmount) =
             cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
-        assertGt(tokenCommission, 0, 'token fee quoted');
+        assertGt(tokenCommission, 0, "token fee quoted");
 
         uint256 unsolicitedAmount = 3 ether;
         token.mint(user, unsolicitedAmount);
         vm.prank(user);
         token.transfer(address(cm), unsolicitedAmount);
 
-        address mockOft = makeAddr('mockOft');
+        address mockOft = makeAddr("mockOft");
         MockOutboundLZAdapter adapter =
             new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
         _setLzAdapter(address(adapter));
@@ -2781,23 +2760,23 @@ contract MultisigProxyTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
 
-        uint256 cmBefore     = token.balanceOf(address(cm));
+        uint256 cmBefore = token.balanceOf(address(cm));
         uint256 cmPoolBefore = cm.tokenCommissionPool(address(token));
 
-        assertEq(cmBefore, unsolicitedAmount, 'pre unsolicited cm balance');
-        assertEq(cmPoolBefore, 0, 'pre cm pool');
+        assertEq(cmBefore, unsolicitedAmount, "pre unsolicited cm balance");
+        assertEq(cmPoolBefore, 0, "pre cm pool");
 
         vm.deal(address(this), LZ_NATIVE_FEE);
-        proxy.lzFundsOutCall{ value: LZ_NATIVE_FEE }(params, nonce, deadline, bitmap, sigs);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(token.balanceOf(address(cm)), unsolicitedAmount + tokenCommission, 'cm balance includes both');
+        assertEq(token.balanceOf(address(cm)), unsolicitedAmount + tokenCommission, "cm balance includes both");
         assertEq(
             cm.tokenCommissionPool(address(token)),
             unsolicitedAmount + tokenCommission,
-            'pool includes unsolicited balance'
+            "pool includes unsolicited balance"
         );
-        assertEq(token.balanceOf(mockOft), netAmount, 'oft received net release');
-        assertEq(token.balanceOf(address(adapter)), 0, 'adapter no residue');
+        assertEq(token.balanceOf(mockOft), netAmount, "oft received net release");
+        assertEq(token.balanceOf(address(adapter)), 0, "adapter no residue");
     }
 
     // ========================================================================
