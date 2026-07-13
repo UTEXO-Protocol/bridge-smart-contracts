@@ -63,6 +63,10 @@ interface ICommissionManager {
     error StalePrice();
     error TokenDecimalsTooLarge();
     error InvalidHeartbeat();
+    error SequencerDown();
+    error GracePeriodNotOver();
+    error PriceOutOfBounds();
+    error InvalidPriceBounds();
 
     // ============ Events ============
 
@@ -82,6 +86,12 @@ interface ICommissionManager {
     event NativeCommissionReceived(uint256 amount);
 
     event EthUsdFeedUpdated(address indexed feed, uint256 heartbeat);
+
+    /// @notice Emitted on `setSequencerUptimeFeed` (`address(0)` disables the check).
+    event SequencerUptimeFeedUpdated(address indexed feed);
+
+    /// @notice Emitted on `setEthUsdPriceBounds` (both zero disables the band).
+    event EthUsdPriceBoundsUpdated(uint256 minPrice, uint256 maxPrice);
 
     event TokenCommissionWithdrawn(address indexed token, address indexed to, uint256 amount);
     event NativeCommissionWithdrawn(address indexed to, uint256 amount);
@@ -105,6 +115,14 @@ interface ICommissionManager {
     function ethUsdFeed() external view returns (address);
 
     function ethUsdHeartbeat() external view returns (uint256);
+
+    function sequencerUptimeFeed() external view returns (address);
+
+    function SEQUENCER_GRACE_PERIOD() external view returns (uint256);
+
+    function ethUsdMinPrice() external view returns (uint256);
+
+    function ethUsdMaxPrice() external view returns (uint256);
 
     // ============ Core calculations ============
 
@@ -147,6 +165,16 @@ interface ICommissionManager {
     ///         disable NATIVE quoting until a new feed is set.
     function setEthUsdFeed(address feed, uint256 heartbeat) external;
 
+    /// @notice Configure (or rotate) the Chainlink L2 Sequencer Uptime feed used
+    ///         to gate NATIVE quotes on Arbitrum. Pass `address(0)` to disable
+    ///         the check (non-L2 / test environments).
+    function setSequencerUptimeFeed(address feed) external;
+
+    /// @notice Configure the optional [min, max] sanity band on the ETH/USD
+    ///         answer (feed decimals). Pass `(0, 0)` to disable; otherwise
+    ///         `0 < minPrice < maxPrice`.
+    function setEthUsdPriceBounds(uint256 minPrice, uint256 maxPrice) external;
+
     function setCommissionRule(
         uint256 sourceChainId,
         uint256 destChainId,
@@ -172,7 +200,13 @@ interface ICommissionManager {
 
     // ============ Commission ingress (bridge) ============
 
-    function receiveTokenCommission(address token) external;
+    /// @notice Credit `credited` token units to the commission pool. The Bridge
+    ///         measures `credited` as the actual balance increase of this
+    ///         contract around its `safeTransfer` (so a fee-on-transfer token is
+    ///         handled and no pre-existing/unsolicited balance is absorbed,
+    ///         R-I-04). Reverts if the resulting pool would exceed the on-chain
+    ///         balance. Callable only by the Bridge.
+    function receiveTokenCommission(address token, uint256 credited) external;
 
     /// @notice Native commission ingress; only `bridgeAddress` may call with non-zero value (see implementation).
     receive() external payable;

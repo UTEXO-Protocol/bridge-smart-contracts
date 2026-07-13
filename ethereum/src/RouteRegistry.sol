@@ -99,8 +99,9 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
         if (finalityVerifier == address(0)) revert ZeroFinalityVerifier();
         if (settlementModule == address(0)) revert ZeroSettlementModule();
 
-        _routes[_routeKey(sourceChainId, destChainId)] =
-            RouteConfig({enabled: enabled, finalityVerifier: finalityVerifier, settlementModule: settlementModule});
+        _routes[_routeKey(sourceChainId, destChainId)] = RouteConfig({
+            enabled: enabled, finalityVerifier: finalityVerifier, settlementModule: settlementModule
+        });
 
         emit RouteSet(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule);
     }
@@ -126,22 +127,27 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // =========================================================================
 
     /// @inheritdoc IRouteRegistry
-    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData) external override onlyBridge {
+    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
+        external
+        override
+        onlyBridge
+        returns (uint256 externalId)
+    {
         RouteConfig memory route = _routes[_routeKey(ctx.sourceChainId, ctx.destChainId)];
         if (!route.enabled) revert RouteNotEnabled(ctx.sourceChainId, ctx.destChainId);
 
-        ISettlementModule(route.settlementModule).onFundsIn(ctx, settlementData);
+        return ISettlementModule(route.settlementModule).onFundsIn(ctx, settlementData);
     }
 
     /// @inheritdoc IRouteRegistry
     /// @dev Verifier runs first (view-only finality check). A reverting
     ///      verifier short-circuits the settlement-module call so no state
     ///      mutation happens unless finality is proven.
-    function beforeFundsOut(FundsOutContext calldata ctx, bytes calldata proof, bytes calldata settlementData)
-        external
-        override
-        onlyBridge
-    {
+    function beforeFundsOut(
+        FundsOutContext calldata ctx,
+        bytes calldata proof,
+        bytes calldata settlementData
+    ) external override onlyBridge {
         RouteConfig memory route = _routes[_routeKey(ctx.sourceChainId, ctx.destChainId)];
         if (!route.enabled) revert RouteNotEnabled(ctx.sourceChainId, ctx.destChainId);
 
