@@ -24,10 +24,18 @@ import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol"
 ///   n + 3  → RGBVerifier        (wraps the BtcRelay)
 ///   n + 4  → RgbSettlementModule (paired with RouteRegistry)
 ///   n + 5  → MultisigProxy
-///   n + 6  → (optional) CommissionManager.setEthUsdFeed
-///   n + 7  → CommissionManager.transferOwnership → MultisigProxy
-///   n + 8  → Bridge.transferOwnership → MultisigProxy
-///   n + 9  → RouteRegistry.transferOwnership → MultisigProxy
+///          → (optional) CommissionManager config txs, each present only when
+///            its env is set: setEthUsdFeed, setSequencerUptimeFeed,
+///            setEthUsdPriceBounds. These shift the transferOwnership nonces
+///            below by however many are emitted (0–3).
+///          → CommissionManager.transferOwnership (starts two-step handoff)
+///          → Bridge.transferOwnership (starts two-step handoff)
+///          → RouteRegistry.transferOwnership (starts two-step handoff)
+///
+/// Ownership is Ownable2Step: the transferOwnership calls only set
+/// pendingOwner = MultisigProxy. The federation MUST accept post-deploy via
+/// governance (acceptOwnership) — see the post-deploy reminder. Until then,
+/// `deployer` remains the owner.
 ///
 /// Routes are NOT registered here. Federation configures them through
 /// `MultisigProxy.proposeSetRoute(...)` after deploy — this mirrors the
@@ -35,7 +43,7 @@ import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol"
 ///
 /// Env (required):
 ///   PRIVATE_KEY, USDT0_ADDRESS, BTC_RELAY_ADDRESS,
-///   ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD,
+///   ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD, INITIAL_ENCLAVE_SOURCE_CHAIN_ID,
 ///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD,
 ///   COMMISSION_RECIPIENT, TIMELOCK_DURATION, MIN_TIMELOCK,
 ///   MIN_FUNDS_IN_AMOUNT
@@ -46,6 +54,23 @@ import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol"
 ///                       are live the moment the proxy takes over).
 ///   ETH_USD_HEARTBEAT — Seconds before the feed answer is considered stale.
 ///                       Required when ETH_USD_FEED is provided.
+///   MIN_SOURCE_CONFIRMATIONS (6) — RGBVerifier: min depth of the source
+///                       (RGB burn/lock) block.
+///   MAX_LATEST_CONFIRMATIONS (1) — RGBVerifier: max depth of the latest
+///                       (freshness) block; must be >= 1.
+///   MIN_CONFIRMATION_GAP     (5) — RGBVerifier: min depth gap between the
+///                       source and latest blocks.
+///   SEQUENCER_UPTIME_FEED — (Arbitrum, R-I-14) Chainlink L2 Sequencer Uptime
+///                       feed. When set, NATIVE quotes reject prices during
+///                       sequencer downtime and the post-restart grace period.
+///                       SHOULD be set on Arbitrum when NATIVE commission is used.
+///   ETH_USD_MIN_PRICE / ETH_USD_MAX_PRICE — (R-I-14) optional ETH/USD sanity
+///                       band in feed decimals (e.g. 100e8 / 100000e8). Set both
+///                       or neither; else 0 < min < max.
+///   REQUIRE_CHAINLINK_HARDENING (false) — when true, the deploy reverts unless
+///                       ETH_USD_FEED, SEQUENCER_UPTIME_FEED, and the price band
+///                       are all set. Recommended for Arbitrum production so the
+///                       R-I-14 guards can never be silently absent.
 ///
 /// Usage:
 ///   forge script script/deploy/DeployAll.s.sol \
@@ -68,6 +93,7 @@ contract DeployAll is Script {
         address btcRelay = vm.envAddress("BTC_RELAY_ADDRESS");
         address[] memory enc = vm.envAddress("ENCLAVE_SIGNERS", ",");
         uint256 encThr = vm.envUint("ENCLAVE_THRESHOLD");
+        uint256 initialSrcChain = vm.envUint("INITIAL_ENCLAVE_SOURCE_CHAIN_ID");
         address[] memory fed = vm.envAddress("FEDERATION_SIGNERS", ",");
         uint256 fedThr = vm.envUint("FEDERATION_THRESHOLD");
         address commission = vm.envAddress("COMMISSION_RECIPIENT");
@@ -76,6 +102,29 @@ contract DeployAll is Script {
         address ethUsdFeed = vm.envOr("ETH_USD_FEED", address(0));
         uint256 ethUsdHb = vm.envOr("ETH_USD_HEARTBEAT", uint256(0));
         uint256 minFundsIn = vm.envUint("MIN_FUNDS_IN_AMOUNT");
+        uint256 minSourceConf = vm.envOr("MIN_SOURCE_CONFIRMATIONS", uint256(6));
+        uint256 maxLatestConf = vm.envOr("MAX_LATEST_CONFIRMATIONS", uint256(1));
+        uint256 minConfGap = vm.envOr("MIN_CONFIRMATION_GAP", uint256(5));
+        address seqFeed = vm.envOr("SEQUENCER_UPTIME_FEED", address(0));
+        uint256 ethUsdMinPrice = vm.envOr("ETH_USD_MIN_PRICE", uint256(0));
+        uint256 ethUsdMaxPrice = vm.envOr("ETH_USD_MAX_PRICE", uint256(0));
+        bool reqHardening = vm.envOr("REQUIRE_CHAINLINK_HARDENING", false);
+
+        // ---- 1a. Misconfiguration checks (fail-fast, before any broadcast) ---
+        // Price band is all-or-nothing: a half-set band would otherwise be
+        // silently ignored (setter only runs when max != 0).
+        require(
+            (ethUsdMinPrice == 0) == (ethUsdMaxPrice == 0),
+            "set both ETH_USD_MIN_PRICE and ETH_USD_MAX_PRICE, or neither"
+        );
+        // Opt-in prod guard (set REQUIRE_CHAINLINK_HARDENING=true for Arbitrum):
+        // when NATIVE commission is enabled, the sequencer feed and price band
+        // must be wired too, so the R-I-14 protections are not silently absent.
+        if (reqHardening) {
+            require(ethUsdFeed != address(0), "hardening: ETH_USD_FEED must be set");
+            require(seqFeed != address(0), "hardening: SEQUENCER_UPTIME_FEED must be set");
+            require(ethUsdMaxPrice != 0, "hardening: ETH_USD_MIN/MAX_PRICE must be set");
+        }
 
         address deployer = vm.addr(pk);
         uint64 startNonce = vm.getNonce(deployer);
@@ -97,12 +146,12 @@ contract DeployAll is Script {
         bridge = new Bridge(usdt0, address(routeRegistry), payable(address(cm)), address(0), minFundsIn);
 
         // ---- 5. Route plugins (nonce n+3, n+4) ---------------------------
-        rgbVerifier = new RGBVerifier(btcRelay);
+        rgbVerifier = new RGBVerifier(btcRelay, minSourceConf, maxLatestConf, minConfGap);
         rgbModule = new RgbSettlementModule(address(routeRegistry));
 
         // ---- 6. MultisigProxy (nonce n+5) --------------------------------
         proxy = new MultisigProxy(
-            address(bridge), address(cm), enc, encThr, fed, fedThr, commission, timelock, minTimelock
+            address(bridge), address(cm), enc, encThr, initialSrcChain, fed, fedThr, commission, timelock, minTimelock
         );
 
         // ---- 7. Wire optional ETH/USD feed before CM ownership transfer --
@@ -111,7 +160,22 @@ contract DeployAll is Script {
             cm.setEthUsdFeed(ethUsdFeed, ethUsdHb);
         }
 
-        // ---- 8. Hand over to federation ----------------------------------
+        // ---- 7b. Wire optional R-I-14 Arbitrum hardening (owner-only, before
+        //          the ownership transfer): the L2 sequencer-uptime feed and the
+        //          ETH/USD sanity band. On Arbitrum these SHOULD be set whenever
+        //          the NATIVE commission path (ETH_USD_FEED) is used.
+        if (seqFeed != address(0)) {
+            cm.setSequencerUptimeFeed(seqFeed);
+        }
+        if (ethUsdMaxPrice != 0) {
+            cm.setEthUsdPriceBounds(ethUsdMinPrice, ethUsdMaxPrice);
+        }
+
+        // ---- 8. Start two-step ownership handover to federation ----------
+        // Ownable2Step: these only set pendingOwner = proxy. The federation
+        // completes the handoff post-deploy by accepting via governance
+        // (AdminExecute / AdminExecuteCommissionManager / AdminExecuteRouteRegistry
+        // -> acceptOwnership). Until then, `deployer` stays the owner.
         cm.transferOwnership(address(proxy));
         bridge.transferOwnership(address(proxy));
         routeRegistry.transferOwnership(address(proxy));
@@ -123,6 +187,9 @@ contract DeployAll is Script {
         console2.log("RouteRegistry deployed at:      ", address(routeRegistry));
         console2.log("Bridge deployed at:             ", address(bridge));
         console2.log("RGBVerifier deployed at:        ", address(rgbVerifier));
+        console2.log("  minSourceConfirmations:       ", rgbVerifier.minSourceConfirmations());
+        console2.log("  maxLatestConfirmations:       ", rgbVerifier.maxLatestConfirmations());
+        console2.log("  minConfirmationGap:           ", rgbVerifier.minConfirmationGap());
         console2.log("RgbSettlementModule deployed at:", address(rgbModule));
         console2.log("MultisigProxy deployed at:      ", address(proxy));
         if (ethUsdFeed != address(0)) {
@@ -133,6 +200,15 @@ contract DeployAll is Script {
                 "ETH/USD feed:                   ", "UNSET (NATIVE quotes will revert until governance wires one)"
             );
         }
+        if (seqFeed != address(0)) {
+            console2.log("Sequencer uptime feed wired:    ", seqFeed);
+        } else {
+            console2.log("Sequencer uptime feed:          ", "UNSET (set on Arbitrum when NATIVE commission is used)");
+        }
+        if (ethUsdMaxPrice != 0) {
+            console2.log("ETH/USD price band min:         ", ethUsdMinPrice);
+            console2.log("ETH/USD price band max:         ", ethUsdMaxPrice);
+        }
 
         // ---- 10. Invariant checks ---------------------------------------
         require(address(bridge) == predictedBridge, "Bridge address prediction mismatch");
@@ -140,15 +216,38 @@ contract DeployAll is Script {
         require(rgbModule.routeRegistry() == address(routeRegistry), "RgbSettlementModule.routeRegistry mismatch");
         require(bridge.routeRegistry() == address(routeRegistry), "Bridge.routeRegistry mismatch");
         require(cm.bridgeAddress() == address(bridge), "CM.bridgeAddress mismatch");
-        require(bridge.owner() == address(proxy), "Bridge ownership transfer failed");
-        require(cm.owner() == address(proxy), "CM ownership transfer failed");
-        require(routeRegistry.owner() == address(proxy), "RouteRegistry ownership transfer failed");
+        // Two-step: ownership stays with `deployer` until the federation
+        // accepts; assert the pending transfer to the proxy was initiated.
+        require(
+            bridge.owner() == deployer && bridge.pendingOwner() == address(proxy),
+            "Bridge ownership handoff not initiated"
+        );
+        require(cm.owner() == deployer && cm.pendingOwner() == address(proxy), "CM ownership handoff not initiated");
+        require(
+            routeRegistry.owner() == deployer && routeRegistry.pendingOwner() == address(proxy),
+            "RouteRegistry ownership handoff not initiated"
+        );
         if (ethUsdFeed != address(0)) {
             require(cm.ethUsdFeed() == ethUsdFeed, "CM.ethUsdFeed mismatch");
             require(cm.ethUsdHeartbeat() == ethUsdHb, "CM.ethUsdHeartbeat mismatch");
         }
+        if (seqFeed != address(0)) {
+            require(cm.sequencerUptimeFeed() == seqFeed, "CM.sequencerUptimeFeed mismatch");
+        }
+        if (ethUsdMaxPrice != 0) {
+            require(
+                cm.ethUsdMinPrice() == ethUsdMinPrice && cm.ethUsdMaxPrice() == ethUsdMaxPrice,
+                "CM.ethUsdPriceBounds mismatch"
+            );
+        }
 
         // ---- 11. Post-deploy reminder -----------------------------------
+        console2.log("");
+        console2.log("Ownership handoff is two-step: deployer still owns Bridge/CM/");
+        console2.log("RouteRegistry until the federation accepts via governance:");
+        console2.log("  AdminExecute                  -> Bridge.acceptOwnership()");
+        console2.log("  AdminExecuteCommissionManager -> CommissionManager.acceptOwnership()");
+        console2.log("  AdminExecuteRouteRegistry     -> RouteRegistry.acceptOwnership()");
         console2.log("");
         console2.log("Next step: federation must register routes via");
         console2.log("  MultisigProxy.proposeSetRoute(src, dst, true, verifier, module)");

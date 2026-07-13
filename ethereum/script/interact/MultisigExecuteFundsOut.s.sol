@@ -53,7 +53,7 @@ contract MultisigExecuteFundsOut is Script {
 
         IBridge.FundsOutParams memory params = _loadParams();
 
-        uint256 nonce = proxy.teeNonce();
+        uint256 nonce = proxy.teeNonce(params.sourceChainId);
         uint256 deadline = block.timestamp + vm.envUint("DEADLINE_OFFSET");
         uint256 bitmap = vm.envUint("ENCLAVE_BITMAP");
 
@@ -68,6 +68,6 @@ contract MultisigExecuteFundsOut is Script {
         proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
         vm.stopBroadcast();
 
-        console2.log("fundsOutCall() succeeded. New nonce:", proxy.teeNonce());
+        console2.log("fundsOutCall() succeeded. New nonce:", proxy.teeNonce(params.sourceChainId));
     }
 }
