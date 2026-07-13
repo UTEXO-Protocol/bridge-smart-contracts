@@ -350,14 +350,14 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         IRouteRegistry(routeRegistry)
             .beforeFundsOut(
                 FundsOutContext({
-                    token: TOKEN,
-                    recipient: fundsOutParams.recipient,
-                    amount: fundsOutParams.amount,
-                    burnId: fundsOutParams.burnId,
-                    sourceChainId: fundsOutParams.sourceChainId,
-                    destChainId: fundsOutParams.destinationChainId,
-                    sourceAddress: fundsOutParams.sourceAddress
-                }),
+                token: TOKEN,
+                recipient: fundsOutParams.recipient,
+                amount: fundsOutParams.amount,
+                burnId: fundsOutParams.burnId,
+                sourceChainId: fundsOutParams.sourceChainId,
+                destChainId: fundsOutParams.destinationChainId,
+                sourceAddress: fundsOutParams.sourceAddress
+            }),
                 fundsOutParams.proof,
                 fundsOutParams.settlementData
             );

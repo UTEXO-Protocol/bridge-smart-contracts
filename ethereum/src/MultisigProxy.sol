@@ -354,15 +354,15 @@ contract MultisigProxy is IMultisigProxy {
             IBridge(bridge)
                 .fundsOut(
                     IBridge.FundsOutParams({
-                        recipient: adapter,
-                        amount: params.amount,
-                        burnId: params.burnId,
-                        sourceChainId: params.sourceChainId,
-                        destinationChainId: params.destinationChainId,
-                        sourceAddress: params.sourceAddress,
-                        proof: params.proof,
-                        settlementData: params.settlementData
-                    })
+                    recipient: adapter,
+                    amount: params.amount,
+                    burnId: params.burnId,
+                    sourceChainId: params.sourceChainId,
+                    destinationChainId: params.destinationChainId,
+                    sourceAddress: params.sourceAddress,
+                    proof: params.proof,
+                    settlementData: params.settlementData
+                })
                 );
             delivered = IERC20(token).balanceOf(adapter) - balanceBefore;
         }
