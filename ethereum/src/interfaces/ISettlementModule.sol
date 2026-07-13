@@ -28,7 +28,12 @@ interface ISettlementModule {
     /// @param ctx            Canonical fundsIn context built by Bridge.
     /// @param settlementData Opaque per-route data supplied by the caller;
     ///                       layout defined by the module itself.
-    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData) external;
+    /// @return externalId    Optional route-specific correlation id for Bridge's
+    ///                       `FundsIn` event (the RGB OpId for the RGB route; `0`
+    ///                       for modules that need none, so Bridge emits no
+    ///                       `FundsIn`). NOT an on-chain dedup key — the
+    ///                       canonical key is `ctx.operationId`.
+    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData) external returns (uint256 externalId);
 
     /// @notice Hook invoked by `RouteRegistry.beforeFundsOut` *before* Bridge
     ///         releases funds. The module performs any route-specific state

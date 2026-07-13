@@ -126,11 +126,16 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // =========================================================================
 
     /// @inheritdoc IRouteRegistry
-    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData) external override onlyBridge {
+    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
+        external
+        override
+        onlyBridge
+        returns (uint256 externalId)
+    {
         RouteConfig memory route = _routes[_routeKey(ctx.sourceChainId, ctx.destChainId)];
         if (!route.enabled) revert RouteNotEnabled(ctx.sourceChainId, ctx.destChainId);
 
-        ISettlementModule(route.settlementModule).onFundsIn(ctx, settlementData);
+        return ISettlementModule(route.settlementModule).onFundsIn(ctx, settlementData);
     }
 
     /// @inheritdoc IRouteRegistry

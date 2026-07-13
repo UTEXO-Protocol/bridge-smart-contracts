@@ -13,7 +13,8 @@ import {IBridge} from "./IBridge.sol";
 ///        - `fundsOutCall`   — a single `Bridge.fundsOut` (RGB → Arbitrum);
 ///        - `lzFundsOutCall`  — `Bridge.fundsOut` to the LZ adapter then
 ///          `adapter.sendOut`, with the two legs bound on-chain (RGB → non-Arbitrum).
-///      Both share a single sequential `teeNonce` for replay protection.
+///      Each source chain has its own `teeNonce` lane, selected by the
+///      release's `sourceChainId`, for per-network replay protection.
 ///
 ///      FEDERATION SIGNERS (governance / admin nodes)
 ///      All administrative operations go through a two-phase timelock:
@@ -66,10 +67,13 @@ interface IMultisigProxy {
     error DuplicateSigner();
     error SignerSetsOverlap(address signer);
     error TooManySigners(uint256 count, uint256 max);
+    error UnknownSourceChain(uint256 sourceChainId);
+    error TooManyEnclaveSourceChains(uint256 count, uint256 max);
     error CallFailed();
     error UnknownOperationType();
     error ZeroRecipient();
     error ZeroTarget();
+    error ForbiddenCommissionManagerSelector(bytes4 selector);
     error LZAdapterNotSet();
     error InvalidLZAdapter();
 
@@ -136,9 +140,14 @@ interface IMultisigProxy {
     // =========================================================================
 
     // TEE — typed enclave releases
-    event FundsOutExecuted(uint256 indexed nonce, uint256 enclaveBitmap);
+    event FundsOutExecuted(uint256 indexed sourceChainId, uint256 indexed nonce, uint256 enclaveBitmap);
     event LzFundsOutExecuted(
-        uint256 indexed nonce, uint256 enclaveBitmap, uint32 dstEid, bytes32 recipient, uint256 amount
+        uint256 indexed sourceChainId,
+        uint256 indexed nonce,
+        uint256 enclaveBitmap,
+        uint32 dstEid,
+        bytes32 recipient,
+        uint256 amount
     );
 
     // Federation proposals
@@ -158,7 +167,7 @@ interface IMultisigProxy {
     event EmergencyUnpaused(uint256 nonce, uint256 fedBitmap);
 
     // Emitted when proposals are executed
-    event EnclaveSignersUpdated(address[] newSigners, uint256 newThreshold);
+    event EnclaveSignersUpdated(uint256 indexed sourceChainId, address[] newSigners, uint256 newThreshold);
     event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
@@ -222,9 +231,12 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose replacing the enclave signer set.
-    /// @dev opData = abi.encode(address[] newSigners, uint256 newThreshold)
+    /// @notice Propose replacing (or registering) the enclave signer set for a
+    ///         given source chain. A `sourceChainId` with no set yet is
+    ///         registered on execution (bounded by `MAX_ENCLAVE_SOURCE_CHAINS`).
+    /// @dev opData = abi.encode(uint256 sourceChainId, address[] newSigners, uint256 newThreshold)
     function proposeUpdateEnclaveSigners(
+        uint256 sourceChainId,
         address[] calldata newSigners,
         uint256 newThreshold,
         uint256 nonce,
@@ -443,23 +455,29 @@ interface IMultisigProxy {
     // View
     // =========================================================================
 
-    /// @notice Verify that `signature` over `digest` was produced by the enclave signer at `signerIndex`.
-    function verifyEnclaveSignature(bytes32 digest, bytes calldata signature, uint256 signerIndex)
-        external
-        view
-        returns (bool);
+    /// @notice Verify that `signature` over `digest` was produced by the enclave
+    ///         signer at `signerIndex` for the given `sourceChainId` set.
+    function verifyEnclaveSignature(
+        uint256 sourceChainId,
+        bytes32 digest,
+        bytes calldata signature,
+        uint256 signerIndex
+    ) external view returns (bool);
 
-    function teeNonce() external view returns (uint256);
+    function teeNonce(uint256 sourceChainId) external view returns (uint256);
     function bridge() external view returns (address);
     function commissionManager() external view returns (address);
     function lzAdapter() external view returns (address);
-    function getEnclaveSigners() external view returns (address[] memory);
-    function enclaveThreshold() external view returns (uint256);
+    function getEnclaveSigners(uint256 sourceChainId) external view returns (address[] memory);
+    function getEnclaveSourceChains() external view returns (uint256[] memory);
+    function enclaveThreshold(uint256 sourceChainId) external view returns (uint256);
     function getFederationSigners() external view returns (address[] memory);
     function federationThreshold() external view returns (uint256);
     function commissionRecipient() external view returns (address);
     function DOMAIN_SEPARATOR() external view returns (bytes32);
     function proposalNonce() external view returns (uint256);
+
+    function emergencyNonce() external view returns (uint256);
     function timelockDuration() external view returns (uint256);
     function MIN_TIMELOCK() external view returns (uint256);
     function getProposal(bytes32 proposalId) external view returns (Proposal memory);

@@ -14,6 +14,7 @@ import {MultisigProxy} from "../../src/MultisigProxy.sol";
 ///   COMMISSION_MANAGER    — existing CommissionManager deployment
 ///   ENCLAVE_SIGNERS       — comma-separated TEE signer addresses
 ///   ENCLAVE_THRESHOLD     — M for enclave M-of-N
+///   INITIAL_ENCLAVE_SOURCE_CHAIN_ID — source chain id the initial enclave set authorises (non-zero)
 ///   FEDERATION_SIGNERS    — comma-separated governance signer addresses
 ///   FEDERATION_THRESHOLD  — M for federation M-of-N
 ///   COMMISSION_RECIPIENT  — destination for commission withdrawals
@@ -30,6 +31,7 @@ contract DeployMultisigProxy is Script {
         address commissionManager = vm.envAddress("COMMISSION_MANAGER");
         address[] memory enc = vm.envAddress("ENCLAVE_SIGNERS", ",");
         uint256 encThr = vm.envUint("ENCLAVE_THRESHOLD");
+        uint256 initialSrcChain = vm.envUint("INITIAL_ENCLAVE_SOURCE_CHAIN_ID");
         address[] memory fed = vm.envAddress("FEDERATION_SIGNERS", ",");
         uint256 fedThr = vm.envUint("FEDERATION_THRESHOLD");
         address commission = vm.envAddress("COMMISSION_RECIPIENT");
@@ -38,14 +40,15 @@ contract DeployMultisigProxy is Script {
 
         vm.startBroadcast(pk);
         proxy = new MultisigProxy(
-            bridgeAddr, commissionManager, enc, encThr, fed, fedThr, commission, timelock, minTimelock
+            bridgeAddr, commissionManager, enc, encThr, initialSrcChain, fed, fedThr, commission, timelock, minTimelock
         );
         vm.stopBroadcast();
 
         console2.log("MultisigProxy deployed at:", address(proxy));
         console2.log("Bridge:                   ", proxy.bridge());
         console2.log("CommissionManager:        ", proxy.commissionManager());
-        console2.log("Enclave threshold:        ", proxy.enclaveThreshold());
+        console2.log("Initial enclave srcChain: ", initialSrcChain);
+        console2.log("Enclave threshold:        ", proxy.enclaveThreshold(initialSrcChain));
         console2.log("Federation threshold:     ", proxy.federationThreshold());
         console2.log("Commission recipient:     ", proxy.commissionRecipient());
         console2.log("Timelock duration (sec):  ", proxy.timelockDuration());

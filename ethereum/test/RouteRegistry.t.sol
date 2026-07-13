@@ -59,9 +59,11 @@ contract RouteRegistryTest is Test {
         return FundsInContext({
             token: token,
             sender: user,
+            sourceSender: bytes32(uint256(uint160(user))),
             grossAmount: 100e18,
             netAmount: 95e18,
-            operationId: 42,
+            operationId: bytes32(uint256(42)),
+            senderNonce: 0,
             sourceChainId: SOURCE_CHAIN_ID,
             destChainId: DEST_CHAIN_ID,
             destAddress: "rgb:asset/utxo1abc"
@@ -184,7 +186,7 @@ contract RouteRegistryTest is Test {
 
         assertEq(module.onFundsInCount(), 1, "module called once");
         assertEq(module.lastSender(), user);
-        assertEq(module.lastOperationId(), 42);
+        assertEq(module.lastOperationId(), bytes32(uint256(42)));
         assertEq(module.lastNetAmount(), 95e18);
         assertEq(module.lastSettlementData(), abi.encode("hello"));
     }

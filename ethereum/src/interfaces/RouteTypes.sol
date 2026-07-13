@@ -17,13 +17,25 @@ pragma solidity 0.8.35;
 ///         after commission has been computed and tokens have been pulled,
 ///         then forwarded into `RouteRegistry.onFundsIn` → `ISettlementModule`.
 /// @param token              ERC-20 the Bridge accepts (the bridged asset).
-/// @param sender             Address that initiated the deposit — the EOA on
-///                           the public overload, or the LZ adapter on the
-///                           adapter-only overload.
+/// @param sender             EVM caller Bridge saw — the EOA on the public
+///                           overload, or the LZ adapter on the adapter-only
+///                           overload. This is who tokens are pulled from; it
+///                           is NOT the identity bound into `operationId`.
+/// @param sourceSender       Original source-chain sender, left-padded to
+///                           `bytes32`. Equals `sender` for direct EVM
+///                           deposits; for LZ deposits it is the authenticated
+///                           user forwarded by the adapter. This is the
+///                           identity bound into `operationId`.
 /// @param grossAmount        Gross amount the user supplied (pre-commission).
 /// @param netAmount          Amount actually bridged after token commission
 ///                           has been taken.
-/// @param operationId        Backend-assigned operation identifier.
+/// @param operationId        Canonical bridge-side operation id, derived
+///                           on-chain by Bridge (see `Bridge._deriveOperationId`).
+///                           Unpredictable by third parties, so it cannot be
+///                           pre-empted; read it from the emitted event.
+/// @param senderNonce        Per-`(sourceChainId, sourceSender)` nonce folded
+///                           into `operationId` so repeated identical deposits
+///                           produce distinct ids.
 /// @param sourceChainId      `block.chainid` for direct EVM deposits, or the
 ///                           non-spoofable chain id forwarded by the adapter.
 /// @param destChainId        Target chain id (backend-assigned for non-EVM
@@ -32,9 +44,11 @@ pragma solidity 0.8.35;
 struct FundsInContext {
     address token;
     address sender;
+    bytes32 sourceSender;
     uint256 grossAmount;
     uint256 netAmount;
-    uint256 operationId;
+    bytes32 operationId;
+    uint256 senderNonce;
     uint256 sourceChainId;
     uint256 destChainId;
     string destAddress;
@@ -48,10 +62,9 @@ struct FundsInContext {
 /// @param recipient          Final recipient on this chain.
 /// @param amount             Gross amount being released from the pool
 ///                           (pre-commission).
-/// @param burnId             Source-side burn identifier — the common replay
-///                           guard enforced by Bridge itself. Carried in the
+/// @param burnId             Bridge-derived release replay key. Carried in the
 ///                           context so verifiers and settlement modules can
-///                           reference it if they need to.
+///                           reference the canonical key if they need to.
 /// @param sourceChainId      Source chain id.
 /// @param destChainId        Destination chain id (this chain, in practice).
 /// @param sourceAddress      Sender address on the source chain.
