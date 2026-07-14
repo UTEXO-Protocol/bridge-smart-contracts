@@ -39,25 +39,48 @@ contract MultisigProxy is IMultisigProxy {
     ///         until then (closes adapter-execute by default).
     address public lzAdapter;
 
-    address[] private _enclaveSigners;
-    uint256 public enclaveThreshold;
+    /// @notice Per-source-chain enclave signer sets. Each source network (RGB,
+    ///         Concordium/Arch, …) is validated by its own TEE code and therefore
+    ///         has its own key set; a release for `sourceChainId` is authorised
+    ///         only by the set registered for that chain. Selected on the release
+    ///         path via `params.sourceChainId`, which is already committed to in
+    ///         the enclave EIP-712 digest — so a signature for one source chain
+    ///         cannot be replayed against another.
+    mapping(uint256 sourceChainId => address[]) private _enclaveSigners;
+
+    /// @notice Per-source-chain enclave quorum. `0` means the source chain is
+    ///         not registered — used as the existence guard on the release path.
+    mapping(uint256 sourceChainId => uint256) public enclaveThreshold;
+
+    /// @notice Registered enclave source chains, for enumeration and the
+    ///         cross-set disjointness checks. Bounded by `MAX_ENCLAVE_SOURCE_CHAINS`.
+    uint256[] private _enclaveSourceChains;
 
     address[] private _federationSigners;
     uint256 public federationThreshold;
 
     address public commissionRecipient;
 
-    /// @notice Sequential nonce shared by the typed TEE methods (`fundsOut` /
-    ///         `lzFundsOut`). Each successful call must match the current value
-    ///         and then increments it, giving all enclave releases a single
-    ///         total order and one-shot replay protection.
-    uint256 public teeNonce;
+    /// @notice Per-source-chain nonce for the typed TEE methods (`fundsOutCall`
+    ///         / `lzFundsOutCall`). Each source chain has its own lane, so the
+    ///         TEE operating one network cannot invalidate another network's
+    ///         pre-signed release. Each successful call must match the current
+    ///         value for its `sourceChainId` and then increments it.
+    mapping(uint256 sourceChainId => uint256) public teeNonce;
 
     /// @notice Federation proposals.
     mapping(bytes32 => Proposal) private _proposals;
 
-    /// @notice Sequential nonce for all federation operations (propose, cancel, emergency).
+    /// @notice Sequential nonce for the regular federation lane: `_propose`
+    ///         (all typed proposals) and `cancelProposal`.
     uint256 public proposalNonce;
+
+    /// @notice Sequential nonce for the emergency lane: `emergencyPause` /
+    ///         `emergencyUnpause`. Kept separate from `proposalNonce` so an
+    ///         emergency action cannot invalidate an already-signed regular
+    ///         proposal. Cross-lane replay is independently prevented by
+    ///         each operation's distinct EIP-712 typehash.
+    uint256 public emergencyNonce;
 
     /// @notice Minimum delay (seconds) between proposal creation and execution.
     uint256 public timelockDuration;
@@ -89,10 +112,26 @@ contract MultisigProxy is IMultisigProxy {
     ///         unreachable). 20 is ample for an enclave/federation committee.
     uint256 public constant MAX_SIGNERS = 20;
 
+    /// @notice Hard upper bound on the number of registered enclave source
+    ///         chains. Bounds the cross-set disjointness loop (run on every
+    ///         signer rotation), keeping governance updates gas-predictable.
+    uint256 public constant MAX_ENCLAVE_SOURCE_CHAINS = 32;
+
     /// @notice Length of a Solidity function selector (`bytes4`) in bytes. Used
     ///         to guard `callData` against payloads too short to even carry a
     ///         selector before it is sliced via `calldataload`.
     uint256 public constant SELECTOR_LENGTH = 4;
+
+    /// @notice CommissionManager withdrawal selectors that the generic
+    ///         `AdminExecuteCommissionManager` path is NOT allowed to call —
+    ///         they take a free recipient and would bypass the pinned
+    ///         `commissionRecipient`. Withdrawals must go through the
+    ///         dedicated WithdrawTokenCommissionCM / WithdrawNativeCommissionCM
+    ///         ops, which force the recipient to `commissionRecipient`.
+    bytes4 private constant _SEL_WITHDRAW_TOKEN = bytes4(keccak256("withdrawTokenCommission(address,address,uint256)"));
+    bytes4 private constant _SEL_WITHDRAW_NATIVE = bytes4(keccak256("withdrawNativeCommission(address,uint256)"));
+    bytes4 private constant _SEL_WITHDRAW_ALL_TOKEN = bytes4(keccak256("withdrawAllTokenCommission(address,address)"));
+    bytes4 private constant _SEL_WITHDRAW_ALL_NATIVE = bytes4(keccak256("withdrawAllNativeCommission(address)"));
 
     uint256 private immutable _cachedChainId;
     bytes32 private immutable _cachedDomainSeparator;
@@ -112,7 +151,7 @@ contract MultisigProxy is IMultisigProxy {
     bytes32 private constant _PROPOSE_ADMIN_EXECUTE_TYPEHASH =
         keccak256("ProposeAdminExecute(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH = keccak256(
-        "ProposeUpdateEnclaveSigners(address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)"
+        "ProposeUpdateEnclaveSigners(uint256 sourceChainId,address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)"
     );
     bytes32 private constant _PROPOSE_UPDATE_FEDERATION_SIGNERS_TYPEHASH = keccak256(
         "ProposeUpdateFederationSigners(address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)"
@@ -176,6 +215,7 @@ contract MultisigProxy is IMultisigProxy {
         address commissionManager_,
         address[] memory enclaveSigners_,
         uint256 enclaveThreshold_,
+        uint256 initialEnclaveSourceChain_,
         address[] memory federationSigners_,
         uint256 federationThreshold_,
         address commissionRecipient_,
@@ -185,6 +225,7 @@ contract MultisigProxy is IMultisigProxy {
         if (bridge_ == address(0)) revert ZeroBridge();
         if (commissionManager_ == address(0)) revert ZeroCommissionManager();
         if (enclaveSigners_.length == 0) revert NoSigners();
+        if (initialEnclaveSourceChain_ == 0) revert UnknownSourceChain(0);
         _requireValidThreshold(enclaveThreshold_, enclaveSigners_.length);
         if (federationSigners_.length == 0) revert NoSigners();
         _requireValidThreshold(federationThreshold_, federationSigners_.length);
@@ -201,8 +242,9 @@ contract MultisigProxy is IMultisigProxy {
 
         bridge = bridge_;
         commissionManager = commissionManager_;
-        _enclaveSigners = enclaveSigners_;
-        enclaveThreshold = enclaveThreshold_;
+        _enclaveSigners[initialEnclaveSourceChain_] = enclaveSigners_;
+        enclaveThreshold[initialEnclaveSourceChain_] = enclaveThreshold_;
+        _enclaveSourceChains.push(initialEnclaveSourceChain_);
         _federationSigners = federationSigners_;
         federationThreshold = federationThreshold_;
         commissionRecipient = commissionRecipient_;
@@ -227,21 +269,25 @@ contract MultisigProxy is IMultisigProxy {
         bytes[] calldata enclaveSigs
     ) external {
         _checkTeeTiming(deadline);
-        if (nonce != teeNonce) revert InvalidNonce();
+        // Select the enclave set by the release's source chain. `sourceChainId`
+        // is committed to in the digest below, so a signature is bound to the
+        // set of exactly one source chain. A zero threshold = unregistered.
+        if (enclaveThreshold[params.sourceChainId] == 0) revert UnknownSourceChain(params.sourceChainId);
+        if (nonce != teeNonce[params.sourceChainId]) revert InvalidNonce();
 
         _verifySignatures(
             _hashTypedData(_fundsOutStructHash(params, nonce, deadline)),
             enclaveBitmap,
             enclaveSigs,
-            _enclaveSigners,
-            enclaveThreshold
+            _enclaveSigners[params.sourceChainId],
+            enclaveThreshold[params.sourceChainId]
         );
 
-        teeNonce++;
+        teeNonce[params.sourceChainId]++;
 
         IBridge(bridge).fundsOut(params);
 
-        emit FundsOutExecuted(nonce, enclaveBitmap);
+        emit FundsOutExecuted(params.sourceChainId, nonce, enclaveBitmap);
     }
 
     /// @dev EIP-712 struct hash for `TeeFundsOut`. Isolated in its own frame to
@@ -282,7 +328,8 @@ contract MultisigProxy is IMultisigProxy {
         bytes[] calldata enclaveSigs
     ) external payable {
         _checkTeeTiming(deadline);
-        if (nonce != teeNonce) revert InvalidNonce();
+        if (enclaveThreshold[params.sourceChainId] == 0) revert UnknownSourceChain(params.sourceChainId);
+        if (nonce != teeNonce[params.sourceChainId]) revert InvalidNonce();
 
         address adapter = lzAdapter;
         if (adapter == address(0)) revert LZAdapterNotSet();
@@ -291,11 +338,11 @@ contract MultisigProxy is IMultisigProxy {
             _hashTypedData(_lzFundsOutStructHash(params, nonce, deadline)),
             enclaveBitmap,
             enclaveSigs,
-            _enclaveSigners,
-            enclaveThreshold
+            _enclaveSigners[params.sourceChainId],
+            enclaveThreshold[params.sourceChainId]
         );
 
-        teeNonce++;
+        teeNonce[params.sourceChainId]++;
 
         // Release to the adapter, then bridge exactly what the adapter received,
         // so the release and the cross-chain send are bound on-chain. The Bridge
@@ -324,7 +371,7 @@ contract MultisigProxy is IMultisigProxy {
             params.dstEid, params.recipient, delivered, params.minAmountLD, params.extraOptions
         );
 
-        emit LzFundsOutExecuted(nonce, enclaveBitmap, params.dstEid, params.recipient, delivered);
+        emit LzFundsOutExecuted(params.sourceChainId, nonce, enclaveBitmap, params.dstEid, params.recipient, delivered);
     }
 
     /// @dev EIP-712 struct hash for `TeeLzFundsOut`. Isolated in its own frame
@@ -376,12 +423,12 @@ contract MultisigProxy is IMultisigProxy {
     /// @inheritdoc IMultisigProxy
     function emergencyPause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external {
         if (block.timestamp > deadline) revert Expired();
-        if (nonce != proposalNonce) revert InvalidNonce();
+        if (nonce != emergencyNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(_EMERGENCY_PAUSE_TYPEHASH, nonce, deadline)));
         _verifySignatures(digest, fedBitmap, fedSigs, _federationSigners, federationThreshold);
 
-        proposalNonce++;
+        emergencyNonce++;
 
         // Emergency freeze of BOTH inflow and outflow — no timelock, federation
         // signatures only. Also halts the enclave/TEE release path (it routes
@@ -395,12 +442,12 @@ contract MultisigProxy is IMultisigProxy {
     /// @inheritdoc IMultisigProxy
     function emergencyUnpause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external {
         if (block.timestamp > deadline) revert Expired();
-        if (nonce != proposalNonce) revert InvalidNonce();
+        if (nonce != emergencyNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(_EMERGENCY_UNPAUSE_TYPEHASH, nonce, deadline)));
         _verifySignatures(digest, fedBitmap, fedSigs, _federationSigners, federationThreshold);
 
-        proposalNonce++;
+        emergencyNonce++;
 
         // Lift the emergency freeze on BOTH inflow and outflow.
         (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyUnpauseAll()"));
@@ -434,6 +481,7 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @inheritdoc IMultisigProxy
     function proposeUpdateEnclaveSigners(
+        uint256 sourceChainId,
         address[] calldata newSigners,
         uint256 newThreshold,
         uint256 nonce,
@@ -444,20 +492,27 @@ contract MultisigProxy is IMultisigProxy {
         // Validate the proposed set up front so a malformed rotation reverts
         // here instead of consuming a nonce + timelock slot and failing only at
         // execution. Disjointness is intentionally left to execute time: it
-        // depends on the live counterpart set, which may change before then.
+        // depends on the live federation and other enclave sets, which may
+        // change before then.
+        if (sourceChainId == 0) revert UnknownSourceChain(0);
         if (newSigners.length == 0) revert NoSigners();
         _requireValidThreshold(newThreshold, newSigners.length);
         _validateSigners(newSigners);
 
         bytes32 structHash = keccak256(
             abi.encode(
-                _PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH, _hashAddressArray(newSigners), newThreshold, nonce, deadline
+                _PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH,
+                sourceChainId,
+                _hashAddressArray(newSigners),
+                newThreshold,
+                nonce,
+                deadline
             )
         );
 
         return _propose(
             OperationType.UpdateEnclaveSigners,
-            abi.encode(newSigners, newThreshold),
+            abi.encode(sourceChainId, newSigners, newThreshold),
             nonce,
             deadline,
             structHash,
@@ -572,6 +627,10 @@ contract MultisigProxy is IMultisigProxy {
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
+
+        // Commission withdrawals must use the pinned-recipient ops; reject them
+        // on the generic path up front (fail-fast, no wasted proposal slot).
+        _requireNotCommissionWithdrawSelector(selector);
 
         bytes32 structHash =
             keccak256(abi.encode(_PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, selector, keccak256(callData), nonce, deadline));
@@ -863,19 +922,26 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     /// @inheritdoc IMultisigProxy
-    function verifyEnclaveSignature(bytes32 digest, bytes calldata signature, uint256 signerIndex)
-        external
-        view
-        returns (bool)
-    {
-        if (signerIndex >= _enclaveSigners.length) revert IndexOutOfRange();
+    function verifyEnclaveSignature(
+        uint256 sourceChainId,
+        bytes32 digest,
+        bytes calldata signature,
+        uint256 signerIndex
+    ) external view returns (bool) {
+        address[] storage set = _enclaveSigners[sourceChainId];
+        if (signerIndex >= set.length) revert IndexOutOfRange();
         address recovered = ECDSA.recover(digest, signature);
-        return recovered == _enclaveSigners[signerIndex];
+        return recovered == set[signerIndex];
     }
 
     /// @inheritdoc IMultisigProxy
-    function getEnclaveSigners() external view returns (address[] memory) {
-        return _enclaveSigners;
+    function getEnclaveSigners(uint256 sourceChainId) external view returns (address[] memory) {
+        return _enclaveSigners[sourceChainId];
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function getEnclaveSourceChains() external view returns (uint256[] memory) {
+        return _enclaveSourceChains;
     }
 
     /// @inheritdoc IMultisigProxy
@@ -940,20 +1006,36 @@ contract MultisigProxy is IMultisigProxy {
             (bool ok, bytes memory ret) = bridge.call(opData);
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.UpdateEnclaveSigners) {
-            (address[] memory newSigners, uint256 newThreshold) = abi.decode(opData, (address[], uint256));
+            (uint256 sourceChainId, address[] memory newSigners, uint256 newThreshold) =
+                abi.decode(opData, (uint256, address[], uint256));
+            if (sourceChainId == 0) revert UnknownSourceChain(0);
             if (newSigners.length == 0) revert NoSigners();
             _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
+            // Keep every trust domain independent: disjoint from the federation
+            // and from every *other* enclave source chain (skip this chain, so a
+            // partial rotation that keeps some of its own keys is allowed).
             _requireDisjoint(newSigners, _federationSigners);
-            _enclaveSigners = newSigners;
-            enclaveThreshold = newThreshold;
-            emit EnclaveSignersUpdated(newSigners, newThreshold);
+            _requireDisjointFromAllEnclaveSets(newSigners, sourceChainId);
+
+            // Register a brand-new source chain (bounded); existing ones just
+            // overwrite their set/threshold.
+            if (enclaveThreshold[sourceChainId] == 0) {
+                if (_enclaveSourceChains.length >= MAX_ENCLAVE_SOURCE_CHAINS) {
+                    revert TooManyEnclaveSourceChains(_enclaveSourceChains.length + 1, MAX_ENCLAVE_SOURCE_CHAINS);
+                }
+                _enclaveSourceChains.push(sourceChainId);
+            }
+            _enclaveSigners[sourceChainId] = newSigners;
+            enclaveThreshold[sourceChainId] = newThreshold;
+            emit EnclaveSignersUpdated(sourceChainId, newSigners, newThreshold);
         } else if (opType == OperationType.UpdateFederationSigners) {
             (address[] memory newSigners, uint256 newThreshold) = abi.decode(opData, (address[], uint256));
             if (newSigners.length == 0) revert NoSigners();
             _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
-            _requireDisjoint(newSigners, _enclaveSigners);
+            // Federation must stay disjoint from every enclave source-chain set.
+            _requireDisjointFromAllEnclaveSets(newSigners, 0);
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
             emit FederationSignersUpdated(newSigners, newThreshold);
@@ -976,7 +1058,11 @@ contract MultisigProxy is IMultisigProxy {
             timelockDuration = newDuration;
             emit TimelockDurationUpdated(newDuration);
         } else if (opType == OperationType.AdminExecuteCommissionManager) {
-            // opData = raw CommissionManager callData
+            // opData = raw CommissionManager callData. Enforce (again, at the
+            // execution boundary) that this generic path cannot call a
+            // withdrawal selector and re-point commission away from the pinned
+            // `commissionRecipient`.
+            _requireNotCommissionWithdrawSelector(_firstSelector(opData));
             (bool ok, bytes memory ret) = commissionManager.call(opData);
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.AdminExecuteRouteRegistry) {
@@ -1145,6 +1231,19 @@ contract MultisigProxy is IMultisigProxy {
         }
     }
 
+    /// @dev Reverts if `candidate` overlaps any registered enclave source-chain
+    ///      set, skipping `exceptSourceChain` (pass `0` to skip none). Used to
+    ///      keep every enclave set disjoint from the others and from the
+    ///      federation. Cost is bounded by `MAX_ENCLAVE_SOURCE_CHAINS` *
+    ///      `MAX_SIGNERS` * candidate length.
+    function _requireDisjointFromAllEnclaveSets(address[] memory candidate, uint256 exceptSourceChain) private view {
+        uint256[] memory chains = _enclaveSourceChains;
+        for (uint256 i = 0; i < chains.length; i++) {
+            if (chains[i] == exceptSourceChain) continue;
+            _requireDisjoint(candidate, _enclaveSigners[chains[i]]);
+        }
+    }
+
     function _validateSigners(address[] memory signers) private pure {
         // Bound the set before the O(N^2) duplicate scan below, and keep every
         // signer index within the uint256 signature bitmap (R-I-06).
@@ -1181,6 +1280,27 @@ contract MultisigProxy is IMultisigProxy {
             } else {
                 revert CallFailed();
             }
+        }
+    }
+
+    /// @dev First 4 bytes of `data` as a selector, or `0x00000000` if `data` is
+    ///      shorter than a selector (such a payload can never be a withdrawal
+    ///      call and the downstream raw call rejects it anyway).
+    function _firstSelector(bytes memory data) private pure returns (bytes4 selector) {
+        if (data.length >= SELECTOR_LENGTH) {
+            assembly { selector := mload(add(data, 0x20)) }
+        }
+    }
+
+    /// @dev Reverts if `selector` is one of the CommissionManager withdrawal
+    ///      selectors, which the generic AdminExecuteCommissionManager path must
+    ///      not reach (they bypass the pinned `commissionRecipient`).
+    function _requireNotCommissionWithdrawSelector(bytes4 selector) private pure {
+        if (
+            selector == _SEL_WITHDRAW_TOKEN || selector == _SEL_WITHDRAW_NATIVE || selector == _SEL_WITHDRAW_ALL_TOKEN
+                || selector == _SEL_WITHDRAW_ALL_NATIVE
+        ) {
+            revert ForbiddenCommissionManagerSelector(selector);
         }
     }
 }

@@ -28,12 +28,15 @@ contract RgbSettlementModuleTest is Test {
     uint256 constant SOURCE_CHAIN_ID = 1_000_001; // RGB
     uint256 constant DEST_CHAIN_ID = 42161; // arbitrum
 
-    uint256 constant TX_ID_1 = 100;
-    uint256 constant TX_ID_2 = 101;
-    uint256 constant TX_ID_3 = 102;
+    bytes32 constant TX_ID_1 = bytes32(uint256(100));
+    bytes32 constant TX_ID_2 = bytes32(uint256(101));
+    bytes32 constant TX_ID_3 = bytes32(uint256(102));
 
     uint256 constant AMOUNT = 100e18;
     uint256 constant BURN_ID = 9_001;
+
+    /// @dev Non-zero RGB OpId threaded through `onFundsIn`'s settlementData.
+    uint256 constant RGB_OP_ID = 0xABCDEF;
 
     function setUp() public {
         module = new RgbSettlementModule(routeRegistry);
@@ -43,13 +46,15 @@ contract RgbSettlementModuleTest is Test {
     // Helpers
     // ========================================================================
 
-    function _fundsInCtx(uint256 operationId, uint256 netAmount) internal view returns (FundsInContext memory) {
+    function _fundsInCtx(bytes32 operationId, uint256 netAmount) internal view returns (FundsInContext memory) {
         return FundsInContext({
             token: token,
             sender: user,
+            sourceSender: bytes32(uint256(uint160(user))),
             grossAmount: netAmount, // gross == net for these tests
             netAmount: netAmount,
             operationId: operationId,
+            senderNonce: 0,
             sourceChainId: SOURCE_CHAIN_ID,
             destChainId: DEST_CHAIN_ID,
             destAddress: "rgb:asset/utxo1abc"
@@ -71,25 +76,38 @@ contract RgbSettlementModuleTest is Test {
         });
     }
 
-    /// @dev Encodes the two parallel arrays the reworked module expects.
-    function _settlementData(uint256[] memory ids, uint256[] memory amounts) internal pure returns (bytes memory) {
+    /// @dev Encodes the two parallel arrays the reworked module expects
+    ///      (`(bytes32[] operationIds, uint256[] amounts)`).
+    function _settlementData(bytes32[] memory ids, uint256[] memory amounts) internal pure returns (bytes memory) {
         return abi.encode(ids, amounts);
     }
 
-    function _single(uint256 value) internal pure returns (uint256[] memory arr) {
+    function _single(bytes32 value) internal pure returns (bytes32[] memory arr) {
+        arr = new bytes32[](1);
+        arr[0] = value;
+    }
+
+    function _amt(uint256 value) internal pure returns (uint256[] memory arr) {
         arr = new uint256[](1);
         arr[0] = value;
     }
 
-    function _pair(uint256 a, uint256 b) internal pure returns (uint256[] memory arr) {
+    function _pair(bytes32 a, bytes32 b) internal pure returns (bytes32[] memory arr) {
+        arr = new bytes32[](2);
+        arr[0] = a;
+        arr[1] = b;
+    }
+
+    function _amtPair(uint256 a, uint256 b) internal pure returns (uint256[] memory arr) {
         arr = new uint256[](2);
         arr[0] = a;
         arr[1] = b;
     }
 
-    function _record(uint256 operationId, uint256 netAmount) internal {
+    /// @dev `onFundsIn` settlementData must decode to a non-zero RGB OpId.
+    function _record(bytes32 operationId, uint256 netAmount) internal {
         vm.prank(routeRegistry);
-        module.onFundsIn(_fundsInCtx(operationId, netAmount), "");
+        module.onFundsIn(_fundsInCtx(operationId, netAmount), abi.encode(RGB_OP_ID));
     }
 
     // ========================================================================
@@ -114,18 +132,30 @@ contract RgbSettlementModuleTest is Test {
         assertEq(module.fundsInRecords(TX_ID_1), AMOUNT);
     }
 
+    function test_onFundsIn_returnsRgbOpId() public {
+        vm.prank(routeRegistry);
+        uint256 returned = module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), abi.encode(RGB_OP_ID));
+        assertEq(returned, RGB_OP_ID, "returns decoded rgb op id");
+    }
+
+    function test_onFundsIn_revertsOnZeroRgbOpId() public {
+        vm.prank(routeRegistry);
+        vm.expectRevert(RgbSettlementModule.InvalidRgbOpId.selector);
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), abi.encode(uint256(0)));
+    }
+
     function test_onFundsIn_revertsOnDuplicateOperationId() public {
         _record(TX_ID_1, AMOUNT);
 
         vm.prank(routeRegistry);
         vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
-        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), "");
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), abi.encode(RGB_OP_ID));
     }
 
     function test_onFundsIn_revertsIfNotRouteRegistry() public {
         vm.prank(attacker);
         vm.expectRevert(RgbSettlementModule.NotRouteRegistry.selector);
-        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), "");
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), abi.encode(RGB_OP_ID));
     }
 
     // ========================================================================
@@ -136,7 +166,7 @@ contract RgbSettlementModuleTest is Test {
         _record(TX_ID_1, AMOUNT);
 
         vm.prank(routeRegistry);
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _amt(AMOUNT)));
 
         // Proof-of-mint ledger is permanent: the check must not mutate it.
         assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, "record left intact (no consumption)");
@@ -149,7 +179,7 @@ contract RgbSettlementModuleTest is Test {
         _record(TX_ID_2, amount2);
 
         vm.prank(routeRegistry);
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_pair(TX_ID_1, TX_ID_2), _pair(amount1, amount2)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_pair(TX_ID_1, TX_ID_2), _amtPair(amount1, amount2)));
 
         assertEq(module.fundsInRecords(TX_ID_1), amount1, "record 1 intact");
         assertEq(module.fundsInRecords(TX_ID_2), amount2, "record 2 intact");
@@ -158,7 +188,7 @@ contract RgbSettlementModuleTest is Test {
     function test_beforeFundsOut_passesOnEmptyArrays() public {
         // Degenerate input: nothing to verify, nothing to revert on.
         vm.prank(routeRegistry);
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(new uint256[](0), new uint256[](0)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(new bytes32[](0), new uint256[](0)));
     }
 
     function test_beforeFundsOut_duplicateIdsAreHarmless() public {
@@ -168,7 +198,7 @@ contract RgbSettlementModuleTest is Test {
         _record(TX_ID_1, AMOUNT);
 
         vm.prank(routeRegistry);
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_pair(TX_ID_1, TX_ID_1), _pair(AMOUNT, AMOUNT)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_pair(TX_ID_1, TX_ID_1), _amtPair(AMOUNT, AMOUNT)));
 
         assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, "record intact");
     }
@@ -179,7 +209,7 @@ contract RgbSettlementModuleTest is Test {
 
         for (uint256 i = 0; i < 3; i++) {
             vm.prank(routeRegistry);
-            module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT)));
+            module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _amt(AMOUNT)));
         }
 
         assertEq(module.fundsInRecords(TX_ID_1), AMOUNT, "record never consumed");
@@ -193,7 +223,7 @@ contract RgbSettlementModuleTest is Test {
         // No record ever made for TX_ID_1.
         vm.prank(routeRegistry);
         vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, TX_ID_1));
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _amt(AMOUNT)));
     }
 
     function test_beforeFundsOut_revertsWhenAmountAboveRecord() public {
@@ -203,7 +233,7 @@ contract RgbSettlementModuleTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(RgbSettlementModule.AmountMismatch.selector, TX_ID_1, AMOUNT + 1, AMOUNT)
         );
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT + 1)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _amt(AMOUNT + 1)));
     }
 
     function test_beforeFundsOut_revertsWhenAmountBelowRecord() public {
@@ -215,7 +245,7 @@ contract RgbSettlementModuleTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(RgbSettlementModule.AmountMismatch.selector, TX_ID_1, AMOUNT - 1, AMOUNT)
         );
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT - 1)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _amt(AMOUNT - 1)));
     }
 
     function test_beforeFundsOut_revertsOnLengthMismatch() public {
@@ -224,7 +254,7 @@ contract RgbSettlementModuleTest is Test {
         // Two ids but one amount.
         vm.prank(routeRegistry);
         vm.expectRevert(RgbSettlementModule.SettlementDataLengthMismatch.selector);
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_pair(TX_ID_1, TX_ID_2), _single(AMOUNT)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_pair(TX_ID_1, TX_ID_2), _amt(AMOUNT)));
     }
 
     function test_beforeFundsOut_revertsOnSecondIdMismatch() public {
@@ -236,7 +266,7 @@ contract RgbSettlementModuleTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(RgbSettlementModule.AmountMismatch.selector, TX_ID_2, AMOUNT + 5, AMOUNT)
         );
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_pair(TX_ID_1, TX_ID_2), _pair(AMOUNT, AMOUNT + 5)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_pair(TX_ID_1, TX_ID_2), _amtPair(AMOUNT, AMOUNT + 5)));
     }
 
     function test_beforeFundsOut_revertsIfNotRouteRegistry() public {
@@ -244,7 +274,7 @@ contract RgbSettlementModuleTest is Test {
 
         vm.prank(attacker);
         vm.expectRevert(RgbSettlementModule.NotRouteRegistry.selector);
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(AMOUNT)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _amt(AMOUNT)));
     }
 
     // ========================================================================
@@ -260,13 +290,13 @@ contract RgbSettlementModuleTest is Test {
 
         if (provided == recorded) {
             vm.prank(routeRegistry);
-            module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(provided)));
+            module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _amt(provided)));
         } else {
             vm.prank(routeRegistry);
             vm.expectRevert(
                 abi.encodeWithSelector(RgbSettlementModule.AmountMismatch.selector, TX_ID_1, provided, recorded)
             );
-            module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _single(provided)));
+            module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _amt(provided)));
         }
 
         assertEq(module.fundsInRecords(TX_ID_1), recorded, "record never mutated");

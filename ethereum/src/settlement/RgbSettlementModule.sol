@@ -38,9 +38,11 @@ import {FundsInContext, FundsOutContext} from "../interfaces/RouteTypes.sol";
 ///      redeploy the module + rotate the route under federation governance.
 ///
 ///      `settlementData` layout:
-///        - `onFundsIn`:  ignored (Bridge already supplies the canonical
-///                        `operationId` / `netAmount` inside `ctx`).
-///        - `beforeFundsOut`: `abi.encode(uint256[] operationIds, uint256[] amounts)`
+///        - `onFundsIn`:  `abi.encode(uint256 rgbOpId)` — the RGB OpId, decoded
+///                        and returned for Bridge's `FundsIn` event. The record
+///                        is keyed by the bridge-derived `ctx.operationId`, not
+///                        by this value.
+///        - `beforeFundsOut`: `abi.encode(bytes32[] operationIds, uint256[] amounts)`
 ///                        (equal-length parallel arrays).
 ///
 ///      This contract owns no tokens and mutates
@@ -62,15 +64,19 @@ contract RgbSettlementModule is ISettlementModule {
     ///         silently overwrite the previous net amount and is rejected.
     error DuplicateOperationId();
 
+    /// @notice `onFundsIn` `settlementData` decoded to a zero RGB OpId. The RGB
+    ///         route requires a non-zero OpId (it is threaded to the RGB side).
+    error InvalidRgbOpId();
+
     /// @notice A `beforeFundsOut` call referenced an `operationId` that has no
     ///         `fundsInRecords` entry (never recorded on-chain).
-    error FundsInNotFound(uint256 operationId);
+    error FundsInNotFound(bytes32 operationId);
 
     /// @notice A `beforeFundsOut` operation id exists, but the amount supplied
     ///         in `settlementData` does not match the on-chain mint record.
     ///         RGB binds an operationId to an exact mint amount, so the match
     ///         must be exact.
-    error AmountMismatch(uint256 operationId, uint256 provided, uint256 recorded);
+    error AmountMismatch(bytes32 operationId, uint256 provided, uint256 recorded);
 
     /// @notice `beforeFundsOut` `settlementData` decoded to `operationIds` and
     ///         `amounts` arrays of different lengths.
@@ -88,7 +94,7 @@ contract RgbSettlementModule is ISettlementModule {
     ///         value means "never recorded under this id". Records are written
     ///         once at `onFundsIn` and never cleared — they are a permanent
     ///         proof-of-mint ledger, not a consumable balance.
-    mapping(uint256 operationId => uint256 netAmount) public fundsInRecords;
+    mapping(bytes32 operationId => uint256 netAmount) public fundsInRecords;
 
     // =========================================================================
     // Modifiers
@@ -115,24 +121,29 @@ contract RgbSettlementModule is ISettlementModule {
     // =========================================================================
 
     /// @inheritdoc ISettlementModule
-    /// @dev Records the post-commission `netAmount` for `ctx.operationId`.
-    ///      Reverts `DuplicateOperationId` if a non-zero record already
-    ///      exists under the same id. `settlementData` is ignored for this
-    ///      module — the canonical fundsIn data is taken from `ctx`.
-    function onFundsIn(
-        FundsInContext calldata ctx,
-        bytes calldata /* settlementData */
-    )
+    /// @dev Records the post-commission `netAmount` under the canonical
+    ///      `ctx.operationId` (the bridge-derived, unpredictable key). Reverts
+    ///      `DuplicateOperationId` if a non-zero record already exists under
+    ///      that key. `settlementData` carries the RGB OpId as `abi.encode(uint256
+    ///      rgbOpId)`; it is decoded and returned so Bridge can surface it in the
+    ///      RGB-only `FundsIn` event. The RGB OpId is NOT the dedup key — it is a
+    ///      pass-through correlation id (a mempool copy of it cannot pre-empt a
+    ///      deposit, since dedup is on `ctx.operationId`).
+    function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
         external
         override
         onlyRouteRegistry
+        returns (uint256 rgbOpId)
     {
         if (fundsInRecords[ctx.operationId] != 0) revert DuplicateOperationId();
         fundsInRecords[ctx.operationId] = ctx.netAmount;
+
+        rgbOpId = abi.decode(settlementData, (uint256));
+        if (rgbOpId == 0) revert InvalidRgbOpId();
     }
 
     /// @inheritdoc ISettlementModule
-    /// @dev Decodes `settlementData` as `(uint256[] operationIds, uint256[] amounts)`
+    /// @dev Decodes `settlementData` as `(bytes32[] operationIds, uint256[] amounts)`
     ///      and verifies every referenced mint: each `operationId` must exist
     ///      and its recorded amount must equal the supplied amount.
     function beforeFundsOut(
@@ -145,7 +156,7 @@ contract RgbSettlementModule is ISettlementModule {
         override
         onlyRouteRegistry
     {
-        (uint256[] memory operationIds, uint256[] memory amounts) = abi.decode(settlementData, (uint256[], uint256[]));
+        (bytes32[] memory operationIds, uint256[] memory amounts) = abi.decode(settlementData, (bytes32[], uint256[]));
 
         if (operationIds.length != amounts.length) revert SettlementDataLengthMismatch();
 
