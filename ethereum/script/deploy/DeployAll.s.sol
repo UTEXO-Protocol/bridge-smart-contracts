@@ -8,7 +8,9 @@ import {CommissionManager} from "../../src/CommissionManager.sol";
 import {MultisigProxy} from "../../src/MultisigProxy.sol";
 import {RouteRegistry} from "../../src/RouteRegistry.sol";
 import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
+import {NullVerifier} from "../../src/verifiers/NullVerifier.sol";
 import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol";
+import {RgbOutboundSettlementModule} from "../../src/settlement/RgbOutboundSettlementModule.sol";
 
 /// @title DeployAll
 /// @notice Full production deploy flow.
@@ -23,7 +25,11 @@ import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol"
 ///   n + 2  → Bridge             (uses the live RouteRegistry + CM)
 ///   n + 3  → RGBVerifier        (wraps the BtcRelay)
 ///   n + 4  → RgbSettlementModule (paired with RouteRegistry)
-///   n + 5  → MultisigProxy
+///   n + 5  → NullVerifier       (explicit no-proof verifier for operational /
+///                                 non-RGB-source routes, e.g. Arch → RGB)
+///   n + 6  → RgbOutboundSettlementModule (debit-RGB / non-RGB-credit routes,
+///                                 e.g. RGB → Arch; wraps RgbSettlementModule)
+///   n + 7  → MultisigProxy
 ///          → (optional) CommissionManager config txs, each present only when
 ///            its env is set: setEthUsdFeed, setSequencerUptimeFeed,
 ///            setEthUsdPriceBounds. These shift the transferOwnership nonces
@@ -84,6 +90,8 @@ contract DeployAll is Script {
             RouteRegistry routeRegistry,
             RGBVerifier rgbVerifier,
             RgbSettlementModule rgbModule,
+            NullVerifier nullVerifier,
+            RgbOutboundSettlementModule outboundModule,
             MultisigProxy proxy
         )
     {
@@ -145,11 +153,20 @@ contract DeployAll is Script {
         // ---- 4. Bridge (nonce n+2) ---------------------------------------
         bridge = new Bridge(usdt0, address(routeRegistry), payable(address(cm)), address(0), minFundsIn);
 
-        // ---- 5. Route plugins (nonce n+3, n+4) ---------------------------
+        // ---- 5. Route plugins (nonce n+3 .. n+6) -------------------------
         rgbVerifier = new RGBVerifier(btcRelay, minSourceConf, maxLatestConf, minConfGap);
         rgbModule = new RgbSettlementModule(address(routeRegistry));
+        // NullVerifier: explicit no-proof verifier for operational / non-RGB-
+        // source routes (e.g. Arch → RGB, Pool → MintBurn). One instance serves
+        // every such route. Federation wires it per route via `proposeSetRoute`.
+        nullVerifier = new NullVerifier();
+        // RgbOutboundSettlementModule: for debit-RGB / non-RGB-credit routes
+        // (e.g. RGB → Arch) — reads the canonical RGB ledger (amount + network
+        // tag), writes nothing on credit. Routes with an RGB credit side use the
+        // canonical `rgbModule` instead.
+        outboundModule = new RgbOutboundSettlementModule(address(routeRegistry), address(rgbModule));
 
-        // ---- 6. MultisigProxy (nonce n+5) --------------------------------
+        // ---- 6. MultisigProxy (nonce n+7) --------------------------------
         proxy = new MultisigProxy(
             address(bridge), address(cm), enc, encThr, initialSrcChain, fed, fedThr, commission, timelock, minTimelock
         );
@@ -191,6 +208,8 @@ contract DeployAll is Script {
         console2.log("  maxLatestConfirmations:       ", rgbVerifier.maxLatestConfirmations());
         console2.log("  minConfirmationGap:           ", rgbVerifier.minConfirmationGap());
         console2.log("RgbSettlementModule deployed at:", address(rgbModule));
+        console2.log("NullVerifier deployed at:       ", address(nullVerifier));
+        console2.log("RgbOutboundSettlementModule at: ", address(outboundModule));
         console2.log("MultisigProxy deployed at:      ", address(proxy));
         if (ethUsdFeed != address(0)) {
             console2.log("ETH/USD feed wired:             ", ethUsdFeed);
@@ -214,6 +233,13 @@ contract DeployAll is Script {
         require(address(bridge) == predictedBridge, "Bridge address prediction mismatch");
         require(routeRegistry.bridge() == address(bridge), "RouteRegistry.bridge mismatch");
         require(rgbModule.routeRegistry() == address(routeRegistry), "RgbSettlementModule.routeRegistry mismatch");
+        require(
+            outboundModule.routeRegistry() == address(routeRegistry),
+            "RgbOutboundSettlementModule.routeRegistry mismatch"
+        );
+        require(
+            address(outboundModule.rgbModule()) == address(rgbModule), "RgbOutboundSettlementModule.rgbModule mismatch"
+        );
         require(bridge.routeRegistry() == address(routeRegistry), "Bridge.routeRegistry mismatch");
         require(cm.bridgeAddress() == address(bridge), "CM.bridgeAddress mismatch");
         // Two-step: ownership stays with `deployer` until the federation

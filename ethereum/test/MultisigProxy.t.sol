@@ -72,6 +72,9 @@ contract MultisigProxyTest is Test {
 
     // ---- Re-declared events ------------------------------------------------
     event FundsOutExecuted(uint256 indexed sourceChainId, uint256 indexed nonce, uint256 enclaveBitmap);
+    event RebalanceExecuted(
+        uint256 indexed sourceChainId, uint256 indexed destinationChainId, uint256 nonce, uint256 enclaveBitmap
+    );
     event LzFundsOutExecuted(
         uint256 indexed sourceChainId,
         uint256 indexed nonce,
@@ -1163,6 +1166,117 @@ contract MultisigProxyTest is Test {
 
         vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
         proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
+    }
+
+    // ========================================================================
+    // TEE rebalanceCall
+    // ========================================================================
+
+    /// @dev Rebalance params over the registered (RGB → SOURCE) route: debit
+    ///      leg is burn-backed (BtcRelay proof + seed record check), credit leg
+    ///      writes a record and threads a fresh RGB OpId. Canonical burnId is
+    ///      derived purely from the intent (no nonce), mirroring the Bridge formula.
+    function _rebalanceParams() internal view returns (IBridge.RebalanceParams memory p) {
+        bytes memory proof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
+        p = IBridge.RebalanceParams({
+            amount: AMOUNT,
+            burnId: 0,
+            sourceChainId: RGB_CHAIN_ID,
+            destinationChainId: SOURCE_CHAIN_ID,
+            sourceAddress: SRC_ADDR,
+            destinationAddress: DST_ADDR,
+            proof: proof,
+            settlementDataOut: _settlement(_fundsInIds()),
+            settlementDataIn: abi.encode(RGB_OP_ID + 7)
+        });
+
+        p.burnId = uint256(
+            keccak256(
+                bytes.concat(
+                    abi.encode(
+                        bridge.REBALANCE_BURN_ID_TYPEHASH(),
+                        address(bridge),
+                        block.chainid,
+                        address(token),
+                        p.amount,
+                        p.sourceChainId,
+                        p.destinationChainId
+                    ),
+                    abi.encode(
+                        keccak256(bytes(p.sourceAddress)),
+                        keccak256(bytes(p.destinationAddress)),
+                        keccak256(p.proof),
+                        keccak256(p.settlementDataOut),
+                        keccak256(p.settlementDataIn)
+                    )
+                )
+            )
+        );
+    }
+
+    function test_rebalanceCall_executesViaBridge() public {
+        IBridge.RebalanceParams memory params = _rebalanceParams();
+        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestTeeRebalance(domainSep, params, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        uint256 srcBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 dstBefore = bridge.lockedLiquidity(SOURCE_CHAIN_ID);
+        uint256 custodyBefore = token.balanceOf(address(bridge));
+
+        vm.expectEmit(true, true, false, true);
+        emit RebalanceExecuted(RGB_CHAIN_ID, SOURCE_CHAIN_ID, nonce, bitmap);
+
+        proxy.rebalanceCall(params, nonce, deadline, bitmap, sigs);
+
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), srcBefore - AMOUNT, "source bucket debited");
+        assertEq(bridge.lockedLiquidity(SOURCE_CHAIN_ID), dstBefore + AMOUNT, "destination bucket credited");
+        assertEq(token.balanceOf(address(bridge)), custodyBefore, "no tokens moved");
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce + 1, "shared teeNonce stream advanced");
+    }
+
+    function test_rebalanceCall_revertsOnWrongNonce() public {
+        IBridge.RebalanceParams memory params = _rebalanceParams();
+        uint256 nonce = 99;
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestTeeRebalance(domainSep, params, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.rebalanceCall(params, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_rebalanceCall_revertsOnUnknownSourceChain() public {
+        IBridge.RebalanceParams memory params = _rebalanceParams();
+        params.sourceChainId = 555; // no enclave set registered for this chain
+        uint256 nonce = 0;
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestTeeRebalance(domainSep, params, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnknownSourceChain.selector, 555));
+        proxy.rebalanceCall(params, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_rebalanceCall_revertsOnBelowThreshold() public {
+        IBridge.RebalanceParams memory params = _rebalanceParams();
+        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestTeeRebalance(domainSep, params, nonce, deadline);
+        uint256[] memory pks = new uint256[](1);
+        pks[0] = encPk1;
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.BelowThreshold.selector);
+        proxy.rebalanceCall(params, nonce, deadline, 0x1, sigs);
     }
 
     // ========================================================================
