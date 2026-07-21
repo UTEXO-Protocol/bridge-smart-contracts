@@ -25,6 +25,7 @@ interface IBridge {
     error InvalidBurnId(uint256 provided, uint256 expected);
     error BurnIdAlreadyConsumed(uint256 burnId);
     error NativeValueMismatch();
+    error RebalanceSameChain(uint256 chainId);
 
     // =========================================================================
     // Events
@@ -130,6 +131,33 @@ interface IBridge {
         string sourceAddress
     );
 
+    /// @notice Emitted on every successful `rebalanceLiquidity`. The canonical
+    ///         record of an accounting-only liquidity migration between two
+    ///         chain buckets — no tokens move on this chain. When the
+    ///         destination route's settlement module returns a non-zero RGB
+    ///         OpId, the standard `FundsIn` event is emitted alongside (the RGB
+    ///         side consumes `FundsIn` only and needs no rebalance awareness).
+    /// @param operationId        Credit-leg canonical id, derived on-chain (keys
+    ///                           the destination route's settlement record).
+    /// @param burnId             Debit-leg replay key, shares the `consumedBurnIds`
+    ///                           namespace with `fundsOut`.
+    /// @param sourceChainId      Chain bucket debited.
+    /// @param destinationChainId Chain bucket credited.
+    /// @param amount             Amount migrated between the buckets (no commission).
+    /// @param sourceAddress      Source-chain identity behind the debit (e.g. the
+    ///                           RGB burner); its hash is folded into `operationId`.
+    /// @param destinationAddress Destination-chain address backing the credit
+    ///                           (e.g. the bridge's RGB wallet receiving a mint).
+    event BridgeRebalance(
+        bytes32 indexed operationId,
+        uint256 indexed burnId,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        uint256 amount,
+        string sourceAddress,
+        string destinationAddress
+    );
+
     // =========================================================================
     // External — user-facing
     // =========================================================================
@@ -207,6 +235,59 @@ interface IBridge {
     ///      token-bucket library; bucket state is exposed via the `chainBuckets`
     ///      / `globalBucket` getters and the `availableOutflow` previews.
     function fundsOut(FundsOutParams calldata params) external;
+
+    /// @notice Parameters for `rebalanceLiquidity`.
+    /// @param amount             Amount to migrate from the source bucket to the
+    ///                           destination bucket. No commission is taken.
+    /// @param burnId             Bridge-derived replay guard for the debit leg.
+    ///                           Must equal the Bridge's canonical hash of the
+    ///                           rebalance fields (no nonce — an identical intent
+    ///                           can never execute twice, matching `fundsOut`).
+    ///                           Lives in the same `consumedBurnIds` namespace as
+    ///                           `fundsOut` burn ids.
+    /// @param sourceChainId      Chain whose bucket is debited (burn side).
+    /// @param destinationChainId Chain whose bucket is credited (mint side).
+    /// @param sourceAddress      Source-chain identity behind the debit;
+    ///                           `keccak256(sourceAddress)` is folded into the
+    ///                           credit-leg `operationId`.
+    /// @param destinationAddress Destination-chain address backing the credit.
+    /// @param proof              Opaque payload for the route's `IFinalityVerifier`
+    ///                           (debit-leg source proof; e.g. BtcRelay pairs for
+    ///                           an RGB burn).
+    /// @param settlementDataOut  Opaque payload for the route module's
+    ///                           `beforeFundsOut` (debit-leg settlement check).
+    /// @param settlementDataIn   Opaque payload for the route module's
+    ///                           `onFundsIn` (credit-leg settlement write).
+    struct RebalanceParams {
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string sourceAddress;
+        string destinationAddress;
+        bytes proof;
+        bytes settlementDataOut;
+        bytes settlementDataIn;
+    }
+
+    /// @notice Migrate isolated liquidity between two chain buckets without
+    ///         moving tokens: debit `lockedLiquidity[sourceChainId]`, credit
+    ///         `lockedLiquidity[destinationChainId]`, atomically and
+    ///         proof-gated via the `(sourceChainId, destinationChainId)` route.
+    ///         Composition: the debit leg is `fundsOut` minus the token payout
+    ///         (replay guard, route verifier + settlement check, bucket debit,
+    ///         per-chain rate limit); the credit leg is `fundsIn` minus the
+    ///         token pull (operationId derivation, settlement write, bucket
+    ///         credit, `FundsIn` emission for RGB destinations).
+    ///         Only callable by owner (`MultisigProxy`, TEE M-of-N — the
+    ///         source chain's enclave set attests the funds left that chain).
+    /// @dev Consumes the source chain's outflow bucket (release capacity is
+    ///      migrating away) but NOT the global bucket (no token egress; the
+    ///      eventual physical exit pays the global bucket in `fundsOut`).
+    ///      Gated on `whenOutflowNotPaused` only: an inflow-only pause is
+    ///      documented as "withdrawals stay open for liquidity migration", and
+    ///      this is exactly a liquidity migration.
+    function rebalanceLiquidity(RebalanceParams calldata params) external;
 
     // =========================================================================
     // External — admin (called via MultisigProxy)

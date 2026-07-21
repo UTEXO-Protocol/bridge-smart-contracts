@@ -146,6 +146,9 @@ contract MultisigProxy is IMultisigProxy {
     bytes32 private constant _TEE_LZ_FUNDS_OUT_TYPEHASH = keccak256(
         "TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)"
     );
+    bytes32 private constant _TEE_REBALANCE_TYPEHASH = keccak256(
+        "TeeRebalance(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,string destinationAddress,bytes proof,bytes settlementDataOut,bytes settlementDataIn,uint256 nonce,uint256 deadline)"
+    );
 
     // Federation propose — typed EIP-712 structs per operation (Bridge side)
     bytes32 private constant _PROPOSE_ADMIN_EXECUTE_TYPEHASH =
@@ -310,6 +313,71 @@ contract MultisigProxy is IMultisigProxy {
                 keccak256(params.settlementData),
                 nonce,
                 deadline
+            )
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    /// @dev Typed enclave rebalance: the only call this makes is
+    ///      `Bridge.rebalanceLiquidity`. Signer-set selection, nonce stream and
+    ///      timing rules mirror `fundsOutCall`: the SOURCE chain's enclave set
+    ///      authorises the operation (it attests the funds left that chain — a
+    ///      compromised set can migrate at most `lockedLiquidity[source]`, the
+    ///      same bound a rogue `fundsOut` has), and the shared per-source-chain
+    ///      `teeNonce` orders it against releases from the same chain.
+    function rebalanceCall(
+        IBridge.RebalanceParams calldata params,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 enclaveBitmap,
+        bytes[] calldata enclaveSigs
+    ) external {
+        _checkTeeTiming(deadline);
+        if (enclaveThreshold[params.sourceChainId] == 0) revert UnknownSourceChain(params.sourceChainId);
+        if (nonce != teeNonce[params.sourceChainId]) revert InvalidNonce();
+
+        _verifySignatures(
+            _hashTypedData(_rebalanceStructHash(params, nonce, deadline)),
+            enclaveBitmap,
+            enclaveSigs,
+            _enclaveSigners[params.sourceChainId],
+            enclaveThreshold[params.sourceChainId]
+        );
+
+        teeNonce[params.sourceChainId]++;
+
+        IBridge(bridge).rebalanceLiquidity(params);
+
+        emit RebalanceExecuted(params.sourceChainId, params.destinationChainId, nonce, enclaveBitmap);
+    }
+
+    /// @dev EIP-712 struct hash for `TeeRebalance`. Built in two `abi.encode`
+    ///      halves joined with `bytes.concat` (every field is a 32-byte word;
+    ///      dynamic ones are pre-hashed) — byte-identical to a single encode,
+    ///      but each half stays shallow enough to compile without the optimizer.
+    function _rebalanceStructHash(IBridge.RebalanceParams calldata params, uint256 nonce, uint256 deadline)
+        private
+        pure
+        returns (bytes32)
+    {
+        return keccak256(
+            bytes.concat(
+                abi.encode(
+                    _TEE_REBALANCE_TYPEHASH,
+                    params.amount,
+                    params.burnId,
+                    params.sourceChainId,
+                    params.destinationChainId,
+                    keccak256(bytes(params.sourceAddress))
+                ),
+                abi.encode(
+                    keccak256(bytes(params.destinationAddress)),
+                    keccak256(params.proof),
+                    keccak256(params.settlementDataOut),
+                    keccak256(params.settlementDataIn),
+                    nonce,
+                    deadline
+                )
             )
         );
     }

@@ -141,6 +141,9 @@ interface IMultisigProxy {
 
     // TEE — typed enclave releases
     event FundsOutExecuted(uint256 indexed sourceChainId, uint256 indexed nonce, uint256 enclaveBitmap);
+    event RebalanceExecuted(
+        uint256 indexed sourceChainId, uint256 indexed destinationChainId, uint256 nonce, uint256 enclaveBitmap
+    );
     event LzFundsOutExecuted(
         uint256 indexed sourceChainId,
         uint256 indexed nonce,
@@ -188,6 +191,20 @@ interface IMultisigProxy {
     ///         enclave path can never reach a privileged setter.
     function fundsOutCall(
         IBridge.FundsOutParams calldata params,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 enclaveBitmap,
+        bytes[] calldata enclaveSigs
+    ) external;
+
+    /// @notice Typed enclave rebalance: authorise `Bridge.rebalanceLiquidity`
+    ///         with M-of-N signatures from the SOURCE chain's enclave set (it
+    ///         attests the funds left that chain). The only call this makes is
+    ///         `Bridge.rebalanceLiquidity` — no generic dispatch. Shares the
+    ///         per-source-chain `teeNonce` stream with `fundsOutCall` /
+    ///         `lzFundsOutCall`.
+    function rebalanceCall(
+        IBridge.RebalanceParams calldata params,
         uint256 nonce,
         uint256 deadline,
         uint256 enclaveBitmap,

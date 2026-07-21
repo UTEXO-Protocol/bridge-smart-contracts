@@ -87,6 +87,30 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         "UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)"
     );
 
+    /// @notice Domain-separated type hash for the credit-leg `operationId` of a
+    ///         `rebalanceLiquidity` call. Distinct from
+    ///         `FUNDS_IN_OPERATION_TYPEHASH` so a rebalance id can never collide
+    ///         with a deposit id. Folds in the canonical `burnId` (itself a hash
+    ///         of the FULL intent, including the debit-side `proof` and
+    ///         `settlementDataOut`), so two rebalances that differ only on the
+    ///         debit side — same source/amount/destination but a different burn —
+    ///         still derive distinct `operationId`s. Without this, a credit leg
+    ///         whose `settlementDataIn` is empty (e.g. RGB→Arch) would collide.
+    bytes32 public constant REBALANCE_OPERATION_TYPEHASH = keccak256(
+        "UtexoRebalanceOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,address token,uint256 amount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataInHash,uint256 burnId,uint256 chainId)"
+    );
+
+    /// @notice Domain-separated type hash for the `rebalanceLiquidity` replay
+    ///         key. Derived purely from the rebalance intent — no nonce is
+    ///         folded in, so it matches `fundsOut`'s replay model exactly: an
+    ///         identical intent can never execute twice, while legitimately
+    ///         distinct rebalances differ in the intent itself (the destination
+    ///         RGB OpId carried in `settlementDataIn` for mint-side credits, or
+    ///         the Bitcoin `proof` + referenced records for burn-backed debits).
+    bytes32 public constant REBALANCE_BURN_ID_TYPEHASH = keccak256(
+        "UtexoRebalanceBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 destinationAddressHash,bytes32 proofHash,bytes32 settlementDataOutHash,bytes32 settlementDataInHash)"
+    );
+
     /// @notice CommissionManager that receives and custodies protocol fees.
     ICommissionManager public immutable commissionManager;
 
@@ -100,7 +124,9 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     address public override lzAdapter;
 
     /// @notice Set of Bridge-derived burn identifiers already consumed by a
-    ///         successful `fundsOut`.
+    ///         successful `fundsOut` or `rebalanceLiquidity`. Shared namespace:
+    ///         the two paths derive ids under distinct type hashes, and one
+    ///         consumed id can never authorise a second release or rebalance.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
     /// @notice Per-`(sourceChainId, sourceSender)` monotonic nonce. Folded into
@@ -381,6 +407,122 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     }
 
     /// @inheritdoc IBridge
+    /// @dev Accounting-only bucket migration; no token transfer, no commission.
+    ///      Composition of the two existing legs:
+    ///        debit  = `fundsOut` minus the payout: replay guard, per-chain
+    ///                 rate limit, bucket debit, route verifier + settlement
+    ///                 check (`beforeFundsOut`);
+    ///        credit = `_fundsIn` minus the token pull: on-chain `operationId`,
+    ///                 settlement write (`onFundsIn`), bucket credit,
+    ///                 conditional RGB-only `FundsIn` event.
+    ///      Both legs dispatch on the same `(sourceChainId, destinationChainId)`
+    ///      route, so a rebalance pair must be explicitly enabled in the
+    ///      registry with plugins fitting both directions.
+    ///      State mutations happen before the external registry calls, so a
+    ///      revert in either plugin rolls everything back atomically.
+    function rebalanceLiquidity(RebalanceParams calldata params)
+        external
+        override
+        onlyOwner
+        nonReentrant
+        whenOutflowNotPaused
+    {
+        _validateRebalanceParams(params);
+
+        // Credit-leg identity: the hash of the source-chain address string. Only
+        // used to derive the credit `operationId` and label the event; unlike
+        // `_fundsIn`, no nonce stream is consumed here (see the replay guard).
+        bytes32 sourceSender = _hashCalldataString(params.sourceAddress);
+
+        // Replay guard, same model as `fundsOut`: the caller-supplied id must
+        // equal the canonical hash of the full intent, and a consumed id can
+        // never execute again. No nonce is folded in — an identical intent can
+        // therefore never run twice, exactly as `fundsOut` behaves. Legitimately
+        // distinct rebalances differ in the intent itself: the destination RGB
+        // OpId in `settlementDataIn` (mint-side credit) or the Bitcoin proof +
+        // referenced records in `proof`/`settlementDataOut` (burn-backed debit).
+        // True single-burn uniqueness (one RGB burn settled at most once across
+        // fundsOut and rebalance combined) is NOT provable on-chain — the proof
+        // only attests a Bitcoin block exists — and remains the enclave's
+        // responsibility, the same accepted residual as the RGB→EVM fundsOut
+        // path.
+        uint256 expectedBurnId = _deriveRebalanceBurnId(params);
+        if (params.burnId != expectedBurnId) revert InvalidBurnId(params.burnId, expectedBurnId);
+        if (consumedBurnIds[params.burnId]) revert BurnIdAlreadyConsumed(params.burnId);
+        consumedBurnIds[params.burnId] = true;
+
+        // Debit leg: the migration may only draw from the liquidity locked for
+        // its source chain — identical to the `fundsOut` solvency rule.
+        uint256 srcLiquidity = lockedLiquidity[params.sourceChainId];
+        if (params.amount > srcLiquidity) {
+            revert InsufficientChainLiquidity(params.sourceChainId, params.amount, srcLiquidity);
+        }
+        lockedLiquidity[params.sourceChainId] = srcLiquidity - params.amount;
+
+        // Per-source-chain outflow rate limit: release capacity is migrating
+        // away from this chain, so it spends the chain bucket like a release.
+        // The global bucket is intentionally NOT spent — it bounds physical
+        // token egress, and no tokens leave here; the eventual exit pays the
+        // global bucket inside `fundsOut`.
+        chainBuckets[params.sourceChainId].spend(params.amount, TOKEN);
+
+        // Debit-leg verification: route verifier (view-only source proof)
+        // first, then the settlement module's release check. `recipient` is
+        // this Bridge — the backing never leaves custody.
+        IRouteRegistry(routeRegistry)
+            .beforeFundsOut(
+                FundsOutContext({
+                token: TOKEN,
+                recipient: address(this),
+                amount: params.amount,
+                burnId: params.burnId,
+                sourceChainId: params.sourceChainId,
+                destChainId: params.destinationChainId,
+                sourceAddress: params.sourceAddress
+            }),
+                params.proof,
+                params.settlementDataOut
+            );
+
+        // Credit leg: canonical id + settlement write. For RGB destinations the
+        // module records `fundsInRecords[operationId] = amount` and returns the
+        // RGB OpId — indistinguishable from a real deposit to the RGB side.
+        bytes32 operationId = _deriveRebalanceOperationId(params, sourceSender, expectedBurnId);
+        uint256 rgbOpId = IRouteRegistry(routeRegistry)
+            .onFundsIn(
+                FundsInContext({
+                token: TOKEN,
+                sender: _msgSender(),
+                sourceSender: sourceSender,
+                grossAmount: params.amount,
+                netAmount: params.amount,
+                operationId: operationId,
+                senderNonce: 0, // rebalance consumes no nonce stream; id is nonce-free
+                sourceChainId: params.sourceChainId,
+                destChainId: params.destinationChainId,
+                destAddress: params.destinationAddress
+            }),
+                params.settlementDataIn
+            );
+
+        lockedLiquidity[params.destinationChainId] += params.amount;
+
+        // RGB-only correlation event, same contract as `_fundsIn`: the RGB
+        // listener authorises a mint against `FundsIn` and needs no awareness
+        // of the rebalance mechanics.
+        if (rgbOpId != 0) emit FundsIn(_msgSender(), rgbOpId, params.amount);
+        emit BridgeRebalance(
+            operationId,
+            params.burnId,
+            params.sourceChainId,
+            params.destinationChainId,
+            params.amount,
+            params.sourceAddress,
+            params.destinationAddress
+        );
+    }
+
+    /// @inheritdoc IBridge
     function renounceOwnership() public view override(BridgeBase, IBridge) onlyOwner {
         revert RenounceOwnershipBlocked();
     }
@@ -407,6 +549,88 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
         uint256 expectedBurnId = _deriveBurnId(params);
         if (params.burnId != expectedBurnId) revert InvalidBurnId(params.burnId, expectedBurnId);
+    }
+
+    function _validateRebalanceParams(RebalanceParams calldata params) private pure {
+        if (params.amount == 0) revert ZeroAmount();
+        if (params.sourceChainId == 0) revert InvalidSourceChainId();
+        if (params.destinationChainId == 0) revert InvalidDestinationChainId();
+        if (params.sourceChainId == params.destinationChainId) revert RebalanceSameChain(params.sourceChainId);
+        if (bytes(params.destinationAddress).length == 0) revert InvalidDestinationAddress();
+
+        uint256 sourceAddressLength = bytes(params.sourceAddress).length;
+        if (sourceAddressLength > MAX_ADDRESS_LENGTH) {
+            revert AddressTooLong(sourceAddressLength, MAX_ADDRESS_LENGTH);
+        }
+        uint256 destinationAddressLength = bytes(params.destinationAddress).length;
+        if (destinationAddressLength > MAX_ADDRESS_LENGTH) {
+            revert AddressTooLong(destinationAddressLength, MAX_ADDRESS_LENGTH);
+        }
+        if (params.proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(params.proof.length, MAX_PROOF_LENGTH);
+        if (params.settlementDataOut.length > MAX_SETTLEMENT_DATA_LENGTH) {
+            revert SettlementDataTooLong(params.settlementDataOut.length, MAX_SETTLEMENT_DATA_LENGTH);
+        }
+        if (params.settlementDataIn.length > MAX_SETTLEMENT_DATA_LENGTH) {
+            revert SettlementDataTooLong(params.settlementDataIn.length, MAX_SETTLEMENT_DATA_LENGTH);
+        }
+    }
+
+    /// @dev Canonical rebalance replay key = domain-separated hash of the full
+    ///      rebalance intent (no nonce). Encoded in two `abi.encode` halves
+    ///      joined with `bytes.concat` (every field is one 32-byte word; dynamic
+    ///      fields are pre-hashed), keeping each half shallow enough to compile
+    ///      without the optimizer.
+    function _deriveRebalanceBurnId(RebalanceParams calldata params) private view returns (uint256) {
+        return uint256(
+            keccak256(
+                bytes.concat(
+                    abi.encode(
+                        REBALANCE_BURN_ID_TYPEHASH,
+                        address(this),
+                        block.chainid,
+                        TOKEN,
+                        params.amount,
+                        params.sourceChainId,
+                        params.destinationChainId
+                    ),
+                    abi.encode(
+                        _hashCalldataString(params.sourceAddress),
+                        _hashCalldataString(params.destinationAddress),
+                        _hashCalldataBytes(params.proof),
+                        _hashCalldataBytes(params.settlementDataOut),
+                        _hashCalldataBytes(params.settlementDataIn)
+                    )
+                )
+            )
+        );
+    }
+
+    /// @dev Canonical credit-leg `operationId` for a rebalance. Mirrors
+    ///      `_deriveOperationId` under a distinct type hash (no nonce) and folds
+    ///      in the validated `burnId`, so a rebalance id can never collide with a
+    ///      deposit id, is unique per rebalance intent (even when only the debit
+    ///      side differs), and the backend can precompute it from the intent
+    ///      alone. `burnId` is passed in already validated against the params.
+    function _deriveRebalanceOperationId(RebalanceParams calldata params, bytes32 sourceSender, uint256 burnId)
+        private
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(
+                REBALANCE_OPERATION_TYPEHASH,
+                address(this),
+                params.sourceChainId,
+                sourceSender,
+                TOKEN,
+                params.amount,
+                params.destinationChainId,
+                _hashCalldataString(params.destinationAddress),
+                _hashCalldataBytes(params.settlementDataIn),
+                burnId,
+                block.chainid
+            )
+        );
     }
 
     /// @dev Build an enabled outflow-limit config from uint256 inputs, safely
