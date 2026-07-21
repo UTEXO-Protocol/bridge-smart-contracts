@@ -300,7 +300,7 @@ contract RgbSettlementModuleTest is Test {
     }
 
     // ========================================================================
-    // beforeFundsOut — network scope (variant C)
+    // beforeFundsOut — network scope
     // ========================================================================
 
     function test_beforeFundsOut_revertsOnCrossNetworkRecord() public {
