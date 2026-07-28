@@ -26,6 +26,8 @@ interface IBridge {
     error BurnIdAlreadyConsumed(uint256 burnId);
     error NativeValueMismatch();
     error RebalanceSameChain(uint256 chainId);
+    error ChainSafetyLimitExceeded(uint256 chainId, uint256 requested, uint256 spentInWindow, uint256 windowLimit);
+    error GlobalSafetyLimitExceeded(uint256 requested, uint256 spentInWindow, uint256 windowLimit);
 
     // =========================================================================
     // Events
@@ -65,6 +67,16 @@ interface IBridge {
     /// @param refillRate New refill rate (token units per second).
     /// @param available  Accrued allowance carried over after the update.
     event GlobalOutflowLimitUpdated(uint256 capacity, uint256 refillRate, uint256 available);
+
+    /// @notice Emitted after an outflow consumes immutable per-chain rolling
+    ///         safety allowance.
+    event ChainSafetyOutflowConsumed(
+        uint256 indexed chainId, uint256 amount, uint256 spentInWindow, uint256 windowLimit
+    );
+
+    /// @notice Emitted after a physical token outflow consumes immutable global
+    ///         rolling safety allowance.
+    event GlobalSafetyOutflowConsumed(uint256 amount, uint256 spentInWindow, uint256 windowLimit);
 
     /// @notice RGB-route deposit event. Emitted only when the route's settlement
     ///         module returns a non-zero external correlation id — in practice
@@ -341,6 +353,14 @@ interface IBridge {
     /// @notice Spendable global outflow allowance right now, including the
     ///         accrued refill. Returns 0 if the global bucket is unconfigured.
     function availableGlobalOutflow() external view returns (uint256);
+
+    /// @notice Remaining immutable per-chain safety allowance in the current
+    ///         rolling window. Independent of the configurable token bucket.
+    function availableChainSafetyOutflow(uint256 chainId) external view returns (uint256);
+
+    /// @notice Remaining immutable global safety allowance in the current
+    ///         rolling window. Independent of the configurable token bucket.
+    function availableGlobalSafetyOutflow() external view returns (uint256);
 
     /// @notice Current trusted adapter; `address(0)` means the adapter
     ///         overload is closed.
