@@ -71,6 +71,11 @@ contract BridgeRebalanceTest is Test {
     string constant RGB_SRC_ADDR = "rgb:burner/utxo1burn";
     string constant ARCH_SRC_ADDR = "arch:burner";
     uint256 constant AMOUNT = 100e18;
+
+    /// @dev Balanced policy that consumes the full configurable budget:
+    ///      10% instant burst plus 10% refill per window.
+    uint256 constant MAX_BURST_BPS = 1_000;
+    uint256 constant MAX_REFILL_BPS = 1_000;
     uint256 constant RGB_OP_ID = 0xABCDEF;
 
     // BtcRelay test data: deep source block (the RGB burn) + fresh latest block.
@@ -122,28 +127,32 @@ contract BridgeRebalanceTest is Test {
         // Pool → MintBurn (scenario A): operational, no external burn → NullVerifier.
         routeRegistry.setRoute(RGB_CHAIN_ID, RGB_MINTBURN_CHAIN_ID, true, address(nullVerifier), address(rgbModule));
 
-        // Outflow buckets for every non-EVM chain + global (fail-closed limiter).
-        bridge.setOutflowLimit(RGB_CHAIN_ID, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
-        bridge.setOutflowLimit(ARCH_CHAIN_ID, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
-        bridge.setOutflowLimit(RGB_MINTBURN_CHAIN_ID, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
-        bridge.setGlobalOutflowLimit(1_000_000 ether, uint256(1_000_000 ether) / 1 days);
-
         bridge.transferOwnership(multisig);
         vm.stopPrank();
 
         vm.prank(multisig);
         bridge.acceptOwnership();
 
+        // Outflow policies are percentages of reference liquidity, so they are
+        // installed here — before any deposit exists — exactly as a deployment
+        // would. Nothing about the configuration depends on current TVL.
+        vm.startPrank(multisig);
+        bridge.setOutflowLimit(RGB_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
+        bridge.setOutflowLimit(ARCH_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
+        bridge.setOutflowLimit(RGB_MINTBURN_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
+        bridge.setGlobalOutflowLimit(MAX_BURST_BPS, MAX_REFILL_BPS);
+        vm.stopPrank();
+
         // Fund both buckets with real deposits so rebalances have liquidity.
-        usdt0.mint(user, AMOUNT * 10);
+        usdt0.mint(user, AMOUNT * 30);
         vm.prank(user);
         usdt0.approve(address(bridge), type(uint256).max);
         vm.prank(user);
-        rgbSeedOpId = bridge.fundsIn(AMOUNT * 2, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID));
+        rgbSeedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT * 2, ARCH_CHAIN_ID, ARCH_DST_ADDR, "");
+        bridge.fundsIn(AMOUNT * 10, ARCH_CHAIN_ID, ARCH_DST_ADDR, "");
         vm.prank(user);
-        mintBurnSeedOpId = bridge.fundsIn(AMOUNT * 2, RGB_MINTBURN_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 100));
+        mintBurnSeedOpId = bridge.fundsIn(AMOUNT * 10, RGB_MINTBURN_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 100));
     }
 
     // ========================================================================
@@ -453,11 +462,16 @@ contract BridgeRebalanceTest is Test {
 
     function test_rebalance_preservesTotalLockedLiquidity() public {
         uint256 totalBefore = bridge.lockedLiquidity(RGB_CHAIN_ID) + bridge.lockedLiquidity(ARCH_CHAIN_ID)
-            + bridge.lockedLiquidity(SOURCE_CHAIN_ID);
+            + bridge.lockedLiquidity(SOURCE_CHAIN_ID) + bridge.lockedLiquidity(RGB_MINTBURN_CHAIN_ID);
+        uint256 accountedTotalBefore = bridge.totalLockedLiquidity();
+
         _rebalance(_archToRgbParams(AMOUNT, RGB_OP_ID + 1));
+
         uint256 totalAfter = bridge.lockedLiquidity(RGB_CHAIN_ID) + bridge.lockedLiquidity(ARCH_CHAIN_ID)
-            + bridge.lockedLiquidity(SOURCE_CHAIN_ID);
+            + bridge.lockedLiquidity(SOURCE_CHAIN_ID) + bridge.lockedLiquidity(RGB_MINTBURN_CHAIN_ID);
         assertEq(totalAfter, totalBefore, "sum(lockedLiquidity) preserved exactly");
+        assertEq(bridge.totalLockedLiquidity(), accountedTotalBefore, "accounted global TVL preserved exactly");
+        assertEq(bridge.totalLockedLiquidity(), totalAfter, "global TVL matches isolated liquidity sum");
     }
 
     function test_rebalance_spendsChainBucketNotGlobal() public {
@@ -482,6 +496,7 @@ contract BridgeRebalanceTest is Test {
         bytes32 secondOpId = _deriveRebalanceOpId(second);
         assertTrue(first.burnId != second.burnId, "distinct burnId per destination OpId");
         assertTrue(firstOpId != secondOpId, "distinct operationId per destination OpId");
+        vm.warp(block.timestamp + bridge.BUCKET_REFILL_WINDOW() + 1);
         _rebalance(second);
 
         assertEq(rgbModule.fundsInRecords(firstOpId), AMOUNT);
@@ -525,6 +540,7 @@ contract BridgeRebalanceTest is Test {
         // operationId folds in burnId, so debit-side differences propagate.
 
         // Second RGB deposit → a distinct record to reference for the 2nd burn.
+        usdt0.mint(user, AMOUNT);
         vm.prank(user);
         bytes32 secondSeedOpId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 50));
 
@@ -541,6 +557,7 @@ contract BridgeRebalanceTest is Test {
         // Capture the emitted operationIds and assert they are distinct.
         vm.recordLogs();
         _rebalance(first);
+        vm.warp(block.timestamp + bridge.BUCKET_REFILL_WINDOW() + 1);
         _rebalance(second);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bytes32 rebalanceTopic = keccak256("BridgeRebalance(bytes32,uint256,uint256,uint256,uint256,string,string)");
@@ -566,8 +583,9 @@ contract BridgeRebalanceTest is Test {
         // liquidity migration" — rebalance IS a liquidity migration.
         vm.prank(multisig);
         bridge.pauseInflow();
+        uint256 destinationBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
         _rebalance(_archToRgbParams(AMOUNT, RGB_OP_ID + 1));
-        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT * 3);
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), destinationBefore + AMOUNT);
     }
 
     // ========================================================================
@@ -658,15 +676,21 @@ contract BridgeRebalanceTest is Test {
     }
 
     function test_rebalance_revert_chainBucketThrottled() public {
-        // Reconfigure the ARCH bucket to less than AMOUNT: the rebalance must
-        // hit the same per-chain outflow throttle a release would.
+        // ARCH holds AMOUNT * 10, so a 500 bps burst is AMOUNT / 2 — less than
+        // the AMOUNT being migrated. The rebalance must hit the same per-chain
+        // outflow throttle a release would.
         vm.prank(multisig);
-        bridge.setOutflowLimit(ARCH_CHAIN_ID, AMOUNT / 2, 1);
+        bridge.setOutflowLimit(ARCH_CHAIN_ID, 500, 1);
+
+        uint256 shareUnit = bridge.SHARE_UNIT();
+        uint256 capacityShares = 500 * shareUnit / bridge.BPS_DENOMINATOR();
+        uint256 requestedShares = AMOUNT * shareUnit / bridge.lockedLiquidity(ARCH_CHAIN_ID);
+
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         vm.prank(multisig);
         vm.expectRevert(
             abi.encodeWithSelector(
-                OutflowRateLimiter.TokenRequestAboveCapacity.selector, AMOUNT / 2, AMOUNT, address(usdt0)
+                OutflowRateLimiter.TokenRequestAboveCapacity.selector, capacityShares, requestedShares, address(usdt0)
             )
         );
         bridge.rebalanceLiquidity(p);

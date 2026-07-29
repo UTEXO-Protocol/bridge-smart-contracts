@@ -15,6 +15,7 @@ import {RouteRegistry} from "../src/RouteRegistry.sol";
 import {IRouteRegistry} from "../src/interfaces/IRouteRegistry.sol";
 import {RGBVerifier} from "../src/verifiers/RGBVerifier.sol";
 import {RgbSettlementModule} from "../src/settlement/RgbSettlementModule.sol";
+import {OutflowRateLimiter} from "../src/libraries/OutflowRateLimiter.sol";
 import {RouteConfig} from "../src/interfaces/RouteTypes.sol";
 import {
     CommissionConfig,
@@ -170,6 +171,11 @@ contract MultisigProxyTest is Test {
     string constant DST_ADDR = "rgb:asset/utxo1abc";
     string constant SRC_ADDR = "rgb:sender/utxo1src";
     uint256 constant AMOUNT = 100e18;
+
+    /// @dev Balanced policy that consumes the full configurable budget:
+    ///      10% instant burst plus 10% refill per window.
+    uint256 constant MAX_BURST_BPS = 1_000;
+    uint256 constant MAX_REFILL_BPS = 1_000;
     uint256 constant TX_ID = 42;
     uint256 constant RGB_OP_ID = 0xABCDEF;
     uint256 constant BURN_ID = 9_001;
@@ -249,12 +255,6 @@ contract MultisigProxyTest is Test {
             address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, fed, 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK
         );
 
-        // Outflow rate limits: configure generous buckets while
-        // the deployer still owns the Bridge, so the release path is enabled
-        // before ownership moves to the proxy.
-        bridge.setOutflowLimit(RGB_CHAIN_ID, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
-        bridge.setGlobalOutflowLimit(1_000_000 ether, uint256(1_000_000 ether) / 1 days);
-
         // Production-flow ownership transfer.
         bridge.transferOwnership(address(proxy));
         cm.transferOwnership(address(proxy));
@@ -273,11 +273,22 @@ contract MultisigProxyTest is Test {
         domainSep = proxy.DOMAIN_SEPARATOR();
 
         // Fund user, lock tokens into the bridge so fundsOut has a pool.
-        token.mint(user, AMOUNT * 10);
+        // Keep a separate user balance for tests that make follow-up deposits
+        // or fund the CommissionManager after the 10x seed deposit.
+        token.mint(user, AMOUNT * 20);
         vm.prank(user);
         token.approve(address(bridge), type(uint256).max);
+        // Policies are percentages of reference liquidity, so they are installed
+        // before the deposit — the order a deployment uses. `burstBps +
+        // refillBpsPerWindow` is capped at 20%. This balanced policy spends the
+        // full configurable budget: 10% available up front, 10% refill/window.
+        vm.startPrank(address(proxy));
+        bridge.setOutflowLimit(RGB_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
+        bridge.setGlobalOutflowLimit(MAX_BURST_BPS, MAX_REFILL_BPS);
+        vm.stopPrank();
+
         vm.prank(user);
-        seedOpId = bridge.fundsIn(AMOUNT * 5, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
+        seedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
     }
 
     // ========================================================================
@@ -2291,12 +2302,12 @@ contract MultisigProxyTest is Test {
         uint256 nativePoolBefore = cm.nativeCommissionPool();
         uint256 recordBefore = rgbModule.fundsInRecords(seedOpId);
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(recipientBefore, 0, "pre recipient token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
         assertEq(nativePoolBefore, 0, "pre native pool");
-        assertEq(recordBefore, AMOUNT * 5, "pre record");
+        assertEq(recordBefore, AMOUNT * 10, "pre record");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
 
         vm.expectEmit(true, true, false, true);
@@ -2370,12 +2381,12 @@ contract MultisigProxyTest is Test {
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore = mockOft.balance;
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(adapterBefore, 0, "pre adapter token");
         assertEq(oftBefore, 0, "pre oft token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
-        assertEq(recordBefore, AMOUNT * 5, "pre record");
+        assertEq(recordBefore, AMOUNT * 10, "pre record");
         assertEq(adapterEthBefore, 0, "pre adapter native");
         assertEq(oftEthBefore, 0, "pre oft native");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
@@ -2458,13 +2469,13 @@ contract MultisigProxyTest is Test {
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore = mockOft.balance;
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(adapterBefore, 0, "pre adapter token");
         assertEq(oftBefore, 0, "pre oft token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
         assertEq(nativePoolBefore, 0, "pre native pool");
-        assertEq(recordBefore, AMOUNT * 5, "pre record");
+        assertEq(recordBefore, AMOUNT * 10, "pre record");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
 
         // An underfunded native fee reverts in sendOut, after Bridge.fundsOut
@@ -2544,13 +2555,13 @@ contract MultisigProxyTest is Test {
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore = mockOft.balance;
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(adapterBefore, 0, "pre adapter token");
         assertEq(oftBefore, 0, "pre oft token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
         assertEq(nativePoolBefore, 0, "pre native pool");
-        assertEq(recordBefore, AMOUNT * 5, "pre record");
+        assertEq(recordBefore, AMOUNT * 10, "pre record");
         assertEq(adapter.sendOutCalls(), 0, "pre adapter calls");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
 
@@ -2625,13 +2636,13 @@ contract MultisigProxyTest is Test {
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore = mockOft.balance;
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(adapterBefore, 0, "pre adapter token");
         assertEq(oftBefore, 0, "pre oft token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
         assertEq(nativePoolBefore, 0, "pre native pool");
-        assertEq(recordBefore, AMOUNT * 5, "pre record");
+        assertEq(recordBefore, AMOUNT * 10, "pre record");
         assertEq(adapter.sendOutCalls(), 0, "pre adapter calls");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
 
@@ -2717,12 +2728,12 @@ contract MultisigProxyTest is Test {
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore = mockOft.balance;
 
-        assertEq(bridgeBefore, AMOUNT * 6, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 11, "pre bridge pool");
         assertEq(adapterBefore, 0, "pre adapter token");
         assertEq(oftBefore, 0, "pre oft token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
-        assertEq(originalRecordBefore, AMOUNT * 5, "pre original record");
+        assertEq(originalRecordBefore, AMOUNT * 10, "pre original record");
         assertEq(duplicateRecordBefore, AMOUNT, "pre duplicate record");
         assertEq(adapter.sendOutCalls(), 0, "pre adapter calls");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
@@ -2849,45 +2860,167 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Current behavior reproduction
+    // C-01 immutable TVL-relative safety limit
     // ========================================================================
 
-    function test_enclaveSignedFundsOutCanDrainPool_currentBehavior() public {
+    /// @dev buckets are set to a maximum-total policy, the pool is fully funded, and
+    ///      a valid 2-of-3 enclave quorum signs a release of the entire pool.
+    ///      It reverts. Note what the assertions now show that the audited build
+    ///      could not: `availableOutflow` reports 10% of TVL, not ≥ TVL, so the
+    ///      PoC's own `assertGe(availableOutflow, tvl)` premise no longer holds
+    ///      either.
+    function test_enclaveSignedFullPoolDrainRevertsWithMaxAllowedBuckets() public {
         address drainRecipient = makeAddr("drainRecipient");
 
-        // The TEE path checks signatures, but it does not impose an on-chain
-        // amount cap on the signed Bridge fundsOut.
         uint256 bridgeBefore = token.balanceOf(address(bridge));
-        uint256 recipientBefore = token.balanceOf(drainRecipient);
         uint256 recordBefore = rgbModule.fundsInRecords(seedOpId);
+        uint256 maxBps = bridge.MAX_CHAIN_OUTFLOW_BPS();
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
-        assertEq(recipientBefore, 0, "pre recipient token");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(recordBefore, bridgeBefore, "pre record backs full pool");
-        // Current behavior: if an on-chain amount cap or rate limit is added
-        // later, this test should be inverted to expect a revert.
+        assertLt(bridge.availableOutflow(RGB_CHAIN_ID), bridgeBefore, "chain bucket cannot cover TVL");
+        assertLt(bridge.availableGlobalOutflow(), bridgeBefore, "global bucket cannot cover TVL");
+        assertEq(
+            bridge.effectiveAvailableOutflow(RGB_CHAIN_ID),
+            bridgeBefore * MAX_BURST_BPS / bridge.BPS_DENOMINATOR(),
+            "at most the configured burst can leave, well under TVL"
+        );
+
         IBridge.FundsOutParams memory params = _fundsOutParams(drainRecipient, bridgeBefore, BURN_ID);
-        assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = block.timestamp + 1 hours;
         bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit BridgeFundsOut(
-            drainRecipient, bridgeBefore, bridgeBefore, 0, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+        // The whole pool is 10_000 bps of the reference; the bucket's burst is
+        // MAX_BURST_BPS. Requesting 100% therefore exceeds capacity outright.
+        uint256 shareUnit = bridge.SHARE_UNIT();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OutflowRateLimiter.TokenRequestAboveCapacity.selector,
+                MAX_BURST_BPS * shareUnit / bridge.BPS_DENOMINATOR(),
+                shareUnit, // the full pool is exactly one SHARE_UNIT of reference
+                address(token)
+            )
         );
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit FundsOutExecuted(RGB_CHAIN_ID, nonce, bitmap);
-
         proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce + 1, "nonce incremented");
-        assertTrue(bridge.consumedBurnIds(params.burnId), "burn id consumed");
-        assertEq(token.balanceOf(address(bridge)), 0, "bridge pool drained");
-        assertEq(token.balanceOf(drainRecipient), recipientBefore + bridgeBefore, "recipient got full pool");
-        assertEq(rgbModule.fundsInRecords(seedOpId), recordBefore, "record unchanged (proof-of-mint permanent)");
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce, "reverted release does not consume nonce");
+        assertFalse(bridge.consumedBurnIds(params.burnId), "reverted release does not consume burn id");
+        assertEq(token.balanceOf(address(bridge)), bridgeBefore, "entire pool remains");
+        assertEq(token.balanceOf(drainRecipient), 0, "recipient receives nothing");
+        assertEq(
+            bridge.availableChainSafetyOutflow(RGB_CHAIN_ID),
+            bridgeBefore * maxBps / bridge.BPS_DENOMINATOR(),
+            "immutable allowance unchanged"
+        );
+    }
+
+    /// @dev Fragmented drain: the attacker splits the release across refill
+    ///      windows. At the 24-hour boundary the bucket has refilled, while the
+    ///      first spend is still retained by the conservative rolling window.
+    ///      The second release may consume the immutable remainder, but a third
+    ///      valid 2-of-3 signed transaction cannot exceed the rolling 20% cap.
+    function test_C01_splitTransactionsCannotExceedAggregateRollingLimit() public {
+        // Align to an hour boundary so the ring's 24-25h retention is exact
+        // relative to the releases below rather than to an arbitrary offset.
+        vm.warp((block.timestamp / 1 hours + 1) * 1 hours);
+
+        uint256 tvl = token.balanceOf(address(bridge));
+        uint256 hardLimit = tvl * bridge.MAX_CHAIN_OUTFLOW_BPS() / bridge.BPS_DENOMINATOR();
+
+        _signedRelease(makeAddr("split-recipient-1"), hardLimit / 2, BURN_ID);
+        assertEq(bridge.availableChainSafetyOutflow(RGB_CHAIN_ID), hardLimit / 2, "half the allowance left");
+        assertEq(bridge.availableGlobalSafetyOutflow(), hardLimit / 2);
+
+        // At 24h + 1s the conservatively rounded share bucket is fully refilled,
+        // while the rolling limiter deliberately still counts the first release.
+        vm.warp(block.timestamp + bridge.BUCKET_REFILL_WINDOW() + 1);
+        _signedRelease(makeAddr("split-recipient-2"), hardLimit / 2, BURN_ID + 1);
+        assertEq(bridge.availableChainSafetyOutflow(RGB_CHAIN_ID), 0, "immutable chain allowance exhausted");
+        assertEq(bridge.availableGlobalSafetyOutflow(), 0, "immutable global allowance exhausted");
+
+        // One second of bucket refill makes the immutable limiter the failing
+        // layer, and `effectiveAvailableOutflow` reports the truth: nothing.
+        vm.warp(block.timestamp + 1);
+        assertGt(bridge.availableOutflow(RGB_CHAIN_ID), 0, "bucket has accrued allowance");
+        assertEq(bridge.effectiveAvailableOutflow(RGB_CHAIN_ID), 0, "but nothing may leave");
+
+        (IBridge.FundsOutParams memory third, uint256 nonce, uint256 deadline, uint256 bitmap, bytes[] memory sigs) =
+            _prepareRelease(makeAddr("split-recipient-3"), 1, BURN_ID + 2);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IBridge.ChainSafetyLimitExceeded.selector, RGB_CHAIN_ID, uint256(1), hardLimit, hardLimit
+            )
+        );
+        proxy.fundsOutCall(third, nonce, deadline, bitmap, sigs);
+
+        assertEq(token.balanceOf(address(bridge)), tvl - hardLimit, "at most 20% left during the window");
+
+        // Liveness: once the oldest usage expires the next tranche is releasable.
+        // The ring retains for 24-25h, so 25h past the aligned start clears it.
+        vm.warp(block.timestamp + 25 hours);
+        assertGt(bridge.availableChainSafetyOutflow(RGB_CHAIN_ID), 0, "allowance returns in the next window");
+        assertGt(bridge.effectiveAvailableOutflow(RGB_CHAIN_ID), 0, "releases resume");
+    }
+
+    /// @dev Everything a signed release needs, resolved up front. Kept separate
+    ///      from submission so `vm.expectRevert` can sit immediately before the
+    ///      single `fundsOutCall` — the preparation itself makes external calls
+    ///      and would otherwise absorb the expectation.
+    function _prepareRelease(address to, uint256 amount, uint256 burnId)
+        internal
+        view
+        returns (
+            IBridge.FundsOutParams memory params,
+            uint256 nonce,
+            uint256 deadline,
+            uint256 bitmap,
+            bytes[] memory sigs
+        )
+    {
+        params = _fundsOutParams(to, amount, burnId);
+        nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
+        uint256[] memory pks;
+        (pks, bitmap) = _encSigSet2of3();
+        sigs = MultisigHelper.signAll(vm, digest, pks);
+    }
+
+    /// @dev Sign and submit a `fundsOut` through the enclave 2-of-3 quorum.
+    function _signedRelease(address to, uint256 amount, uint256 burnId) internal {
+        (IBridge.FundsOutParams memory params, uint256 nonce, uint256 deadline, uint256 bitmap, bytes[] memory sigs) =
+            _prepareRelease(to, amount, burnId);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
+    }
+
+    /// @dev C-01 remaining issue, configuration side: a full-TVL bucket is not
+    ///      merely rejected against current liquidity, it is unrepresentable.
+    ///      The policy is a percentage, and `burstBps + refillBpsPerWindow` is
+    ///      bounded by the immutable `MAX_CHAIN_OUTFLOW_BPS`, so there is no
+    ///      liquidity level at which this proposal would ever succeed.
+    function test_C01_federationCannotConfigureChainBucketForFullTvl() public {
+        uint256 fullTvlBps = bridge.BPS_DENOMINATOR(); // 10_000 bps == 100% of TVL
+        uint256 maxBps = bridge.MAX_CHAIN_OUTFLOW_BPS();
+        uint256 availableBefore = bridge.availableOutflow(RGB_CHAIN_ID);
+
+        bytes memory callData = abi.encodeCall(IBridge.setOutflowLimit, (RGB_CHAIN_ID, fullTvlBps, uint256(1)));
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest =
+            MultisigHelper.digestProposeAdminExecute(domainSep, bytes4(callData), callData, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 proposalId =
+            proxy.proposeAdminExecute(callData, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks));
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidOutflowPolicy.selector, fullTvlBps, uint256(1), maxBps));
+        proxy.executeProposal(proposalId, callData);
+
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), availableBefore, "safe bucket configuration unchanged");
     }
 
     function test_governanceCanRotateEnclaveToUnattestedEOA_currentBehavior() public {
