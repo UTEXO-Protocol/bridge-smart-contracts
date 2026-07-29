@@ -27,6 +27,22 @@ import {
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockBtcRelay} from "./mocks/MockBtcRelay.sol";
 import {MultisigHelper} from "./mocks/MultisigHelper.sol";
+import {EmergencyPause} from "../script/interact/EmergencyPause.s.sol";
+import {EmergencyUnpause} from "../script/interact/EmergencyUnpause.s.sol";
+
+/// @dev Exposes the exact nonce/digest preparation used by the production
+///      scripts so R-I-09 tests cannot pass against a duplicated implementation.
+contract EmergencyPauseHarness is EmergencyPause {
+    function prepare(MultisigProxy proxy, uint256 deadline) external view returns (uint256 nonce, bytes32 digest) {
+        return _prepareEmergencyPause(proxy, deadline);
+    }
+}
+
+contract EmergencyUnpauseHarness is EmergencyUnpause {
+    function prepare(MultisigProxy proxy, uint256 deadline) external view returns (uint256 nonce, bytes32 digest) {
+        return _prepareEmergencyUnpause(proxy, deadline);
+    }
+}
 
 contract MockOutboundLZAdapter {
     MockERC20 public immutable token;
@@ -1426,6 +1442,92 @@ contract MultisigProxyTest is Test {
 
         proxy.emergencyUnpause(nonce, deadline, bitmap, sigs);
         assertFalse(bridge.paused());
+    }
+
+    /// @dev R-I-09 known-answer regression for the production pause script.
+    ///      A regular proposal first advances only `proposalNonce`, reproducing
+    ///      the state in which the old script selected the wrong nonce lane.
+    function test_R_I_09_emergencyPauseScriptUsesEmergencyNonceAfterLanesDiverge() public {
+        uint256 regularNonce = proxy.proposalNonce();
+        uint256 regularDeadline = block.timestamp + 1 days;
+        address newBridge = makeAddr("ri09-pause-regular-proposal");
+        bytes32 regularDigest =
+            MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, regularNonce, regularDeadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        proxy.proposeUpdateBridge(
+            newBridge, regularNonce, regularDeadline, bitmap, MultisigHelper.signAll(vm, regularDigest, pks)
+        );
+
+        assertEq(proxy.proposalNonce(), 1, "regular lane advanced");
+        assertEq(proxy.emergencyNonce(), 0, "emergency lane untouched");
+
+        uint256 deadline = block.timestamp + 1 hours;
+
+        // Negative control: the pre-fix script read proposalNonce(), producing
+        // a correctly signed emergency digest for the wrong nonce.
+        uint256 wrongNonce = proxy.proposalNonce();
+        bytes32 wrongDigest = MultisigHelper.digestEmergencyPause(domainSep, wrongNonce, deadline);
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.emergencyPause(wrongNonce, deadline, bitmap, MultisigHelper.signAll(vm, wrongDigest, pks));
+
+        // Exercise the exact preparation function called by EmergencyPause.run().
+        EmergencyPauseHarness harness = new EmergencyPauseHarness();
+        (uint256 scriptNonce, bytes32 scriptDigest) = harness.prepare(proxy, deadline);
+        bytes32 expectedStructHash =
+            keccak256(abi.encode(keccak256("EmergencyPause(uint256 nonce,uint256 deadline)"), uint256(0), deadline));
+        bytes32 expectedDigest = keccak256(abi.encodePacked("\x19\x01", domainSep, expectedStructHash));
+
+        assertEq(scriptNonce, 0, "script reads emergency lane");
+        assertEq(scriptDigest, expectedDigest, "script produces canonical pause digest");
+
+        proxy.emergencyPause(scriptNonce, deadline, bitmap, MultisigHelper.signAll(vm, scriptDigest, pks));
+
+        assertTrue(bridge.paused(), "emergency pause succeeds");
+        assertEq(proxy.emergencyNonce(), 1, "emergency lane advanced");
+        assertEq(proxy.proposalNonce(), 1, "regular lane unchanged");
+    }
+
+    /// @dev R-I-09 known-answer regression for the production unpause script.
+    ///      Both lanes are deliberately non-equal before digest construction.
+    function test_R_I_09_emergencyUnpauseScriptUsesEmergencyNonceAfterLanesDiverge() public {
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+
+        uint256 pauseNonce = proxy.emergencyNonce();
+        uint256 pauseDeadline = block.timestamp + 1 hours;
+        bytes32 pauseDigest = MultisigHelper.digestEmergencyPause(domainSep, pauseNonce, pauseDeadline);
+        proxy.emergencyPause(pauseNonce, pauseDeadline, bitmap, MultisigHelper.signAll(vm, pauseDigest, pks));
+        assertTrue(bridge.paused(), "precondition: bridge paused");
+
+        // Advance the regular lane twice so proposalNonce=2, emergencyNonce=1.
+        for (uint256 i = 0; i < 2; i++) {
+            uint256 regularNonce = proxy.proposalNonce();
+            uint256 regularDeadline = block.timestamp + 1 days;
+            address newBridge = makeAddr(string.concat("ri09-unpause-regular-proposal-", vm.toString(i)));
+            bytes32 regularDigest =
+                MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, regularNonce, regularDeadline);
+            proxy.proposeUpdateBridge(
+                newBridge, regularNonce, regularDeadline, bitmap, MultisigHelper.signAll(vm, regularDigest, pks)
+            );
+        }
+
+        assertEq(proxy.proposalNonce(), 2, "regular lane advanced independently");
+        assertEq(proxy.emergencyNonce(), 1, "pause advanced emergency lane once");
+
+        uint256 deadline = block.timestamp + 1 hours;
+        EmergencyUnpauseHarness harness = new EmergencyUnpauseHarness();
+        (uint256 scriptNonce, bytes32 scriptDigest) = harness.prepare(proxy, deadline);
+        bytes32 expectedStructHash =
+            keccak256(abi.encode(keccak256("EmergencyUnpause(uint256 nonce,uint256 deadline)"), uint256(1), deadline));
+        bytes32 expectedDigest = keccak256(abi.encodePacked("\x19\x01", domainSep, expectedStructHash));
+
+        assertEq(scriptNonce, 1, "script reads emergency lane");
+        assertEq(scriptDigest, expectedDigest, "script produces canonical unpause digest");
+
+        proxy.emergencyUnpause(scriptNonce, deadline, bitmap, MultisigHelper.signAll(vm, scriptDigest, pks));
+
+        assertFalse(bridge.paused(), "emergency unpause succeeds");
+        assertEq(proxy.emergencyNonce(), 2, "emergency lane advanced");
+        assertEq(proxy.proposalNonce(), 2, "regular lane unchanged");
     }
 
     // ========================================================================

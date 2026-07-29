@@ -18,16 +18,26 @@ contract EmergencyUnpause is Script {
         uint256 offset = vm.envUint("DEADLINE_OFFSET");
 
         MultisigProxy proxy = MultisigProxy(proxyAddr);
-        uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + offset;
-
-        bytes32 digest = MultisigHelper.digestEmergencyUnpause(proxy.DOMAIN_SEPARATOR(), nonce, deadline);
+        (uint256 nonce, bytes32 digest) = _prepareEmergencyUnpause(proxy, deadline);
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, ks);
 
         vm.startBroadcast(pk);
         proxy.emergencyUnpause(nonce, deadline, bitmap, sigs);
         vm.stopBroadcast();
 
-        console2.log("emergencyUnpause submitted. New proposalNonce:", proxy.proposalNonce());
+        console2.log("emergencyUnpause submitted. New emergencyNonce:", proxy.emergencyNonce());
+    }
+
+    /// @dev Emergency actions have an independent nonce lane. Keeping nonce
+    ///      lookup and digest construction together prevents the production
+    ///      script from accidentally signing with the regular proposal nonce.
+    function _prepareEmergencyUnpause(MultisigProxy proxy, uint256 deadline)
+        internal
+        view
+        returns (uint256 nonce, bytes32 digest)
+    {
+        nonce = proxy.emergencyNonce();
+        digest = MultisigHelper.digestEmergencyUnpause(proxy.DOMAIN_SEPARATOR(), nonce, deadline);
     }
 }
