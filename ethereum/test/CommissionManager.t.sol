@@ -692,7 +692,6 @@ contract CommissionManagerTest is Test {
         cm.withdrawTokenCommission(address(token), 1);
     }
 
-    
     function test_legacyFreeRecipientWithdrawalSelectorsUnavailable() public {
         uint256 amount = 10 ether;
         token.mint(address(cm), amount);
