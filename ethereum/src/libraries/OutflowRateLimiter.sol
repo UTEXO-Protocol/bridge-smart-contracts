@@ -2,9 +2,11 @@
 pragma solidity 0.8.35;
 
 /// @title OutflowRateLimiter
-/// @notice Small token-bucket helper used by Bridge withdrawals.
-/// @dev Amounts are stored as uint128 to keep bucket state compact; Bridge
-///      rejects larger admin inputs before constructing a limit config.
+/// @notice Small unit-agnostic token-bucket helper used by Bridge withdrawals.
+/// @dev Amounts are stored as uint128 to keep bucket state compact. Bridge uses
+///      normalized liquidity shares as the unit, so this library's raw state,
+///      events, and revert arguments are share-denominated in that integration.
+///      Bridge validates policy inputs before constructing a limit config.
 library OutflowRateLimiter {
     error LimitNotConfigured();
     error StoredAllowanceAboveCapacity(uint256 available, uint256 capacity);
