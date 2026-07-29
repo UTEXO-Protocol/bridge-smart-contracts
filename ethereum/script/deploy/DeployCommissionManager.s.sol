@@ -21,14 +21,11 @@ import {CommissionManager} from "../../src/CommissionManager.sol";
 ///                       the feed answer is considered stale. Arbitrum One
 ///                       ETH/USD heartbeats at 86400 s — use ~87000 with a
 ///                       small buffer.
-///   SEQUENCER_UPTIME_FEED — Optional (Arbitrum, R-I-14) Chainlink L2 Sequencer
-///                       Uptime feed. When set, NATIVE quotes reject prices
-///                       during sequencer downtime + the post-restart grace.
-///   ETH_USD_MIN_PRICE / ETH_USD_MAX_PRICE — Optional (R-I-14) ETH/USD sanity
-///                       band in feed decimals; set both or neither.
-///   REQUIRE_CHAINLINK_HARDENING (false) — when true, revert unless ETH_USD_FEED,
-///                       SEQUENCER_UPTIME_FEED, and the price band are all set
-///                       (recommended for Arbitrum production).
+///   SEQUENCER_UPTIME_FEED — Required whenever ETH_USD_FEED is set. Chainlink
+///                       Arbitrum L2 Sequencer Uptime feed used to reject NATIVE
+///                       quotes during downtime + the post-restart grace period.
+///   ETH_USD_MIN_PRICE / ETH_USD_MAX_PRICE — Required whenever ETH_USD_FEED is
+///                       set. ETH/USD sanity band in the price feed's decimals.
 ///
 /// Usage:
 ///   forge script script/deploy/DeployCommissionManager.s.sol \
@@ -42,33 +39,32 @@ contract DeployCommissionManager is Script {
         address seqFeed = vm.envOr("SEQUENCER_UPTIME_FEED", address(0));
         uint256 ethUsdMinPrice = vm.envOr("ETH_USD_MIN_PRICE", uint256(0));
         uint256 ethUsdMaxPrice = vm.envOr("ETH_USD_MAX_PRICE", uint256(0));
-        bool reqHardening = vm.envOr("REQUIRE_CHAINLINK_HARDENING", false);
 
         // Misconfiguration checks (fail-fast, before broadcast). Price band is
-        // all-or-nothing (a half-set band would be silently ignored). The opt-in
-        // prod guard enforces the full R-I-14 config when NATIVE is enabled.
+        // all-or-nothing. Hardening is mandatory whenever the NATIVE
+        // oracle path is enabled; there is no production opt-out.
         require(
             (ethUsdMinPrice == 0) == (ethUsdMaxPrice == 0),
             "set both ETH_USD_MIN_PRICE and ETH_USD_MAX_PRICE, or neither"
         );
-        if (reqHardening) {
-            require(ethUsdFeed != address(0), "hardening: ETH_USD_FEED must be set");
+        require(ethUsdMaxPrice == 0 || ethUsdMinPrice < ethUsdMaxPrice, "ETH_USD_MIN_PRICE must be below MAX");
+        if (ethUsdFeed != address(0)) {
+            require(ethUsdHb != 0, "ETH_USD_HEARTBEAT must be set when ETH_USD_FEED is provided");
             require(seqFeed != address(0), "hardening: SEQUENCER_UPTIME_FEED must be set");
             require(ethUsdMaxPrice != 0, "hardening: ETH_USD_MIN/MAX_PRICE must be set");
         }
 
         vm.startBroadcast(pk);
         cm = new CommissionManager(bridgeAddress);
-        if (ethUsdFeed != address(0)) {
-            require(ethUsdHb != 0, "ETH_USD_HEARTBEAT must be set when ETH_USD_FEED is provided");
-            cm.setEthUsdFeed(ethUsdFeed, ethUsdHb);
-        }
-        // R-I-14 Arbitrum hardening (owner-only; deployer is owner here).
+        // Install the safety dependencies before enabling ETH/USD quotes.
         if (seqFeed != address(0)) {
             cm.setSequencerUptimeFeed(seqFeed);
         }
         if (ethUsdMaxPrice != 0) {
             cm.setEthUsdPriceBounds(ethUsdMinPrice, ethUsdMaxPrice);
+        }
+        if (ethUsdFeed != address(0)) {
+            cm.setEthUsdFeed(ethUsdFeed, ethUsdHb);
         }
         vm.stopBroadcast();
 

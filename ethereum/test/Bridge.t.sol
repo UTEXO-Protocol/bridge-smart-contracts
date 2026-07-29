@@ -69,6 +69,7 @@ contract BridgeTest is Test {
     RGBVerifier rgbVerifier;
     RgbSettlementModule rgbModule;
     MockAggregatorV3 ethUsdFeed;
+    MockAggregatorV3 sequencerUptimeFeed;
 
     address deployer = makeAddr("deployer");
     address user = makeAddr("user");
@@ -99,6 +100,10 @@ contract BridgeTest is Test {
     uint256 constant LATEST_CONFIRMATIONS = 1;
 
     function setUp() public {
+        // Leave enough history for the healthy sequencer round to be past the
+        // mandatory one-hour post-restart grace period.
+        vm.warp(2 hours);
+
         usdt0 = new MockERC20("Mock USDT0", "USDT0");
         btcRelay = new MockBtcRelay();
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, CONFIRMATIONS);
@@ -133,9 +138,12 @@ contract BridgeTest is Test {
         routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
         routeRegistry.setRoute(RGB_CHAIN_ID, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
 
-        // Wire a Chainlink ETH/USD feed ($2000 / ETH, 8 decimals, fresh) so
-        // the NATIVE commission path quotes a positive value.
+        // Wire the complete mandatory R-I-14 oracle config: healthy sequencer,
+        // ETH/USD circuit-breaker bounds, then the fresh ETH/USD price feed.
         ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);
+        sequencerUptimeFeed = new MockAggregatorV3(0, 0, block.timestamp - 1 hours - 1);
+        cm.setSequencerUptimeFeed(address(sequencerUptimeFeed));
+        cm.setEthUsdPriceBounds(100e8, 100_000e8);
         cm.setEthUsdFeed(address(ethUsdFeed), 1 hours);
 
         // Production-flow ownership transfer of Bridge → multisig. CM and
@@ -3386,6 +3394,8 @@ contract BridgeTest is Test {
         feeRouteRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(s.module));
         feeRouteRegistry.setRoute(RGB_CHAIN_ID, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(s.module));
 
+        s.cm.setSequencerUptimeFeed(address(sequencerUptimeFeed));
+        s.cm.setEthUsdPriceBounds(100e8, 100_000e8);
         s.cm.setEthUsdFeed(address(ethUsdFeed), 1 hours);
 
         s.bridge.transferOwnership(multisig);

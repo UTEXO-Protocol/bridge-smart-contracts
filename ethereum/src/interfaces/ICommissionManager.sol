@@ -67,6 +67,8 @@ interface ICommissionManager {
     error GracePeriodNotOver();
     error PriceOutOfBounds();
     error InvalidPriceBounds();
+    error ChainlinkHardeningNotConfigured();
+    error InvalidSequencerRound(uint256 startedAt);
 
     // ============ Events ============
 
@@ -87,10 +89,10 @@ interface ICommissionManager {
 
     event EthUsdFeedUpdated(address indexed feed, uint256 heartbeat);
 
-    /// @notice Emitted on `setSequencerUptimeFeed` (`address(0)` disables the check).
+    /// @notice Emitted on `setSequencerUptimeFeed`; zero makes NATIVE quotes fail closed.
     event SequencerUptimeFeedUpdated(address indexed feed);
 
-    /// @notice Emitted on `setEthUsdPriceBounds` (both zero disables the band).
+    /// @notice Emitted on `setEthUsdPriceBounds`; both zero make NATIVE quotes fail closed.
     event EthUsdPriceBoundsUpdated(uint256 minPrice, uint256 maxPrice);
 
     event TokenCommissionWithdrawn(address indexed token, address indexed to, uint256 amount);
@@ -143,9 +145,11 @@ interface ICommissionManager {
 
     /// @notice Convert a USD-denominated token fee (stablecoin, 1 token ≈ $1) to
     ///         native wei using the configured ETH/USD Chainlink feed. Reverts
-    ///         `EthUsdFeedNotSet` when the feed is unconfigured, `InvalidPrice`
-    ///         on non-positive answers, and `StalePrice` when `updatedAt` is
-    ///         older than the configured heartbeat.
+    ///         `EthUsdFeedNotSet` when the price feed is unconfigured,
+    ///         `ChainlinkHardeningNotConfigured` unless the sequencer feed and
+    ///         price band are both configured, `InvalidPrice` on non-positive
+    ///         answers, and `StalePrice` when `updatedAt` is older than the
+    ///         configured heartbeat.
     function convertTokenFeeToNative(uint256 tokenFee, uint256 tokenDecimals) external view returns (uint256 nativeFee);
 
     // ============ Admin / config ============
@@ -166,12 +170,13 @@ interface ICommissionManager {
     function setEthUsdFeed(address feed, uint256 heartbeat) external;
 
     /// @notice Configure (or rotate) the Chainlink L2 Sequencer Uptime feed used
-    ///         to gate NATIVE quotes on Arbitrum. Pass `address(0)` to disable
-    ///         the check (non-L2 / test environments).
+    ///         to gate NATIVE quotes on Arbitrum. Passing `address(0)` clears
+    ///         the configuration and makes non-zero NATIVE quotes fail closed.
     function setSequencerUptimeFeed(address feed) external;
 
-    /// @notice Configure the optional [min, max] sanity band on the ETH/USD
-    ///         answer (feed decimals). Pass `(0, 0)` to disable; otherwise
+    /// @notice Configure the mandatory [min, max] sanity band on the ETH/USD
+    ///         answer (feed decimals). Passing `(0, 0)` clears the configuration
+    ///         and makes non-zero NATIVE quotes fail closed; otherwise
     ///         `0 < minPrice < maxPrice`.
     function setEthUsdPriceBounds(uint256 minPrice, uint256 maxPrice) external;
 

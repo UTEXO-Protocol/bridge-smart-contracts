@@ -77,9 +77,8 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     ///         in seconds. Quotes revert `StalePrice` when the answer is older.
     uint256 public ethUsdHeartbeat;
 
-    /// @notice Chainlink L2 Sequencer Uptime feed (Arbitrum). `address(0)`
-    ///         (default) disables the check for non-L2 / test environments;
-    ///         an Arbitrum deployment MUST wire it via `setSequencerUptimeFeed`.
+    /// @notice Chainlink L2 Sequencer Uptime feed (Arbitrum). NATIVE quotes
+    ///         fail closed while this is `address(0)`.
     address public sequencerUptimeFeed;
 
     /// @notice Seconds after a sequencer restart during which NATIVE quotes are
@@ -87,9 +86,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     ///         recovery. Chainlink's recommended grace period is 3600s.
     uint256 public constant SEQUENCER_GRACE_PERIOD = 3600;
 
-    /// @notice Optional [min, max] sanity band on the ETH/USD answer (in feed
-    ///         decimals). `ethUsdMaxPrice == 0` (default) disables the band; when
-    ///         set, an answer outside it (e.g. an aggregator floored/capped to
+    /// @notice Mandatory [min, max] sanity band on the ETH/USD answer (in feed
+    ///         decimals). NATIVE quotes fail closed while the band is unset; an
+    ///         answer outside it (e.g. an aggregator floored/capped to
     ///         `minAnswer`/`maxAnswer` during an extreme move) reverts
     ///         `PriceOutOfBounds`.
     uint256 public ethUsdMinPrice;
@@ -244,18 +243,23 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         address feedAddr = ethUsdFeed;
         if (feedAddr == address(0)) revert EthUsdFeedNotSet();
 
-        // L2 sequencer liveness (Arbitrum). Skipped when unset so non-L2 / test
-        // environments are unaffected; an Arbitrum deployment wires it.
-        if (sequencerUptimeFeed != address(0)) _requireSequencerUp();
+        // never consume an ETH/USD answer unless both Arbitrum
+        // hardening layers are configured. Setters may be executed in separate
+        // governance proposals, but the quote path remains fail-closed
+        // throughout any partially configured state.
+        if (sequencerUptimeFeed == address(0) || ethUsdMinPrice == 0 || ethUsdMaxPrice == 0) {
+            revert ChainlinkHardeningNotConfigured();
+        }
+        _requireSequencerUp();
 
         AggregatorV3Interface feed = AggregatorV3Interface(feedAddr);
 
         (, int256 answer,, uint256 updatedAt,) = feed.latestRoundData();
         if (answer <= 0) revert InvalidPrice();
         if (block.timestamp - updatedAt > ethUsdHeartbeat) revert StalePrice();
-        // Optional circuit-breaker band (disabled when ethUsdMaxPrice == 0):
-        // rejects a floored/capped aggregator answer that `answer > 0` misses.
-        if (ethUsdMaxPrice != 0 && (uint256(answer) < ethUsdMinPrice || uint256(answer) > ethUsdMaxPrice)) {
+        // Mandatory circuit-breaker rejects a floored/capped aggregator answer
+        // that the basic `answer > 0` validity check cannot detect.
+        if (uint256(answer) < ethUsdMinPrice || uint256(answer) > ethUsdMaxPrice) {
             revert PriceOutOfBounds();
         }
 
@@ -263,14 +267,15 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         nativeFee = (tokenFee * scale) / uint256(answer);
     }
 
-    /// @dev Reverts unless the Arbitrum L2 sequencer is up and past the grace
-    ///      period. Only invoked when `sequencerUptimeFeed` is configured. The
-    ///      uptime feed is a standard `AggregatorV3Interface`: `answer == 0`
-    ///      means the sequencer is up, `answer == 1` means down; `startedAt` is
-    ///      when the current status round began (i.e. the last restart when it
-    ///      transitions back to up).
+    /// @dev Reverts unless the Arbitrum L2 sequencer round is initialized, its
+    ///      timestamp is sane, and the sequencer is up and past the grace
+    ///      period. The uptime feed is a standard `AggregatorV3Interface`:
+    ///      `answer == 0` means up, `answer == 1` means down; `startedAt` is when
+    ///      the current status round began (the last restart when it returned
+    ///      to up).
     function _requireSequencerUp() internal view {
         (, int256 answer, uint256 startedAt,,) = AggregatorV3Interface(sequencerUptimeFeed).latestRoundData();
+        if (startedAt == 0 || startedAt > block.timestamp) revert InvalidSequencerRound(startedAt);
         if (answer != 0) revert SequencerDown();
         if (block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) revert GracePeriodNotOver();
     }
@@ -350,17 +355,17 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     }
 
     /// @inheritdoc ICommissionManager
-    /// @dev `address(0)` disables the sequencer-uptime gate (non-L2 / test
-    ///      environments). On Arbitrum, federation MUST set the Chainlink
-    ///      Sequencer Uptime feed so NATIVE quotes reject prices during
-    ///      downtime and the post-restart grace period.
+    /// @dev Setting `address(0)` is allowed for staged governance changes or to
+    ///      tear down an unused oracle config, but it makes every non-zero
+    ///      NATIVE quote revert `ChainlinkHardeningNotConfigured`.
     function setSequencerUptimeFeed(address feed) external onlyOwner {
         sequencerUptimeFeed = feed;
         emit SequencerUptimeFeedUpdated(feed);
     }
 
     /// @inheritdoc ICommissionManager
-    /// @dev Pass `(0, 0)` to disable the band; otherwise require
+    /// @dev Pass `(0, 0)` to clear the band during staged governance changes or
+    ///      oracle teardown; NATIVE quotes then fail closed. Otherwise require
     ///      `0 < minPrice < maxPrice` (values in the feed's decimals, e.g.
     ///      `100e8` / `100_000e8` for an 8-decimal ETH/USD feed).
     function setEthUsdPriceBounds(uint256 minPrice, uint256 maxPrice) external onlyOwner {

@@ -17,6 +17,7 @@ contract CommissionManagerTest is Test {
     CommissionManager internal cm;
     MockERC20 internal token;
     MockAggregatorV3 internal ethUsdFeed;
+    MockAggregatorV3 internal sequencerFeed;
 
     address internal constant BRIDGE = address(0xB01);
     address internal owner = makeAddr("owner");
@@ -35,6 +36,8 @@ contract CommissionManagerTest is Test {
     uint8 internal constant FEED_DECIMALS = 8;
     int256 internal constant DEFAULT_ETH_USD = 2_000e8; // $2000 / ETH
     uint256 internal constant HEARTBEAT = 1 hours;
+    uint256 internal constant MIN_ETH_USD = 100e8;
+    uint256 internal constant MAX_ETH_USD = 100_000e8;
 
     event BridgeAddressUpdated(address indexed newBridge);
     event GlobalDefaultsUpdated(
@@ -57,12 +60,16 @@ contract CommissionManagerTest is Test {
         vm.prank(owner);
         cm.setGlobalDefaults(0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
-        // Deploy a default ETH/USD feed and wire it in. Tests that need to
-        // exercise the "feed unset" branch redeploy CM without calling
-        // `setEthUsdFeed` (see test_convertTokenFeeToNative_revertsIfFeedUnset).
+        // Install a complete healthy Arbitrum oracle config. R-I-14 makes the
+        // sequencer feed and price band mandatory whenever a non-zero NATIVE
+        // quote consumes ETH/USD.
         ethUsdFeed = new MockAggregatorV3(FEED_DECIMALS, DEFAULT_ETH_USD, block.timestamp);
-        vm.prank(owner);
+        sequencerFeed = new MockAggregatorV3(0, 0, block.timestamp - cm.SEQUENCER_GRACE_PERIOD() - 1);
+        vm.startPrank(owner);
+        cm.setSequencerUptimeFeed(address(sequencerFeed));
+        cm.setEthUsdPriceBounds(MIN_ETH_USD, MAX_ETH_USD);
         cm.setEthUsdFeed(address(ethUsdFeed), HEARTBEAT);
+        vm.stopPrank();
     }
 
     // --- Constructor ---
@@ -143,17 +150,14 @@ contract CommissionManagerTest is Test {
         cm.convertTokenFeeToNative(1, 19);
     }
 
-    // With the min/max band UNSET (the default), a fresh positive answer is
-    // accepted no matter how extreme — which is exactly why an Arbitrum
-    // deployment configures `setEthUsdPriceBounds`. Band-enabled rejection is
-    // covered by test_convertTokenFeeToNative_revertsWhenPriceBelowMin/AboveMax.
-    function test_convertTokenFeeToNative_allowsOutlierWhenBandUnset() public {
+    function test_convertTokenFeeToNative_revertsBeforeReadingOutlierWhenBandUnset() public {
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(0, 0);
         ethUsdFeed.setAnswer(1); // $1e-8 — an extreme outlier
         ethUsdFeed.setUpdatedAt(block.timestamp);
 
-        uint256 nativeFee = cm.convertTokenFeeToNative(1e18, 18);
-
-        assertEq(nativeFee, 1e26, "fresh outlier accepted while band is unset");
+        vm.expectRevert(ICommissionManager.ChainlinkHardeningNotConfigured.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
     }
 
     function test_buildRouteKey_matchesEncodeHash() public view {
@@ -752,9 +756,12 @@ contract CommissionManagerTest is Test {
         // formula instead of mirroring the implementation expression.
         for (uint256 i = 0; i < tokenFees.length; i++) {
             MockAggregatorV3 feed = new MockAggregatorV3(feedDecimals[i], prices[i], block.timestamp);
+            uint256 decimalScale = 10 ** uint256(feedDecimals[i]);
 
-            vm.prank(owner);
+            vm.startPrank(owner);
+            cm.setEthUsdPriceBounds(100 * decimalScale, 100_000 * decimalScale);
             cm.setEthUsdFeed(address(feed), HEARTBEAT);
+            vm.stopPrank();
 
             assertEq(
                 cm.convertTokenFeeToNative(tokenFees[i], tokenDecimals[i]), expectedNativeFees[i], "native fee formula"
@@ -782,9 +789,12 @@ contract CommissionManagerTest is Test {
 
     // --- sequencer uptime ---
 
-    function test_convertTokenFeeToNative_noSequencerCheckWhenUnset() public view {
-        // No sequencer feed wired (setUp does not set one) → quote works.
-        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14);
+    function test_convertTokenFeeToNative_revertsWhenSequencerFeedUnset() public {
+        vm.prank(owner);
+        cm.setSequencerUptimeFeed(address(0));
+
+        vm.expectRevert(ICommissionManager.ChainlinkHardeningNotConfigured.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
     }
 
     function test_convertTokenFeeToNative_revertsWhenSequencerDown() public {
@@ -808,6 +818,19 @@ contract CommissionManagerTest is Test {
         cm.convertTokenFeeToNative(1e18, 18);
     }
 
+    function test_convertTokenFeeToNative_revertsOnUninitializedSequencerRound() public {
+        _setSequencer(0, 0);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidSequencerRound.selector, uint256(0)));
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_revertsOnFutureSequencerRound() public {
+        uint256 futureStartedAt = block.timestamp + 1;
+        _setSequencer(0, futureStartedAt);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidSequencerRound.selector, futureStartedAt));
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
     function test_convertTokenFeeToNative_passesWhenSequencerUpPastGrace() public {
         _setSequencer(0, block.timestamp - cm.SEQUENCER_GRACE_PERIOD() - 1);
         assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14); // same as happy path
@@ -815,9 +838,12 @@ contract CommissionManagerTest is Test {
 
     // --- min/max price band ---
 
-    function test_convertTokenFeeToNative_noBandWhenUnset() public view {
-        // No band configured in setUp → any positive fresh answer is accepted.
-        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14);
+    function test_convertTokenFeeToNative_revertsWhenBandUnset() public {
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(0, 0);
+
+        vm.expectRevert(ICommissionManager.ChainlinkHardeningNotConfigured.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
     }
 
     function test_convertTokenFeeToNative_revertsWhenPriceBelowMin() public {
@@ -869,6 +895,9 @@ contract CommissionManagerTest is Test {
         vm.prank(owner);
         cm.setSequencerUptimeFeed(address(0));
         assertEq(cm.sequencerUptimeFeed(), address(0));
+
+        vm.expectRevert(ICommissionManager.ChainlinkHardeningNotConfigured.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
     }
 
     function test_setSequencerUptimeFeed_onlyOwner() public {
@@ -893,6 +922,9 @@ contract CommissionManagerTest is Test {
         cm.setEthUsdPriceBounds(0, 0);
         assertEq(cm.ethUsdMinPrice(), 0);
         assertEq(cm.ethUsdMaxPrice(), 0);
+
+        vm.expectRevert(ICommissionManager.ChainlinkHardeningNotConfigured.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
     }
 
     function test_setEthUsdPriceBounds_revertsOnZeroMinWithNonZeroMax() public {
