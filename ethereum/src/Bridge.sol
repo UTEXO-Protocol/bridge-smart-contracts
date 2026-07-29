@@ -875,10 +875,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 received = IERC20(TOKEN).balanceOf(address(this)) - balanceBefore;
 
         // The token commission is forwarded out of `received`; guard the
-        // subtraction so a token fee that eats more than the commission reverts
-        // cleanly instead of underflowing. A zero net (received == commission) is
-        // left to the existing zero-amount / dust handling, unchanged here.
-        if (received < tokenCommission) revert InsufficientReceived(received, tokenCommission);
+        // subtraction so a token fee that consumes all (or more) of the actual
+        // receipt reverts instead of creating a zero-net settlement or
+        // underflowing. Equality is reachable with fee-on-transfer tokens even
+        // though the nominal commission configuration is strictly below 100%.
+        if (received <= tokenCommission) revert InsufficientReceived(received, tokenCommission);
         ctx.netAmount = received - tokenCommission;
 
         // Forward token commission BEFORE the settlement hook so that any

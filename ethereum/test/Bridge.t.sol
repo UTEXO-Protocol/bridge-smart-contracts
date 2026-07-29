@@ -639,23 +639,50 @@ contract BridgeTest is Test {
 
     function test_fundsIn_dustThatRoundsCommissionToZeroIsRejected() public {
         // 4% token commission. Below 25 units the fee floors to zero
-        // (24 * 400 / 100 / 100 == 0) — the exact dust case R-I-08 describes.
-        // A floor of 25 keeps such dust off the inbound path; at 25 the fee is
-        // a non-zero 1 unit.
+        // (24 * 400 / 100 / 100 == 0) — the exact dust case I-08 describes.
+        // The effective fee policy itself now rejects that dust, independently
+        // of the separately configurable global minimum.
         _setFundsInTokenRule(400);
-        vm.prank(multisig);
-        bridge.setMinFundsInAmount(25);
 
         assertEq(cm.calculateStableFee(24, 400, 100), 0, "sanity: 24 pays zero commission");
 
-        vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(24), uint256(25)));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICommissionManager.CommissionRoundsToZero.selector, uint256(24), uint256(400), uint8(100)
+            )
+        );
         vm.prank(user);
         bridge.fundsIn(24, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        // At the floor the deposit is accepted and pays a non-zero commission.
+        // The smallest amount that produces one fee unit is accepted.
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(25, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(rgbModule.fundsInRecords(opId), 24, "net = 25 - 1 commission");
+    }
+
+    function test_R_I_08_fundsOutDustThatRoundsCommissionToZeroIsRejected() public {
+        uint256 dustAmount = 24;
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn(dustAmount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _ensureRgbSafetyCapacity(dustAmount);
+        _setFundsOutTokenRule(400);
+
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlementWithAmounts(_ids(opId), _one(dustAmount));
+        uint256 burnId =
+            _deriveBurnId(recipient, dustAmount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICommissionManager.CommissionRoundsToZero.selector, dustAmount, uint256(400), uint8(100)
+            )
+        );
+        vm.prank(multisig);
+        _fundsOutWithBurnId(
+            recipient, dustAmount, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData
+        );
+
+        assertFalse(bridge.consumedBurnIds(burnId), "reverted release does not consume burn id");
     }
 
     function test_fundsInFromAdapter_revertsBelowMinimum() public {
@@ -3177,70 +3204,25 @@ contract BridgeTest is Test {
         assertEq(rgbModule.fundsInRecords(opId2), netAmount, "second record created");
     }
 
-    // A positive gross deposit with zero net leaves a zero record — the RGB
-    // duplicate guard is value-based, so a zero record does not occupy the id.
-    // Post R-W-08 each deposit derives a distinct id anyway; this proves the
-    // zero-net record semantics still hold under a derived id.
-    function test_fundsIn_zeroNetDepositLeavesZeroRecord_currentBehavior() public {
-        // stablePercent == multiplier^2 makes tokenCommission == amount.
-        vm.prank(deployer);
-        cm.setCommissionRule(
-            SOURCE_CHAIN_ID,
-            RGB_CHAIN_ID,
-            address(usdt0),
-            CommissionConfig({
-                stablePercent: 8_100,
-                multiplier: 90,
-                side: CommissionSide.FUNDS_IN,
-                currency: CommissionCurrency.TOKEN,
-                isSet: true
-            })
+    /// @dev I-08 regression: the auditor's 100% fee shape is rejected before
+    ///      it can become an active route rule and create zero-net records.
+    function test_R_I_08_hundredPercentRouteRuleCannotBeConfigured() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 8_100,
+            multiplier: 90,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, cfg.stablePercent, cfg.multiplier)
         );
+        vm.prank(deployer);
+        cm.setCommissionRule(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), cfg);
 
-        _assertZeroNetDepositLeavesZeroRecord(1);
-        _assertZeroNetDepositLeavesZeroRecord(AMOUNT / 2);
-        _assertZeroNetDepositLeavesZeroRecord(AMOUNT);
-    }
-
-    function _assertZeroNetDepositLeavesZeroRecord(uint256 amount) internal {
-        (uint256 tokenCommission,, uint256 netAmount) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
-
-        assertEq(tokenCommission, amount, "pre fee equals amount");
-        assertEq(netAmount, 0, "pre zero net");
-
-        uint256 userBefore = usdt0.balanceOf(user);
-        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
-        uint256 cmBefore = usdt0.balanceOf(address(cm));
-        uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
-        uint256 nativePoolBefore = cm.nativeCommissionPool();
-
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit FundsIn(user, RGB_OP_ID, 0);
-        vm.prank(user);
-        bytes32 opId1 = bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-
-        assertEq(usdt0.balanceOf(user), userBefore - amount, "user spent first gross");
-        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, "bridge keeps no net");
-        assertEq(usdt0.balanceOf(address(cm)), cmBefore + amount, "cm got first gross");
-        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore + amount, "cm pool first gross");
-        assertEq(cm.nativeCommissionPool(), nativePoolBefore, "native pool unchanged");
-        assertEq(rgbModule.fundsInRecords(opId1), 0, "zero-net leaves zero record");
-
-        // A second identical deposit derives a distinct id and also leaves a
-        // zero record — no collision, no revert.
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit FundsIn(user, RGB_OP_ID, 0);
-        vm.prank(user);
-        bytes32 opId2 = bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-
-        assertTrue(opId2 != opId1, "second deposit distinct id");
-        assertEq(usdt0.balanceOf(user), userBefore - (2 * amount), "user spent duplicate gross");
-        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, "bridge still keeps no net");
-        assertEq(usdt0.balanceOf(address(cm)), cmBefore + (2 * amount), "cm got duplicate gross");
-        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore + (2 * amount), "cm pool duplicate gross");
-        assertEq(cm.nativeCommissionPool(), nativePoolBefore, "duplicate native pool unchanged");
-        assertEq(rgbModule.fundsInRecords(opId2), 0, "second zero record");
+        CommissionConfig memory stored = cm.getCommissionRule(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0));
+        assertFalse(stored.isSet, "invalid rule was not stored");
     }
 
     // ========================================================================
@@ -3580,11 +3562,11 @@ contract BridgeTest is Test {
         assertEq(s.bridge.lockedLiquidity(RGB_CHAIN_ID), received * 9, "90% bucket reserve remains locked");
     }
 
-    // --- Received < tokenCommission reverts InsufficientReceived ---
+    // --- Received <= tokenCommission reverts InsufficientReceived ---
     //
     // Fee = 9000 bps (90%) → received = 10% of AMOUNT = 10e18. The fee-shape
     // guard caps the commission fraction at `stablePercent / multiplier^2`
-    // (stablePercent ≤ 9000, stablePercent ≤ multiplier^2). Choosing
+    // (stablePercent ≤ 9000, stablePercent < multiplier^2). Choosing
     // multiplier = 95, stablePercent = 9000 yields a fraction 9000/9025 ≈ 99.7%,
     // so the commission quote on the NOMINAL AMOUNT (~99.7e18) far exceeds the
     // actual received (10e18) — configurable within the guard, so no boundary
@@ -3602,5 +3584,24 @@ contract BridgeTest is Test {
         vm.expectRevert(abi.encodeWithSelector(IBridge.InsufficientReceived.selector, received, tokenCommission));
         vm.prank(user);
         s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+    }
+
+    /// @dev I-08: a nominally valid (<100%) commission can still consume the
+    ///      full ACTUAL receipt when the token charges a transfer fee. Equality
+    ///      must revert rather than recording a zero-net settlement.
+    function test_R_I_08_fundsInFeeTokenRevertsWhenActualNetWouldBeZero() public {
+        FeeStack memory s = _deployFeeStack(5000); // Bridge receives 50%
+        _setFeeStackFundsInTokenRule(s, 5000, 100); // nominal commission is 50%
+
+        uint256 received = AMOUNT - s.token.feeOn(AMOUNT);
+        uint256 tokenCommission = s.cm.calculateStableFee(AMOUNT, 5000, 100);
+        assertEq(received, tokenCommission, "sanity: actual receipt equals nominal commission");
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InsufficientReceived.selector, received, tokenCommission));
+        vm.prank(user);
+        s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        assertEq(s.bridge.lockedLiquidity(RGB_CHAIN_ID), 0, "zero-net liquidity was not recorded");
+        assertEq(s.cm.tokenCommissionPool(address(s.token)), 0, "commission transfer rolled back");
     }
 }
