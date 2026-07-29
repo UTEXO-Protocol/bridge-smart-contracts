@@ -17,7 +17,6 @@ import {MultisigProxy} from "../../src/MultisigProxy.sol";
 ///   INITIAL_ENCLAVE_SOURCE_CHAIN_ID — source chain id the initial enclave set authorises (non-zero)
 ///   FEDERATION_SIGNERS    — comma-separated governance signer addresses
 ///   FEDERATION_THRESHOLD  — M for federation M-of-N
-///   COMMISSION_RECIPIENT  — destination for commission withdrawals
 ///   TIMELOCK_DURATION     — seconds between propose and execute (e.g. 3600)
 ///
 /// Usage:
@@ -34,13 +33,12 @@ contract DeployMultisigProxy is Script {
         uint256 initialSrcChain = vm.envUint("INITIAL_ENCLAVE_SOURCE_CHAIN_ID");
         address[] memory fed = vm.envAddress("FEDERATION_SIGNERS", ",");
         uint256 fedThr = vm.envUint("FEDERATION_THRESHOLD");
-        address commission = vm.envAddress("COMMISSION_RECIPIENT");
         uint256 timelock = vm.envUint("TIMELOCK_DURATION");
         uint256 minTimelock = vm.envUint("MIN_TIMELOCK");
 
         vm.startBroadcast(pk);
         proxy = new MultisigProxy(
-            bridgeAddr, commissionManager, enc, encThr, initialSrcChain, fed, fedThr, commission, timelock, minTimelock
+            bridgeAddr, commissionManager, enc, encThr, initialSrcChain, fed, fedThr, timelock, minTimelock
         );
         vm.stopBroadcast();
 

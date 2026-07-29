@@ -102,6 +102,8 @@ interface ICommissionManager {
 
     function bridgeAddress() external view returns (address);
 
+    function commissionRecipient() external view returns (address);
+
     function globalStablePercent() external view returns (uint256);
 
     function globalMultiplier() external view returns (uint8);
@@ -218,11 +220,19 @@ interface ICommissionManager {
 
     // ============ Withdrawals (owner) ============
 
-    function withdrawTokenCommission(address token, address to, uint256 amount) external;
+    /// @notice Withdraw accrued token commission to the immutable
+    ///         `commissionRecipient`.
+    function withdrawTokenCommission(address token, uint256 amount) external;
 
-    function withdrawNativeCommission(address payable to, uint256 amount) external;
+    /// @notice Withdraw accrued native commission to the immutable
+    ///         `commissionRecipient`.
+    function withdrawNativeCommission(uint256 amount) external;
 
-    function withdrawAllTokenCommission(address token, address to) external;
+    /// @notice Withdraw all accrued commission for `token` to the immutable
+    ///         `commissionRecipient`.
+    function withdrawAllTokenCommission(address token) external;
 
-    function withdrawAllNativeCommission(address payable to) external;
+    /// @notice Withdraw all accrued native commission to the immutable
+    ///         `commissionRecipient`.
+    function withdrawAllNativeCommission() external;
 }

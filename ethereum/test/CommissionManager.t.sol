@@ -55,7 +55,7 @@ contract CommissionManagerTest is Test {
         vm.warp(HEARTBEAT * 10);
 
         vm.prank(owner);
-        cm = new CommissionManager(BRIDGE);
+        cm = new CommissionManager(BRIDGE, recipient);
         token = new MockERC20("Test", "TST");
         vm.prank(owner);
         cm.setGlobalDefaults(0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
@@ -76,12 +76,18 @@ contract CommissionManagerTest is Test {
 
     function test_constructor_setsBridgeAndOwner() public view {
         assertEq(cm.bridgeAddress(), BRIDGE);
+        assertEq(cm.commissionRecipient(), recipient);
         assertEq(cm.owner(), owner);
     }
 
     function test_constructor_revertsOnZeroBridge() public {
         vm.expectRevert(ICommissionManager.InvalidBridgeAddress.selector);
-        new CommissionManager(address(0));
+        new CommissionManager(address(0), recipient);
+    }
+
+    function test_constructor_revertsOnZeroCommissionRecipient() public {
+        vm.expectRevert(ICommissionManager.InvalidRecipient.selector);
+        new CommissionManager(BRIDGE, address(0));
     }
 
     function test_renounceOwnership_blocked() public {
@@ -115,7 +121,7 @@ contract CommissionManagerTest is Test {
     function test_convertTokenFeeToNative_revertsIfFeedUnset() public {
         // Fresh CM with no feed configured.
         vm.prank(owner);
-        CommissionManager freshCm = new CommissionManager(BRIDGE);
+        CommissionManager freshCm = new CommissionManager(BRIDGE, recipient);
         vm.expectRevert(ICommissionManager.EthUsdFeedNotSet.selector);
         freshCm.convertTokenFeeToNative(1e18, 18);
     }
@@ -661,7 +667,7 @@ contract CommissionManagerTest is Test {
         cm.receiveTokenCommission(address(token), amt);
 
         vm.prank(owner);
-        cm.withdrawTokenCommission(address(token), recipient, amt);
+        cm.withdrawTokenCommission(address(token), amt);
 
         assertEq(cm.tokenCommissionPool(address(token)), 0);
         assertEq(token.balanceOf(recipient), amt);
@@ -674,7 +680,7 @@ contract CommissionManagerTest is Test {
         cm.receiveTokenCommission(address(token), amt);
 
         vm.prank(owner);
-        cm.withdrawAllTokenCommission(address(token), recipient);
+        cm.withdrawAllTokenCommission(address(token));
 
         assertEq(cm.tokenCommissionPool(address(token)), 0);
         assertEq(token.balanceOf(recipient), amt);
@@ -683,7 +689,32 @@ contract CommissionManagerTest is Test {
     function test_withdrawTokenCommission_revertsInsufficient() public {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.InsufficientBalance.selector);
-        cm.withdrawTokenCommission(address(token), recipient, 1);
+        cm.withdrawTokenCommission(address(token), 1);
+    }
+
+    
+    function test_legacyFreeRecipientWithdrawalSelectorsUnavailable() public {
+        uint256 amount = 10 ether;
+        token.mint(address(cm), amount);
+        vm.prank(BRIDGE);
+        cm.receiveTokenCommission(address(token), amount);
+
+        bytes[] memory legacyCalls = new bytes[](4);
+        legacyCalls[0] =
+            abi.encodeWithSignature("withdrawTokenCommission(address,address,uint256)", address(token), user, amount);
+        legacyCalls[1] = abi.encodeWithSignature("withdrawNativeCommission(address,uint256)", user, amount);
+        legacyCalls[2] = abi.encodeWithSignature("withdrawAllTokenCommission(address,address)", address(token), user);
+        legacyCalls[3] = abi.encodeWithSignature("withdrawAllNativeCommission(address)", user);
+
+        for (uint256 i = 0; i < legacyCalls.length; i++) {
+            vm.prank(owner);
+            (bool ok,) = address(cm).call(legacyCalls[i]);
+            assertFalse(ok, "legacy free-recipient selector must not exist");
+        }
+
+        assertEq(cm.tokenCommissionPool(address(token)), amount, "failed legacy calls preserve pool");
+        assertEq(token.balanceOf(user), 0, "arbitrary recipient receives nothing");
+        assertEq(token.balanceOf(recipient), 0, "no valid withdrawal executed");
     }
 
     // --- Native commission ---
@@ -715,7 +746,7 @@ contract CommissionManagerTest is Test {
 
         uint256 before = recipient.balance;
         vm.prank(owner);
-        cm.withdrawNativeCommission(payable(recipient), 2 ether);
+        cm.withdrawNativeCommission(2 ether);
         assertEq(cm.nativeCommissionPool(), 0);
         assertEq(recipient.balance, before + 2 ether);
     }
@@ -728,7 +759,7 @@ contract CommissionManagerTest is Test {
 
         uint256 before = recipient.balance;
         vm.prank(owner);
-        cm.withdrawAllNativeCommission(payable(recipient));
+        cm.withdrawAllNativeCommission();
         assertEq(cm.nativeCommissionPool(), 0);
         assertEq(recipient.balance, before + 3 ether);
     }
@@ -736,7 +767,7 @@ contract CommissionManagerTest is Test {
     function test_withdrawNativeCommission_revertsInsufficient() public {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.InsufficientBalance.selector);
-        cm.withdrawNativeCommission(payable(recipient), 1 wei);
+        cm.withdrawNativeCommission(1 wei);
     }
 
     // --- Formula regression coverage ---

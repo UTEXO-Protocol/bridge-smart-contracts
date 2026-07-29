@@ -121,7 +121,7 @@ contract BridgeTest is Test {
         uint64 currentNonce = vm.getNonce(deployer);
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        cm = new CommissionManager(predictedBridge);
+        cm = new CommissionManager(predictedBridge, recipient);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
         bridge = new Bridge(
             address(usdt0),
@@ -3383,7 +3383,7 @@ contract BridgeTest is Test {
         uint64 currentNonce = vm.getNonce(deployer);
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        s.cm = new CommissionManager(predictedBridge);
+        s.cm = new CommissionManager(predictedBridge, recipient);
         RouteRegistry feeRouteRegistry = new RouteRegistry(predictedBridge, deployer);
         s.bridge = new Bridge(address(s.token), address(feeRouteRegistry), payable(address(s.cm)), address(0), 1);
 

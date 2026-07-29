@@ -101,7 +101,7 @@ contract BridgeRebalanceTest is Test {
         uint64 currentNonce = vm.getNonce(deployer);
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        cm = new CommissionManager(predictedBridge);
+        cm = new CommissionManager(predictedBridge, deployer);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
         bridge = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1);
 

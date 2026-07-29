@@ -49,9 +49,6 @@ library MultisigHelper {
     bytes32 internal constant PROPOSE_UPDATE_BRIDGE_TYPEHASH =
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
 
-    bytes32 internal constant PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH =
-        keccak256("ProposeSetCommissionRecipient(address newRecipient,uint256 nonce,uint256 deadline)");
-
     bytes32 internal constant PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
 
