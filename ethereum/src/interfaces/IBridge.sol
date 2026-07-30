@@ -25,6 +25,8 @@ interface IBridge {
     error InvalidBurnId(uint256 provided, uint256 expected);
     error BurnIdAlreadyConsumed(uint256 burnId);
     error NativeValueMismatch();
+    error NativeCommissionOutOfBounds(uint256 provided, uint256 minimum, uint256 maximum);
+    error NativeRefundFailed(address recipient, uint256 amount);
     error RebalanceSameChain(uint256 chainId);
     error ChainSafetyLimitExceeded(uint256 chainId, uint256 requested, uint256 spentInWindow, uint256 windowLimit);
     error GlobalSafetyLimitExceeded(uint256 requested, uint256 spentInWindow, uint256 windowLimit);
@@ -181,11 +183,15 @@ interface IBridge {
     /// @notice Direct deposit overload for EVM users on this chain. The
     ///         `sourceChainId` half of the commission route key is filled with
     ///         `block.chainid` — non-spoofable by the caller.
-    /// @dev Payable: if the active route uses NATIVE commission currency, `msg.value`
-    ///      must be at least the quoted native commission — any surplus (from
-    ///      favorable ETH/USD drift between quote and execution) is collected as
-    ///      commission, not refunded (R-I-03). If the route takes no native
-    ///      commission (TOKEN currency), `msg.value` must be 0.
+    /// @dev Payable: if the active route uses NATIVE commission currency,
+    ///      `msg.value` must be at least the freshly quoted native commission
+    ///      and at most `NATIVE_COMMISSION_TOLERANCE_BPS` above it. Attach the
+    ///      quote plus a small buffer so ETH/USD drift between quoting and
+    ///      execution cannot revert the deposit: exactly the fresh quote is
+    ///      charged and the surplus is refunded to the caller before the call
+    ///      returns. A caller that cannot receive native value must therefore
+    ///      send the exact quote. If the route takes no native commission
+    ///      (TOKEN currency), `msg.value` must be 0.
     /// @dev `settlementData` is an opaque per-route blob forwarded into the
     ///      route's `ISettlementModule.onFundsIn`. Routes whose module does not
     ///      consume any extra data (e.g. RGB) accept an empty bytes string.
@@ -208,6 +214,12 @@ interface IBridge {
     ///      overload is effectively closed. `sourceSender` is authenticated by
     ///      the source-chain entrypoint and adapter, not by an arbitrary
     ///      caller — it is bound into the derived `operationId`.
+    /// @dev Native commission here is the source-agreed value the adapter
+    ///      forwards, and its payer lives on the source chain. Because no refund
+    ///      can reach them, `msg.value` is accepted anywhere within
+    ///      `NATIVE_COMMISSION_TOLERANCE_BPS` either side of the fresh quote and
+    ///      is collected in full — unlike the direct overload, which charges the
+    ///      quote exactly and refunds the difference.
     /// @return operationId The canonical bridge-side operation id.
     function fundsIn(
         uint256 amount,

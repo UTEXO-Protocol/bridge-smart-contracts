@@ -479,10 +479,9 @@ contract CommissionManagerTest is Test {
     //
     // The stable-fee formula is `amount * stablePercent / multiplier / multiplier`,
     // i.e. a fee fraction of `stablePercent / multiplier^2`. If `stablePercent`
-    // exceeds `multiplier^2` the quoted fee exceeds the bridged amount and the
-    // later `netAmount = amount - fee` underflows (Panic 0x11), bricking the
-    // route until the federation reconfigures. The setters must therefore reject
-    // any `(stablePercent, multiplier)` pair where `stablePercent > multiplier^2`.
+    // reaches `multiplier^2` the fee consumes the whole bridged amount; above it,
+    // `netAmount = amount - fee` underflows. The setters must therefore require
+    // `stablePercent < multiplier^2`, guaranteeing a positive nominal net.
     function test_setGlobalDefaults_revertsWhenStablePercentExceedsMultiplierSquared() public {
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(9000), uint8(1)));
@@ -497,15 +496,11 @@ contract CommissionManagerTest is Test {
         cm.setGlobalDefaults(101, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
-    /// @dev Exact boundary `stablePercent == multiplier^2` is accepted: it is a 100%
-    ///      fee (`netAmount = 0`) which is degenerate but does not underflow, so the
-    ///      invariant rejects only the strictly-greater case.
-    function test_setGlobalDefaults_acceptsFeeShapeAtExactBoundary() public {
+    /// @dev I-08: the exact boundary is a 100% fee and must be rejected too.
+    function test_setGlobalDefaults_revertsFeeShapeAtExactBoundary() public {
         vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(100), uint8(10)));
         cm.setGlobalDefaults(100, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
-        (uint256 sp, uint8 m,,) = cm.getGlobalDefaults();
-        assertEq(sp, 100);
-        assertEq(m, 10);
     }
 
     /// @dev Regression for the uint8 widening in the fix. With the default
@@ -536,8 +531,8 @@ contract CommissionManagerTest is Test {
         cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
     }
 
-    /// @dev Exact boundary `stablePercent == multiplier^2` accepted on the route setter.
-    function test_setCommissionRule_acceptsFeeShapeAtExactBoundary() public {
+    /// @dev I-08: per-route rules also reject the exact 100% boundary.
+    function test_setCommissionRule_revertsFeeShapeAtExactBoundary() public {
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 100,
             multiplier: 10,
@@ -546,10 +541,8 @@ contract CommissionManagerTest is Test {
             isSet: true
         });
         vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(100), uint8(10)));
         cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
-        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token));
-        assertEq(stored.stablePercent, 100);
-        assertEq(stored.multiplier, 10);
     }
 
     /// @dev uint8-widening regression on the per-route setter: `(9000, 100)` is valid.
@@ -568,19 +561,54 @@ contract CommissionManagerTest is Test {
         assertEq(stored.multiplier, 100);
     }
 
-    /// @dev End state of the invariant: a config accepted at the exact boundary
-    ///      yields `fee == amount` and `netAmount == 0` without underflowing. This
-    ///      is what the setter guard guarantees for every storable rule — the
-    ///      `amount - fee` subtraction in the calculators can never go negative.
-    function test_calculateFundsInCommission_acceptedBoundaryDoesNotUnderflow() public {
+    /// @dev Direct regression for the auditor's `8100 / 90^2 == 100%` PoC.
+    function test_R_I_08_rejectsAuditHundredPercentConfiguration() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(100, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
-        uint256 amount = 50_000;
-        (uint256 tok, uint256 nat, uint256 net) =
-            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), amount);
-        assertEq(tok, amount); // 100% fee at the boundary
-        assertEq(nat, 0);
-        assertEq(net, 0); // no underflow
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(8100), uint8(90)));
+        cm.setGlobalDefaults(8100, 90, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev A non-zero inbound fee policy cannot silently round to zero.
+    function test_R_I_08_fundsInActiveFeeRejectsCommissionFreeDust() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICommissionManager.CommissionRoundsToZero.selector, uint256(24), uint256(400), uint8(100)
+            )
+        );
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24);
+    }
+
+    /// @dev The same runtime invariant applies to outbound fee rules.
+    function test_R_I_08_fundsOutActiveFeeRejectsCommissionFreeDust() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 400,
+            multiplier: 100,
+            side: CommissionSide.FUNDS_OUT,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICommissionManager.CommissionRoundsToZero.selector, uint256(24), uint256(400), uint8(100)
+            )
+        );
+        cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24);
+    }
+
+    /// @dev A deliberately disabled fee remains valid; only active policies
+    ///      promise a non-zero commission.
+    function test_R_I_08_zeroFeePolicyStillAllowsSmallAmount() public view {
+        (uint256 tokenFee, uint256 nativeFee, uint256 netAmount) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1);
+        assertEq(tokenFee, 0);
+        assertEq(nativeFee, 0);
+        assertEq(netAmount, 1);
     }
 
     // --- Bridge address ---

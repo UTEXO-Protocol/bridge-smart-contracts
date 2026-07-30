@@ -160,9 +160,11 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
         // Calculate stable fee in token units
         uint256 stableFee = calculateStableFee(amount, config.stablePercent, config.multiplier);
+        _requireNonZeroConfiguredCommission(amount, stableFee, config);
 
         if (config.currency == CommissionCurrency.TOKEN) {
             // TOKEN commission: deduct from amount
+            if (stableFee >= amount) revert ZeroNetAmount(amount, stableFee);
             tokenCommission = stableFee;
             nativeCommission = 0;
             netAmount = amount - tokenCommission;
@@ -173,6 +175,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
                 nativeCommission = 0;
             } else {
                 nativeCommission = convertTokenFeeToNative(stableFee, _tokenDecimals(token));
+                if (nativeCommission == 0) {
+                    revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
+                }
             }
             netAmount = amount; // Full amount bridges
         }
@@ -206,8 +211,10 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
         // Calculate stable fee
         uint256 stableFee = calculateStableFee(amount, config.stablePercent, config.multiplier);
+        _requireNonZeroConfiguredCommission(amount, stableFee, config);
 
         if (config.currency == CommissionCurrency.TOKEN) {
+            if (stableFee >= amount) revert ZeroNetAmount(amount, stableFee);
             tokenCommission = stableFee;
             nativeCommission = 0;
             netAmount = amount - tokenCommission;
@@ -218,6 +225,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
                 nativeCommission = 0;
             } else {
                 nativeCommission = convertTokenFeeToNative(stableFee, _tokenDecimals(token));
+                if (nativeCommission == 0) {
+                    revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
+                }
             }
             netAmount = amount;
         }
@@ -321,12 +331,12 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (multiplier == 0) revert MultiplierZero();
         // Joint invariant: the fee fraction is `stablePercent / multiplier^2`.
-        // When `stablePercent > multiplier^2` the quoted fee exceeds the
-        // bridged amount, so `netAmount = amount - fee` underflows and bricks
-        // every subsequent funds flow on the affected route. Widen to uint256
-        // before squaring — `multiplier` is uint8 and the common `100 * 100`
-        // would itself overflow uint8.
-        if (stablePercent > uint256(multiplier) * uint256(multiplier)) {
+        // The configured fee must be strictly below 100%. Equality would make
+        // TOKEN commission consume the entire amount and create a zero-net
+        // settlement; greater values would underflow. Widen to uint256 before
+        // squaring — `multiplier` is uint8 and the common `100 * 100` would
+        // itself overflow uint8.
+        if (stablePercent >= uint256(multiplier) * uint256(multiplier)) {
             revert InvalidFeeShape(stablePercent, multiplier);
         }
         // NATIVE on FUNDS_OUT is unrepresentable: a release has no payer for a
@@ -408,12 +418,12 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (config.stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (config.multiplier == 0) revert MultiplierZero();
         // Joint invariant: the fee fraction is `stablePercent / multiplier^2`.
-        // When `stablePercent > multiplier^2` the quoted fee exceeds the
-        // bridged amount, so `netAmount = amount - fee` underflows and bricks
-        // every subsequent funds flow on the affected route. Widen to uint256
-        // before squaring — `multiplier` is uint8 and the common `100 * 100`
-        // would itself overflow uint8.
-        if (config.stablePercent > uint256(config.multiplier) * uint256(config.multiplier)) {
+        // The configured fee must be strictly below 100%. Equality would make
+        // TOKEN commission consume the entire amount and create a zero-net
+        // settlement; greater values would underflow. Widen to uint256 before
+        // squaring — `multiplier` is uint8 and the common `100 * 100` would
+        // itself overflow uint8.
+        if (config.stablePercent >= uint256(config.multiplier) * uint256(config.multiplier)) {
             revert InvalidFeeShape(config.stablePercent, config.multiplier);
         }
         // NATIVE on FUNDS_OUT is unrepresentable: a release has no payer for a
@@ -476,6 +486,20 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             currency: globalCurrency,
             isSet: true
         });
+    }
+
+    /// @dev A deliberately disabled fee (`stablePercent == 0`) is valid. Once
+    ///      governance enables a fee, however, every operation governed by that
+    ///      rule must pay at least one smallest unit. This runtime check couples
+    ///      the effective per-route/global rule to the actual transfer amount,
+    ///      so later configuration changes cannot reopen commission-free dust.
+    function _requireNonZeroConfiguredCommission(uint256 amount, uint256 stableFee, CommissionConfig memory config)
+        private
+        pure
+    {
+        if (config.stablePercent != 0 && stableFee == 0) {
+            revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
+        }
     }
 
     /**
