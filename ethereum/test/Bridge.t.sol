@@ -27,6 +27,7 @@ import {MockSettlementModule} from "./mocks/MockSettlementModule.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract BridgeTest is Test {
     // Events re-declared locally for vm.expectEmit
@@ -69,6 +70,7 @@ contract BridgeTest is Test {
     RGBVerifier rgbVerifier;
     RgbSettlementModule rgbModule;
     MockAggregatorV3 ethUsdFeed;
+    MockAggregatorV3 sequencerUptimeFeed;
 
     address deployer = makeAddr("deployer");
     address user = makeAddr("user");
@@ -99,6 +101,10 @@ contract BridgeTest is Test {
     uint256 constant LATEST_CONFIRMATIONS = 1;
 
     function setUp() public {
+        // Leave enough history for the healthy sequencer round to be past the
+        // mandatory one-hour post-restart grace period.
+        vm.warp(2 hours);
+
         usdt0 = new MockERC20("Mock USDT0", "USDT0");
         btcRelay = new MockBtcRelay();
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, CONFIRMATIONS);
@@ -116,7 +122,7 @@ contract BridgeTest is Test {
         uint64 currentNonce = vm.getNonce(deployer);
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        cm = new CommissionManager(predictedBridge);
+        cm = new CommissionManager(predictedBridge, recipient);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
         bridge = new Bridge(
             address(usdt0),
@@ -133,9 +139,12 @@ contract BridgeTest is Test {
         routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
         routeRegistry.setRoute(RGB_CHAIN_ID, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
 
-        // Wire a Chainlink ETH/USD feed ($2000 / ETH, 8 decimals, fresh) so
-        // the NATIVE commission path quotes a positive value.
+        // Wire the complete mandatory R-I-14 oracle config: healthy sequencer,
+        // ETH/USD circuit-breaker bounds, then the fresh ETH/USD price feed.
         ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);
+        sequencerUptimeFeed = new MockAggregatorV3(0, 0, block.timestamp - 1 hours - 1);
+        cm.setSequencerUptimeFeed(address(sequencerUptimeFeed));
+        cm.setEthUsdPriceBounds(100e8, 100_000e8);
         cm.setEthUsdFeed(address(ethUsdFeed), 1 hours);
 
         // Production-flow ownership transfer of Bridge → multisig. CM and
@@ -390,6 +399,29 @@ contract BridgeTest is Test {
         );
     }
 
+    /// @dev Accepted `msg.value` band on the DIRECT overload: the floor is the
+    ///      fresh quote itself, because the headroom above it is a refundable
+    ///      drift buffer rather than extra commission.
+    function _directNativeBounds(uint256 nativeCommission) internal view returns (uint256 minimum, uint256 maximum) {
+        uint256 denominator = bridge.BPS_DENOMINATOR();
+        uint256 tolerance = bridge.NATIVE_COMMISSION_TOLERANCE_BPS();
+        minimum = nativeCommission;
+        maximum = Math.mulDiv(nativeCommission, denominator + tolerance, denominator);
+    }
+
+    /// @dev Accepted `msg.value` band on the ADAPTER overload: symmetric, since
+    ///      the source-chain payer is unreachable and nothing can be refunded.
+    function _adapterNativeBounds(uint256 nativeCommission) internal view returns (uint256 minimum, uint256 maximum) {
+        uint256 denominator = bridge.BPS_DENOMINATOR();
+        uint256 tolerance = bridge.NATIVE_COMMISSION_TOLERANCE_BPS();
+        minimum = Math.mulDiv(nativeCommission, denominator - tolerance, denominator, Math.Rounding.Ceil);
+        maximum = Math.mulDiv(nativeCommission, denominator + tolerance, denominator);
+    }
+
+    function _nativeQuote(uint256 amount) internal view returns (uint256 quote) {
+        (, quote,) = cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
+    }
+
     /// @dev Ensure `requested` fits under the configured bucket burst (and
     ///      therefore also under the immutable 20% safety ceiling). Used by
     ///      legacy success-path tests whose subject is not the C-01 limiter.
@@ -631,23 +663,50 @@ contract BridgeTest is Test {
 
     function test_fundsIn_dustThatRoundsCommissionToZeroIsRejected() public {
         // 4% token commission. Below 25 units the fee floors to zero
-        // (24 * 400 / 100 / 100 == 0) — the exact dust case R-I-08 describes.
-        // A floor of 25 keeps such dust off the inbound path; at 25 the fee is
-        // a non-zero 1 unit.
+        // (24 * 400 / 100 / 100 == 0) — the exact dust case I-08 describes.
+        // The effective fee policy itself now rejects that dust, independently
+        // of the separately configurable global minimum.
         _setFundsInTokenRule(400);
-        vm.prank(multisig);
-        bridge.setMinFundsInAmount(25);
 
         assertEq(cm.calculateStableFee(24, 400, 100), 0, "sanity: 24 pays zero commission");
 
-        vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(24), uint256(25)));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICommissionManager.CommissionRoundsToZero.selector, uint256(24), uint256(400), uint8(100)
+            )
+        );
         vm.prank(user);
         bridge.fundsIn(24, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        // At the floor the deposit is accepted and pays a non-zero commission.
+        // The smallest amount that produces one fee unit is accepted.
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(25, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(rgbModule.fundsInRecords(opId), 24, "net = 25 - 1 commission");
+    }
+
+    function test_R_I_08_fundsOutDustThatRoundsCommissionToZeroIsRejected() public {
+        uint256 dustAmount = 24;
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn(dustAmount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _ensureRgbSafetyCapacity(dustAmount);
+        _setFundsOutTokenRule(400);
+
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlementWithAmounts(_ids(opId), _one(dustAmount));
+        uint256 burnId =
+            _deriveBurnId(recipient, dustAmount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICommissionManager.CommissionRoundsToZero.selector, dustAmount, uint256(400), uint8(100)
+            )
+        );
+        vm.prank(multisig);
+        _fundsOutWithBurnId(
+            recipient, dustAmount, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData
+        );
+
+        assertFalse(bridge.consumedBurnIds(burnId), "reverted release does not consume burn id");
     }
 
     function test_fundsInFromAdapter_revertsBelowMinimum() public {
@@ -2215,7 +2274,7 @@ contract BridgeTest is Test {
     }
 
     // ========================================================================
-    // Commission — NativeValueMismatch
+    // Commission — I-03 bounded native quote drift
     // ========================================================================
 
     function test_fundsIn_revertsOnNativeValueMismatch_zeroRuleButValueSent() public {
@@ -2228,52 +2287,260 @@ contract BridgeTest is Test {
     function test_fundsIn_revertsOnNativeValueMismatch_nativeRuleButNoValue() public {
         _setFundsInNativeRule(100);
 
-        vm.expectRevert(IBridge.NativeValueMismatch.selector);
+        uint256 quote = _nativeQuote(AMOUNT);
+        (uint256 minimum, uint256 maximum) = _directNativeBounds(quote);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IBridge.NativeCommissionOutOfBounds.selector, uint256(0), minimum, maximum)
+        );
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
-    // R-I-03 after-fix: a native overpayment (favorable ETH/USD drift between
-    // quote and execution) is now accepted; the FULL msg.value is collected as
-    // commission (not refunded, not stranded) and the deposit completes.
-    function test_fundsIn_nativeOverpayAcceptedAndCollected_afterFix() public {
+    // ========================================================================
+    // I-03 — native commission drift band
+    //
+    // Direct deposits: attach the quote plus optional headroom; exactly the
+    // fresh quote is charged and the remainder refunded, so the protocol never
+    // under-collects and the caller is never overcharged.
+    // Adapter deposits: the source-chain payer is unreachable, so the band is
+    // symmetric and whatever arrives inside it is collected in full.
+    // ========================================================================
+
+    function test_I_03_direct_exactQuoteChargedInFull() public {
         _setFundsInNativeRule(100);
+        uint256 quote = _nativeQuote(AMOUNT);
+        assertGt(quote, 0, "native fee quoted");
 
-        (, uint256 nativeCommission,) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
-        assertGt(nativeCommission, 0, "native fee quoted");
-
-        uint256 sent = nativeCommission + 0.01 ether; // overpay (price moved down)
-        vm.deal(user, sent);
-
-        uint256 cmNativeBefore = address(cm).balance;
-        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        vm.deal(user, quote);
+        uint256 poolBefore = cm.nativeCommissionPool();
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn{value: sent}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = bridge.fundsIn{value: quote}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        // Full msg.value collected as commission — surplus neither refunded nor
-        // left in the Bridge.
-        assertEq(address(cm).balance, cmNativeBefore + sent, "cm received full msg.value");
-        assertEq(cm.nativeCommissionPool(), nativePoolBefore + sent, "native pool credited full msg.value");
+        assertEq(cm.nativeCommissionPool(), poolBefore + quote, "pool credited exactly the quote");
+        assertEq(user.balance, 0, "nothing to refund");
         assertEq(address(bridge).balance, 0, "no native stranded in bridge");
-        // Deposit completed: RGB record created (NATIVE rule → token commission 0, net == gross).
-        assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "deposit recorded from actual amount");
+        assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "deposit completed");
     }
 
-    // R-I-03: underpaying the freshly-quoted native commission (price moved up)
-    // still reverts — the lower bound is enforced.
-    function test_fundsIn_nativeUnderpayReverts_afterFix() public {
+    /// @dev The invariant I-03 asks for: a caller who attaches more than the
+    ///      quote is charged only the quote and refunded the surplus.
+    function test_I_03_direct_surplusIsRefundedNotCollected() public {
+        _setFundsInNativeRule(100);
+        uint256 quote = _nativeQuote(AMOUNT);
+        uint256 attached = quote + (quote * 400) / 10_000; // +4%, inside the band
+
+        vm.deal(user, attached);
+        uint256 poolBefore = cm.nativeCommissionPool();
+
+        vm.prank(user);
+        bridge.fundsIn{value: attached}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        assertEq(cm.nativeCommissionPool(), poolBefore + quote, "protocol collected ONLY the quote");
+        assertEq(user.balance, attached - quote, "caller refunded the whole surplus");
+        assertEq(address(bridge).balance, 0, "no native stranded in bridge");
+    }
+
+    function test_I_03_direct_upperBoundaryRefunded() public {
+        _setFundsInNativeRule(100);
+        uint256 quote = _nativeQuote(AMOUNT);
+        (, uint256 maximum) = _directNativeBounds(quote);
+
+        vm.deal(user, maximum);
+        vm.prank(user);
+        bridge.fundsIn{value: maximum}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        assertEq(cm.nativeCommissionPool(), quote, "still only the quote is collected");
+        assertEq(user.balance, maximum - quote, "full headroom refunded");
+    }
+
+    function test_I_03_direct_revertsBelowQuote() public {
+        _setFundsInNativeRule(100);
+        uint256 quote = _nativeQuote(AMOUNT);
+        (uint256 minimum, uint256 maximum) = _directNativeBounds(quote);
+        uint256 provided = minimum - 1;
+
+        vm.deal(user, provided);
+        vm.expectRevert(
+            abi.encodeWithSelector(IBridge.NativeCommissionOutOfBounds.selector, provided, minimum, maximum)
+        );
+        vm.prank(user);
+        bridge.fundsIn{value: provided}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+    }
+
+    function test_I_03_direct_revertsAboveUpperBoundary() public {
+        _setFundsInNativeRule(100);
+        uint256 quote = _nativeQuote(AMOUNT);
+        (uint256 minimum, uint256 maximum) = _directNativeBounds(quote);
+        uint256 provided = maximum + 1;
+
+        vm.deal(user, provided);
+        vm.expectRevert(
+            abi.encodeWithSelector(IBridge.NativeCommissionOutOfBounds.selector, provided, minimum, maximum)
+        );
+        vm.prank(user);
+        bridge.fundsIn{value: provided}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+    }
+
+    /// @dev The scenario from the finding: quote, then the price moves against
+    ///      the caller before the tx mines. The attached buffer absorbs it and
+    ///      the deposit succeeds, charged at the FRESH (higher) quote.
+    function test_I_03_direct_adverseDriftAbsorbedByBuffer() public {
+        _setFundsInNativeRule(100);
+        uint256 quotedAtSubmit = _nativeQuote(AMOUNT);
+        uint256 attached = quotedAtSubmit + (quotedAtSubmit * 400) / 10_000; // +4% buffer
+
+        // ETH depreciates ~3%: the same fee costs more wei than first quoted,
+        // but less than the 4% buffer the caller attached.
+        ethUsdFeed.setAnswer(1_940e8);
+        uint256 freshQuote = _nativeQuote(AMOUNT);
+        assertGt(freshQuote, quotedAtSubmit, "drift moved against the caller");
+        assertLe(freshQuote, attached, "the buffer covers the drift, so no revert");
+
+        vm.deal(user, attached);
+        vm.prank(user);
+        bridge.fundsIn{value: attached}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        assertEq(cm.nativeCommissionPool(), freshQuote, "charged the fresh quote, not the stale one");
+        assertEq(user.balance, attached - freshQuote, "remaining buffer refunded");
+    }
+
+    /// @dev Favorable drift simply returns more: the caller is charged the fresh
+    ///      (lower) quote, never the stale higher one.
+    function test_I_03_direct_favorableDriftRefundsMore() public {
+        _setFundsInNativeRule(100);
+        uint256 quotedAtSubmit = _nativeQuote(AMOUNT);
+
+        ethUsdFeed.setAnswer(2_090e8); // ETH appreciates: the fee costs less wei
+        uint256 freshQuote = _nativeQuote(AMOUNT);
+        assertLt(freshQuote, quotedAtSubmit, "drift moved in the caller's favour");
+
+        vm.deal(user, quotedAtSubmit);
+        vm.prank(user);
+        bridge.fundsIn{value: quotedAtSubmit}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        assertEq(cm.nativeCommissionPool(), freshQuote, "charged the fresh, lower quote");
+        assertEq(user.balance, quotedAtSubmit - freshQuote, "difference refunded");
+    }
+
+    /// @dev The protocol cannot be systematically under-paid: every deposit
+    ///      credits exactly the quote in force at execution.
+    function test_I_03_direct_noSystematicUnderCollection() public {
+        _setFundsInNativeRule(100);
+        uint256 expected;
+
+        for (uint256 i; i < 3; i++) {
+            uint256 quote = _nativeQuote(AMOUNT);
+            (, uint256 maximum) = _directNativeBounds(quote);
+            vm.deal(user, maximum);
+            vm.prank(user);
+            bridge.fundsIn{value: maximum}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 900 + i));
+            expected += quote;
+        }
+
+        assertEq(cm.nativeCommissionPool(), expected, "collected exactly the sum of the quotes");
+    }
+
+    /// @dev A caller that cannot accept native value must send the exact quote;
+    ///      attaching a buffer it cannot be refunded reverts cleanly.
+    function test_I_03_direct_nonPayableCallerMustSendExactQuote() public {
+        _setFundsInNativeRule(100);
+        NonPayableDepositor depositor = new NonPayableDepositor(bridge, usdt0);
+        usdt0.mint(address(depositor), AMOUNT * 2);
+        depositor.approveBridge(AMOUNT * 2);
+
+        uint256 quote = _nativeQuote(AMOUNT);
+
+        // Exact quote: nothing to refund, so the deposit goes through.
+        vm.deal(address(depositor), quote);
+        depositor.deposit(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(), quote);
+        assertEq(cm.nativeCommissionPool(), quote, "exact quote accepted from a non-payable caller");
+
+        // With a buffer the refund cannot land, and the deposit reverts.
+        uint256 attached = quote + (quote * 200) / 10_000;
+        vm.deal(address(depositor), attached);
+        vm.expectRevert(
+            abi.encodeWithSelector(IBridge.NativeRefundFailed.selector, address(depositor), attached - quote)
+        );
+        depositor.deposit(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 951), attached);
+    }
+
+    function test_I_03_adapter_symmetricBandCollectedInFull() public {
         _setFundsInNativeRule(100);
 
-        (, uint256 nativeCommission,) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
-        assertGt(nativeCommission, 1, "native fee quoted");
+        address adapter = makeAddr("lz-adapter");
+        vm.prank(multisig);
+        bridge.setLZAdapter(adapter);
+        usdt0.mint(adapter, AMOUNT * 2);
+        vm.prank(adapter);
+        usdt0.approve(address(bridge), AMOUNT * 2);
 
-        vm.deal(user, nativeCommission);
-        vm.expectRevert(IBridge.NativeValueMismatch.selector);
-        vm.prank(user);
-        bridge.fundsIn{value: nativeCommission - 1}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        uint256 quote = _nativeQuote(AMOUNT);
+        (uint256 minimum, uint256 maximum) = _adapterNativeBounds(quote);
+        assertLt(minimum, quote, "adapter band extends BELOW the quote");
+
+        // Below the quote is accepted here — and collected in full, since the
+        // source-chain payer cannot be refunded.
+        vm.deal(adapter, minimum);
+        vm.prank(adapter);
+        bridge.fundsIn{value: minimum}(
+            AMOUNT, SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData()
+        );
+        assertEq(cm.nativeCommissionPool(), minimum, "source-agreed value collected in full");
+        assertEq(adapter.balance, 0, "adapter is not refunded");
+
+        // Above the quote is likewise collected in full, not refunded.
+        vm.deal(adapter, maximum);
+        vm.prank(adapter);
+        bridge.fundsIn{value: maximum}(
+            AMOUNT, SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 961)
+        );
+        assertEq(cm.nativeCommissionPool(), minimum + maximum, "upper bound also collected in full");
+        assertEq(adapter.balance, 0, "adapter still not refunded");
+        assertEq(address(bridge).balance, 0, "no native stranded in bridge");
+    }
+
+    function test_I_03_adapter_revertsBelowLowerBoundary() public {
+        _setFundsInNativeRule(100);
+
+        address adapter = makeAddr("lz-adapter");
+        vm.prank(multisig);
+        bridge.setLZAdapter(adapter);
+
+        uint256 quote = _nativeQuote(AMOUNT);
+        (uint256 minimum, uint256 maximum) = _adapterNativeBounds(quote);
+        uint256 provided = minimum - 1;
+        vm.deal(adapter, provided);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IBridge.NativeCommissionOutOfBounds.selector, provided, minimum, maximum)
+        );
+        vm.prank(adapter);
+        bridge.fundsIn{value: provided}(
+            AMOUNT, SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData()
+        );
+    }
+
+    function test_I_03_adapter_revertsAboveUpperBoundary() public {
+        _setFundsInNativeRule(100);
+
+        address adapter = makeAddr("lz-adapter");
+        vm.prank(multisig);
+        bridge.setLZAdapter(adapter);
+
+        uint256 quote = _nativeQuote(AMOUNT);
+        (uint256 minimum, uint256 maximum) = _adapterNativeBounds(quote);
+        uint256 provided = maximum + 1;
+        vm.deal(adapter, provided);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IBridge.NativeCommissionOutOfBounds.selector, provided, minimum, maximum)
+        );
+        vm.prank(adapter);
+        bridge.fundsIn{value: provided}(
+            AMOUNT, SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData()
+        );
     }
 
     // ========================================================================
@@ -3169,70 +3436,25 @@ contract BridgeTest is Test {
         assertEq(rgbModule.fundsInRecords(opId2), netAmount, "second record created");
     }
 
-    // A positive gross deposit with zero net leaves a zero record — the RGB
-    // duplicate guard is value-based, so a zero record does not occupy the id.
-    // Post R-W-08 each deposit derives a distinct id anyway; this proves the
-    // zero-net record semantics still hold under a derived id.
-    function test_fundsIn_zeroNetDepositLeavesZeroRecord_currentBehavior() public {
-        // stablePercent == multiplier^2 makes tokenCommission == amount.
-        vm.prank(deployer);
-        cm.setCommissionRule(
-            SOURCE_CHAIN_ID,
-            RGB_CHAIN_ID,
-            address(usdt0),
-            CommissionConfig({
-                stablePercent: 8_100,
-                multiplier: 90,
-                side: CommissionSide.FUNDS_IN,
-                currency: CommissionCurrency.TOKEN,
-                isSet: true
-            })
+    /// @dev I-08 regression: the auditor's 100% fee shape is rejected before
+    ///      it can become an active route rule and create zero-net records.
+    function test_R_I_08_hundredPercentRouteRuleCannotBeConfigured() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 8_100,
+            multiplier: 90,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, cfg.stablePercent, cfg.multiplier)
         );
+        vm.prank(deployer);
+        cm.setCommissionRule(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), cfg);
 
-        _assertZeroNetDepositLeavesZeroRecord(1);
-        _assertZeroNetDepositLeavesZeroRecord(AMOUNT / 2);
-        _assertZeroNetDepositLeavesZeroRecord(AMOUNT);
-    }
-
-    function _assertZeroNetDepositLeavesZeroRecord(uint256 amount) internal {
-        (uint256 tokenCommission,, uint256 netAmount) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
-
-        assertEq(tokenCommission, amount, "pre fee equals amount");
-        assertEq(netAmount, 0, "pre zero net");
-
-        uint256 userBefore = usdt0.balanceOf(user);
-        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
-        uint256 cmBefore = usdt0.balanceOf(address(cm));
-        uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
-        uint256 nativePoolBefore = cm.nativeCommissionPool();
-
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit FundsIn(user, RGB_OP_ID, 0);
-        vm.prank(user);
-        bytes32 opId1 = bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-
-        assertEq(usdt0.balanceOf(user), userBefore - amount, "user spent first gross");
-        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, "bridge keeps no net");
-        assertEq(usdt0.balanceOf(address(cm)), cmBefore + amount, "cm got first gross");
-        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore + amount, "cm pool first gross");
-        assertEq(cm.nativeCommissionPool(), nativePoolBefore, "native pool unchanged");
-        assertEq(rgbModule.fundsInRecords(opId1), 0, "zero-net leaves zero record");
-
-        // A second identical deposit derives a distinct id and also leaves a
-        // zero record — no collision, no revert.
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit FundsIn(user, RGB_OP_ID, 0);
-        vm.prank(user);
-        bytes32 opId2 = bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-
-        assertTrue(opId2 != opId1, "second deposit distinct id");
-        assertEq(usdt0.balanceOf(user), userBefore - (2 * amount), "user spent duplicate gross");
-        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, "bridge still keeps no net");
-        assertEq(usdt0.balanceOf(address(cm)), cmBefore + (2 * amount), "cm got duplicate gross");
-        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore + (2 * amount), "cm pool duplicate gross");
-        assertEq(cm.nativeCommissionPool(), nativePoolBefore, "duplicate native pool unchanged");
-        assertEq(rgbModule.fundsInRecords(opId2), 0, "second zero record");
+        CommissionConfig memory stored = cm.getCommissionRule(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0));
+        assertFalse(stored.isSet, "invalid rule was not stored");
     }
 
     // ========================================================================
@@ -3375,7 +3597,7 @@ contract BridgeTest is Test {
         uint64 currentNonce = vm.getNonce(deployer);
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        s.cm = new CommissionManager(predictedBridge);
+        s.cm = new CommissionManager(predictedBridge, recipient);
         RouteRegistry feeRouteRegistry = new RouteRegistry(predictedBridge, deployer);
         s.bridge = new Bridge(address(s.token), address(feeRouteRegistry), payable(address(s.cm)), address(0), 1);
 
@@ -3386,6 +3608,8 @@ contract BridgeTest is Test {
         feeRouteRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(s.module));
         feeRouteRegistry.setRoute(RGB_CHAIN_ID, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(s.module));
 
+        s.cm.setSequencerUptimeFeed(address(sequencerUptimeFeed));
+        s.cm.setEthUsdPriceBounds(100e8, 100_000e8);
         s.cm.setEthUsdFeed(address(ethUsdFeed), 1 hours);
 
         s.bridge.transferOwnership(multisig);
@@ -3570,11 +3794,11 @@ contract BridgeTest is Test {
         assertEq(s.bridge.lockedLiquidity(RGB_CHAIN_ID), received * 9, "90% bucket reserve remains locked");
     }
 
-    // --- Received < tokenCommission reverts InsufficientReceived ---
+    // --- Received <= tokenCommission reverts InsufficientReceived ---
     //
     // Fee = 9000 bps (90%) → received = 10% of AMOUNT = 10e18. The fee-shape
     // guard caps the commission fraction at `stablePercent / multiplier^2`
-    // (stablePercent ≤ 9000, stablePercent ≤ multiplier^2). Choosing
+    // (stablePercent ≤ 9000, stablePercent < multiplier^2). Choosing
     // multiplier = 95, stablePercent = 9000 yields a fraction 9000/9025 ≈ 99.7%,
     // so the commission quote on the NOMINAL AMOUNT (~99.7e18) far exceeds the
     // actual received (10e18) — configurable within the guard, so no boundary
@@ -3593,4 +3817,51 @@ contract BridgeTest is Test {
         vm.prank(user);
         s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
+
+    /// @dev I-08: a nominally valid (<100%) commission can still consume the
+    ///      full ACTUAL receipt when the token charges a transfer fee. Equality
+    ///      must revert rather than recording a zero-net settlement.
+    function test_R_I_08_fundsInFeeTokenRevertsWhenActualNetWouldBeZero() public {
+        FeeStack memory s = _deployFeeStack(5000); // Bridge receives 50%
+        _setFeeStackFundsInTokenRule(s, 5000, 100); // nominal commission is 50%
+
+        uint256 received = AMOUNT - s.token.feeOn(AMOUNT);
+        uint256 tokenCommission = s.cm.calculateStableFee(AMOUNT, 5000, 100);
+        assertEq(received, tokenCommission, "sanity: actual receipt equals nominal commission");
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InsufficientReceived.selector, received, tokenCommission));
+        vm.prank(user);
+        s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        assertEq(s.bridge.lockedLiquidity(RGB_CHAIN_ID), 0, "zero-net liquidity was not recorded");
+        assertEq(s.cm.tokenCommissionPool(address(s.token)), 0, "commission transfer rolled back");
+    }
+}
+
+/// @dev Caller that deliberately cannot receive native value, used to cover the
+///      `NativeRefundFailed` path on the direct `fundsIn` overload.
+contract NonPayableDepositor {
+    Bridge private immutable _bridge;
+    MockERC20 private immutable _token;
+
+    constructor(Bridge bridge_, MockERC20 token_) {
+        _bridge = bridge_;
+        _token = token_;
+    }
+
+    function approveBridge(uint256 amount) external {
+        _token.approve(address(_bridge), amount);
+    }
+
+    function deposit(
+        uint256 amount,
+        uint256 destinationChainId,
+        string calldata destinationAddress,
+        bytes calldata settlementData,
+        uint256 nativeValue
+    ) external returns (bytes32) {
+        return _bridge.fundsIn{value: nativeValue}(amount, destinationChainId, destinationAddress, settlementData);
+    }
+
+    // no receive / fallback: any refund attempt fails
 }

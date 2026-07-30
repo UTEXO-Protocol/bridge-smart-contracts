@@ -25,9 +25,10 @@ import {IBridge} from "./IBridge.sol";
 ///      COMMISSION MANAGER
 ///      This proxy is the owner of the CommissionManager. Federation can reach CM via:
 ///        - typed `WithdrawTokenCommissionCM` / `WithdrawNativeCommissionCM`
-///          (destination is always the stored `commissionRecipient`).
+///          (CM always pays its immutable `commissionRecipient`).
 ///        - generic `AdminExecuteCommissionManager` for rare config changes
-///          (route rules, global defaults, mock rates, transferOwnership, …).
+///          (route rules, global defaults, mock rates, ownership migration, …).
+///          Withdrawal selectors are reserved for the typed operations.
 ///        - `UpdateCommissionManager` to migrate to a redeployed CM.
 ///
 ///      BITMAP ENCODING
@@ -44,7 +45,6 @@ interface IMultisigProxy {
     error ZeroCommissionManager();
     error NoSigners();
     error InvalidThreshold();
-    error ZeroCommissionRecipient();
     error TimelockTooLong();
     error TimelockTooShort();
     error InvalidMinTimelock();
@@ -71,7 +71,6 @@ interface IMultisigProxy {
     error TooManyEnclaveSourceChains(uint256 count, uint256 max);
     error CallFailed();
     error UnknownOperationType();
-    error ZeroRecipient();
     error ZeroTarget();
     error ForbiddenCommissionManagerSelector(bytes4 selector);
     error LZAdapterNotSet();
@@ -86,20 +85,19 @@ interface IMultisigProxy {
         UpdateEnclaveSigners, // 1  — replace the enclave signer set + threshold
         UpdateFederationSigners, // 2  — replace the federation signer set + threshold
         UpdateBridge, // 3  — repoint the owned Bridge address
-        SetCommissionRecipient, // 4  — set the pinned commission payout recipient
-        SetTimelockDuration, // 5  — change the governance timelock (>= MIN_TIMELOCK)
-        AdminExecuteCommissionManager, // 6  — generic call into CommissionManager
-        WithdrawTokenCommissionCM, // 7  — CM.withdrawTokenCommission -> commissionRecipient
-        WithdrawNativeCommissionCM, // 8  — CM.withdrawNativeCommission -> commissionRecipient
-        UpdateCommissionManager, // 9  — migrate to a new CommissionManager address
-        AdminExecuteAdapter, // 10 — generic call into LZAdapter (setTrustedEntrypoint, refundStuckFunds, …)
-        UpdateLZAdapter, // 11 — rotate the routing target for AdminExecuteAdapter
-        SetRoute, // 12 — RouteRegistry.setRoute(src, dst, enabled, verifier, module)
-        UpdateRouteRegistry, // 13 — Bridge.setRouteRegistry(newRouteRegistry)
-        PauseInflow, // 14 — Bridge.pauseInflow()  (planned inflow-only freeze, timelocked)
-        UnpauseInflow, // 15 — Bridge.unpauseInflow()
-        DisableLZAdapter, // 16 — clear the routing target (explicit disable, distinct from UpdateLZAdapter rotation)
-        AdminExecuteRouteRegistry // 17 — generic call into RouteRegistry (transferOwnership/acceptOwnership, setRoute, …)
+        SetTimelockDuration, // 4  — change the governance timelock (>= MIN_TIMELOCK)
+        AdminExecuteCommissionManager, // 5  — generic call into CommissionManager
+        WithdrawTokenCommissionCM, // 6  — CM.withdrawTokenCommission -> immutable recipient
+        WithdrawNativeCommissionCM, // 7  — CM.withdrawNativeCommission -> immutable recipient
+        UpdateCommissionManager, // 8  — migrate to a new CommissionManager address
+        AdminExecuteAdapter, // 9 — generic call into LZAdapter (setTrustedEntrypoint, refundStuckFunds, …)
+        UpdateLZAdapter, // 10 — rotate the routing target for AdminExecuteAdapter
+        SetRoute, // 11 — RouteRegistry.setRoute(src, dst, enabled, verifier, module)
+        UpdateRouteRegistry, // 12 — Bridge.setRouteRegistry(newRouteRegistry)
+        PauseInflow, // 13 — Bridge.pauseInflow()  (planned inflow-only freeze, timelocked)
+        UnpauseInflow, // 14 — Bridge.unpauseInflow()
+        DisableLZAdapter, // 15 — clear the routing target (explicit disable, distinct from UpdateLZAdapter rotation)
+        AdminExecuteRouteRegistry // 16 — generic call into RouteRegistry (transferOwnership/acceptOwnership, setRoute, …)
     }
 
     enum ProposalStatus {
@@ -176,7 +174,6 @@ interface IMultisigProxy {
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
     event LZAdapterDisabled(address indexed oldAdapter);
-    event CommissionRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
     event NativeCommissionWithdrawn(uint256 amount, address indexed recipient);
     event TimelockDurationUpdated(uint256 newDuration);
@@ -283,17 +280,6 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose changing the commission recipient (used as the destination for
-    ///         all typed `WithdrawTokenCommissionCM` / `WithdrawNativeCommissionCM` ops).
-    /// @dev opData = abi.encode(address newRecipient)
-    function proposeSetCommissionRecipient(
-        address newRecipient,
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32);
-
     /// @notice Propose changing the timelock duration.
     /// @dev opData = abi.encode(uint256 newDuration)
     function proposeSetTimelockDuration(
@@ -306,9 +292,10 @@ interface IMultisigProxy {
 
     // --- CommissionManager-targeted operations ---
 
-    /// @notice Propose an arbitrary call into the CommissionManager.
+    /// @notice Propose a permitted generic call into the CommissionManager.
     /// @dev Used for rare configuration: setCommissionRule, setGlobalDefaults,
     ///      setMockTokenToNativeRate, setBridgeAddress, transferOwnership, …
+    ///      Withdrawal selectors are reserved for the typed operations.
     /// @dev opData = raw ABI-encoded CommissionManager callData (selector + args).
     function proposeAdminExecuteCommissionManager(
         bytes calldata callData,
@@ -333,8 +320,8 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose an ERC-20 commission withdrawal from the CommissionManager
-    ///         to the stored `commissionRecipient`.
+    /// @notice Propose an ERC-20 commission withdrawal from the CommissionManager.
+    ///         The CM pays its immutable `commissionRecipient`.
     /// @dev opData = abi.encode(address token, uint256 amount)
     function proposeWithdrawTokenCommissionCM(
         address token,
@@ -345,8 +332,8 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose a native commission withdrawal from the CommissionManager
-    ///         to the stored `commissionRecipient`.
+    /// @notice Propose a native commission withdrawal from the CommissionManager.
+    ///         The CM pays its immutable `commissionRecipient`.
     /// @dev opData = abi.encode(uint256 amount)
     function proposeWithdrawNativeCommissionCM(
         uint256 amount,
@@ -490,6 +477,7 @@ interface IMultisigProxy {
     function enclaveThreshold(uint256 sourceChainId) external view returns (uint256);
     function getFederationSigners() external view returns (address[] memory);
     function federationThreshold() external view returns (uint256);
+    /// @notice Immutable recipient reported by the current CommissionManager.
     function commissionRecipient() external view returns (address);
     function DOMAIN_SEPARATOR() external view returns (bytes32);
     function proposalNonce() external view returns (uint256);

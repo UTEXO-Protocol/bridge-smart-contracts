@@ -186,7 +186,7 @@ contract IntegrationTest is Test {
         uint64 currentNonce = vm.getNonce(deployer);
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        cm = new CommissionManager(predictedBridge);
+        cm = new CommissionManager(predictedBridge, commissionReceiver);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
         bridge = new Bridge(
             address(token),
@@ -214,9 +214,7 @@ contract IntegrationTest is Test {
         fed[1] = fedA2;
         fed[2] = fedA3;
 
-        proxy = new MultisigProxy(
-            address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, fed, 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK
-        );
+        proxy = new MultisigProxy(address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, fed, 2, TIMELOCK, MIN_TIMELOCK);
 
         cm.transferOwnership(address(proxy));
         bridge.transferOwnership(address(proxy));
@@ -427,9 +425,16 @@ contract IntegrationTest is Test {
 
     function test_endToEnd_nativeCommission_inboundAndWithdraw() public {
         // Configure a NATIVE FUNDS_IN route (2% on token amount, paid in wei).
-        // Wire up a Chainlink ETH/USD feed ($2000 / ETH, 8 decimals, fresh)
-        // via federation governance — the same path production will use.
+        // Wire the complete mandatory R-I-14 config through federation
+        // governance — dependencies first, ETH/USD feed last.
+        MockAggregatorV3 sequencerFeed = new MockAggregatorV3(0, 0, block.timestamp);
         ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);
+        _proposeAndExecuteCmAdminCall(
+            abi.encodeWithSelector(ICommissionManager.setSequencerUptimeFeed.selector, address(sequencerFeed))
+        );
+        _proposeAndExecuteCmAdminCall(
+            abi.encodeWithSelector(ICommissionManager.setEthUsdPriceBounds.selector, uint256(100e8), uint256(100_000e8))
+        );
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(ICommissionManager.setEthUsdFeed.selector, address(ethUsdFeed), uint256(1 days))
         );
