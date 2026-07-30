@@ -76,6 +76,18 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @notice Basis-point denominator for the immutable rolling safety limits.
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
+    /// @notice Headroom allowed between the native value supplied to `fundsIn`
+    ///         and the fresh destination-side oracle quote, to absorb ETH/USD
+    ///         drift between quoting and execution.
+    ///
+    ///         Direct deposits may attach up to 5% above the quote as a buffer;
+    ///         exactly the quote is collected and the remainder is refunded, so
+    ///         the band is one-sided and costs neither party. LayerZero deposits
+    ///         carry a source-agreed value that cannot be refunded across
+    ///         domains, so there the band is symmetric — 5% either side — and
+    ///         whatever arrives inside it is collected in full.
+    uint256 public constant NATIVE_COMMISSION_TOLERANCE_BPS = 500;
+
     /// @notice Minimum rolling interval covered by the immutable safety
     ///         limiter. The bounded ring implementation retains usage for
     ///         24-25 hours, never less than this value.
@@ -393,7 +405,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         string calldata destinationAddress,
         bytes calldata settlementData
     ) external payable override whenNotPaused nonReentrant returns (bytes32 operationId) {
-        // Direct EVM deposit: the source sender IS the caller.
+        // Direct EVM deposit: the source sender IS the caller, so a native
+        // surplus can be returned to them — `refundNativeSurplus = true`.
         address caller = _msgSender();
         operationId = _fundsIn(
             caller,
@@ -402,7 +415,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             block.chainid,
             destinationChainId,
             destinationAddress,
-            settlementData
+            settlementData,
+            true
         );
     }
 
@@ -418,8 +432,20 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // LZ deposit: tokens are pulled from the adapter (`_msgSender()`), but
         // the identity bound into `operationId` is the authenticated
         // `sourceSender` forwarded from the source-chain entrypoint.
+        //
+        // `refundNativeSurplus = false`: `msg.value` is the source-agreed
+        // `expectedComposeValue`, and the payer lives on the source chain — the
+        // adapter is only its courier, so refunding `_msgSender()` would pay the
+        // wrong party. The symmetric drift band absorbs the deviation instead.
         operationId = _fundsIn(
-            _msgSender(), sourceSender, amount, sourceChainId, destinationChainId, destinationAddress, settlementData
+            _msgSender(),
+            sourceSender,
+            amount,
+            sourceChainId,
+            destinationChainId,
+            destinationAddress,
+            settlementData,
+            false
         );
     }
 
@@ -813,7 +839,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 sourceChainId,
         uint256 destinationChainId,
         string memory destinationAddress,
-        bytes calldata settlementData
+        bytes calldata settlementData,
+        bool refundNativeSurplus
     ) private returns (bytes32 operationId) {
         if (amount < minFundsInAmount) {
             revert AmountBelowMinimum(amount, minFundsInAmount);
@@ -828,20 +855,55 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (sourceChainId == 0) revert InvalidSourceChainId();
         if (destinationChainId == 0) revert InvalidDestinationChainId();
 
-        // Commission is quoted from the nominal `amount` so the native-commission
-        // quote (and the lower-bound `msg.value` check below) stays predictable
-        // for the caller. The nominal net is intentionally discarded — the
-        // credited net is derived from the ACTUAL received amount after the transfer.
+        // Commission is freshly quoted from the nominal `amount`. For direct
+        // calls `msg.value` is the user's submitted quote; for LayerZero it is
+        // the source-agreed expectedComposeValue authenticated by the adapter.
+        // The nominal net is intentionally discarded — the credited net is
+        // derived from the ACTUAL received amount after the transfer.
         (uint256 tokenCommission, uint256 nativeCommission,) =
             commissionManager.calculateFundsInCommission(sourceChainId, destinationChainId, TOKEN, amount);
 
-        // Native payment: require at least the freshly-quoted commission
-        // — an oracle move up between quote and execution reverts here. Any
-        // overpayment from a favorable move is collected as commission below
-        // (not refunded), so the rule is uniform for direct and LZ deposits.
-        // TOKEN-commission routes (nativeCommission == 0) accept no native.
-        if (msg.value < nativeCommission) revert NativeValueMismatch();
-        if (nativeCommission == 0 && msg.value != 0) revert NativeValueMismatch();
+        // Bound `msg.value` against the fresh quote, then decide how much of it
+        // is actually commission. Both paths accept the same 5% headroom above
+        // the quote; they differ in what happens to that headroom, because only
+        // one of them can pay it back.
+        //
+        //  - Direct deposit (`refundNativeSurplus`): the surplus is a drift
+        //    buffer. The floor is the quote itself and exactly the quote is
+        //    collected, so the protocol never under-collects and the caller is
+        //    never charged more than quoted — the surplus is returned below.
+        //  - LZ deposit: the payer is on the source chain and unreachable, so no
+        //    refund is possible. A symmetric band absorbs drift in both
+        //    directions and the whole source-agreed value is collected.
+        //
+        // TOKEN-commission routes (nativeCommission == 0) still accept no native.
+        // `minimum` and `nativeToCollect` are set together per branch on purpose:
+        // the trailing refund computes `msg.value - nativeToCollect`, so a floor
+        // below what is collected would underflow. Pairing them here makes that
+        // invariant structural rather than something a later edit must remember.
+        uint256 nativeToCollect;
+        if (nativeCommission == 0) {
+            if (msg.value != 0) revert NativeValueMismatch();
+        } else {
+            uint256 minimum;
+            if (refundNativeSurplus) {
+                minimum = nativeCommission;
+                nativeToCollect = nativeCommission;
+            } else {
+                minimum = Math.mulDiv(
+                    nativeCommission,
+                    BPS_DENOMINATOR - NATIVE_COMMISSION_TOLERANCE_BPS,
+                    BPS_DENOMINATOR,
+                    Math.Rounding.Ceil
+                );
+                nativeToCollect = msg.value;
+            }
+            uint256 maximum =
+                Math.mulDiv(nativeCommission, BPS_DENOMINATOR + NATIVE_COMMISSION_TOLERANCE_BPS, BPS_DENOMINATOR);
+            if (msg.value < minimum || msg.value > maximum) {
+                revert NativeCommissionOutOfBounds(msg.value, minimum, maximum);
+            }
+        }
 
         // Build the canonical context. The per-`(sourceChainId, sourceSender)`
         // nonce is consumed here — before any external call, so a downstream
@@ -875,10 +937,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 received = IERC20(TOKEN).balanceOf(address(this)) - balanceBefore;
 
         // The token commission is forwarded out of `received`; guard the
-        // subtraction so a token fee that eats more than the commission reverts
-        // cleanly instead of underflowing. A zero net (received == commission) is
-        // left to the existing zero-amount / dust handling, unchanged here.
-        if (received < tokenCommission) revert InsufficientReceived(received, tokenCommission);
+        // subtraction so a token fee that consumes all (or more) of the actual
+        // receipt reverts instead of creating a zero-net settlement or
+        // underflowing. Equality is reachable with fee-on-transfer tokens even
+        // though the nominal commission configuration is strictly below 100%.
+        if (received <= tokenCommission) revert InsufficientReceived(received, tokenCommission);
         ctx.netAmount = received - tokenCommission;
 
         // Forward token commission BEFORE the settlement hook so that any
@@ -901,12 +964,12 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         lockedLiquidity[destinationChainId] += ctx.netAmount;
         totalLockedLiquidity += ctx.netAmount;
 
-        // Forward the FULL native value to the CommissionManager pool. Any
-        // surplus over the quoted `nativeCommission` (favorable oracle drift) is
-        // collected as commission rather than refunded, so no native is
-        // ever left stranded in the Bridge.
-        if (msg.value != 0) {
-            (bool ok,) = address(commissionManager).call{value: msg.value}("");
+        // Forward the native commission actually owed — exactly the fresh quote
+        // on the direct path, the bounded source-agreed value on the LZ path.
+        // Any remainder is returned to the caller at the end of this function,
+        // so no native is ever retained in Bridge.
+        if (nativeToCollect != 0) {
+            (bool ok,) = address(commissionManager).call{value: nativeToCollect}("");
             if (!ok) revert NativeValueMismatch();
         }
 
@@ -921,11 +984,22 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             ctx.grossAmount,
             ctx.netAmount,
             tokenCommission,
-            msg.value, // actual native collected (== nativeCommission + any drift surplus)
+            nativeToCollect, // native commission actually credited to the pool
             ctx.sourceChainId,
             ctx.destChainId,
             ctx.destAddress
         );
+
+        // Return the drift buffer LAST: after every state write and after the
+        // commission transfer, so the recipient's fallback observes only settled
+        // state. Reachable on the direct path only — the LZ path collects its
+        // whole source-agreed value, leaving nothing to refund. The overloads are
+        // `nonReentrant`, so this trailing call cannot re-enter.
+        uint256 surplus = msg.value - nativeToCollect;
+        if (surplus != 0) {
+            (bool refunded,) = payable(from).call{value: surplus}("");
+            if (!refunded) revert NativeRefundFailed(from, surplus);
+        }
 
         operationId = ctx.operationId;
     }

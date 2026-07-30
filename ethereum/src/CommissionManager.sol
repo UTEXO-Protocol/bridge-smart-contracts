@@ -38,8 +38,9 @@ import {
  *      `ethUsdHeartbeat`) and non-positive answers revert the call.
  *
  *      **Roles:** `bridgeAddress` may call `receiveTokenCommission` and `receive()` to credit fees;
- *      `owner` configures rules and withdraws accumulated pools. `renounceOwnership` is disabled.
- *      Withdrawals use `nonReentrant` against reentrancy via ERC-20 hooks or native recipients.
+ *      `owner` configures rules and withdraws accumulated pools. Every withdrawal pays the immutable
+ *      `commissionRecipient`, regardless of the caller or call path. `renounceOwnership` is disabled.
+ *      Withdrawals use `nonReentrant` against reentrancy via ERC-20 hooks or the native recipient.
  */
 contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager {
     using SafeERC20 for IERC20;
@@ -48,6 +49,11 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
     /// @notice Address allowed to credit token and native commission.
     address public bridgeAddress;
+
+    /// @notice Immutable destination for every token and native commission
+    ///         withdrawal. Enforced here at the asset-custody layer so no owner
+    ///         or alternate proxy call path can redirect accrued commission.
+    address public immutable commissionRecipient;
 
     /// @notice Default `stablePercent` when no per-route rule exists (×100; 0 = no % fee until configured).
     uint256 public globalStablePercent = 0;
@@ -105,12 +111,15 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     // ============ Constructor ============
 
     /**
-     * @notice Deploys the manager; `msg.sender` is owner; `_bridgeAddress` is the initial bridge.
+     * @notice Deploys the manager; `msg.sender` is owner.
      * @param _bridgeAddress Bridge that will send commissions (non-zero).
+     * @param _commissionRecipient Immutable destination for all withdrawals (non-zero).
      */
-    constructor(address _bridgeAddress) Ownable(msg.sender) {
+    constructor(address _bridgeAddress, address _commissionRecipient) Ownable(msg.sender) {
         if (_bridgeAddress == address(0)) revert InvalidBridgeAddress();
+        if (_commissionRecipient == address(0)) revert InvalidRecipient();
         bridgeAddress = _bridgeAddress;
+        commissionRecipient = _commissionRecipient;
     }
 
     /// @inheritdoc Ownable
@@ -151,9 +160,11 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
         // Calculate stable fee in token units
         uint256 stableFee = calculateStableFee(amount, config.stablePercent, config.multiplier);
+        _requireNonZeroConfiguredCommission(amount, stableFee, config);
 
         if (config.currency == CommissionCurrency.TOKEN) {
             // TOKEN commission: deduct from amount
+            if (stableFee >= amount) revert ZeroNetAmount(amount, stableFee);
             tokenCommission = stableFee;
             nativeCommission = 0;
             netAmount = amount - tokenCommission;
@@ -164,6 +175,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
                 nativeCommission = 0;
             } else {
                 nativeCommission = convertTokenFeeToNative(stableFee, _tokenDecimals(token));
+                if (nativeCommission == 0) {
+                    revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
+                }
             }
             netAmount = amount; // Full amount bridges
         }
@@ -197,8 +211,10 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
         // Calculate stable fee
         uint256 stableFee = calculateStableFee(amount, config.stablePercent, config.multiplier);
+        _requireNonZeroConfiguredCommission(amount, stableFee, config);
 
         if (config.currency == CommissionCurrency.TOKEN) {
+            if (stableFee >= amount) revert ZeroNetAmount(amount, stableFee);
             tokenCommission = stableFee;
             nativeCommission = 0;
             netAmount = amount - tokenCommission;
@@ -209,6 +225,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
                 nativeCommission = 0;
             } else {
                 nativeCommission = convertTokenFeeToNative(stableFee, _tokenDecimals(token));
+                if (nativeCommission == 0) {
+                    revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
+                }
             }
             netAmount = amount;
         }
@@ -312,12 +331,12 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (multiplier == 0) revert MultiplierZero();
         // Joint invariant: the fee fraction is `stablePercent / multiplier^2`.
-        // When `stablePercent > multiplier^2` the quoted fee exceeds the
-        // bridged amount, so `netAmount = amount - fee` underflows and bricks
-        // every subsequent funds flow on the affected route. Widen to uint256
-        // before squaring — `multiplier` is uint8 and the common `100 * 100`
-        // would itself overflow uint8.
-        if (stablePercent > uint256(multiplier) * uint256(multiplier)) {
+        // The configured fee must be strictly below 100%. Equality would make
+        // TOKEN commission consume the entire amount and create a zero-net
+        // settlement; greater values would underflow. Widen to uint256 before
+        // squaring — `multiplier` is uint8 and the common `100 * 100` would
+        // itself overflow uint8.
+        if (stablePercent >= uint256(multiplier) * uint256(multiplier)) {
             revert InvalidFeeShape(stablePercent, multiplier);
         }
         // NATIVE on FUNDS_OUT is unrepresentable: a release has no payer for a
@@ -399,12 +418,12 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (config.stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (config.multiplier == 0) revert MultiplierZero();
         // Joint invariant: the fee fraction is `stablePercent / multiplier^2`.
-        // When `stablePercent > multiplier^2` the quoted fee exceeds the
-        // bridged amount, so `netAmount = amount - fee` underflows and bricks
-        // every subsequent funds flow on the affected route. Widen to uint256
-        // before squaring — `multiplier` is uint8 and the common `100 * 100`
-        // would itself overflow uint8.
-        if (config.stablePercent > uint256(config.multiplier) * uint256(config.multiplier)) {
+        // The configured fee must be strictly below 100%. Equality would make
+        // TOKEN commission consume the entire amount and create a zero-net
+        // settlement; greater values would underflow. Widen to uint256 before
+        // squaring — `multiplier` is uint8 and the common `100 * 100` would
+        // itself overflow uint8.
+        if (config.stablePercent >= uint256(config.multiplier) * uint256(config.multiplier)) {
             revert InvalidFeeShape(config.stablePercent, config.multiplier);
         }
         // NATIVE on FUNDS_OUT is unrepresentable: a release has no payer for a
@@ -467,6 +486,20 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             currency: globalCurrency,
             isSet: true
         });
+    }
+
+    /// @dev A deliberately disabled fee (`stablePercent == 0`) is valid. Once
+    ///      governance enables a fee, however, every operation governed by that
+    ///      rule must pay at least one smallest unit. This runtime check couples
+    ///      the effective per-route/global rule to the actual transfer amount,
+    ///      so later configuration changes cannot reopen commission-free dust.
+    function _requireNonZeroConfiguredCommission(uint256 amount, uint256 stableFee, CommissionConfig memory config)
+        private
+        pure
+    {
+        if (config.stablePercent != 0 && stableFee == 0) {
+            revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
+        }
     }
 
     /**
@@ -545,72 +578,68 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     // ============ Withdrawal Functions ============
 
     /**
-     * @notice Owner withdraws `amount` of accrued `token` commission to `to`.
+     * @notice Owner withdraws `amount` of accrued `token` commission.
      * @param token ERC-20 token (non-zero).
-     * @param to Recipient (non-zero).
      * @param amount Amount to send (≤ pool).
-     * @dev `nonReentrant`; updates pool before `safeTransfer`.
+     * @dev Always pays immutable `commissionRecipient`. `nonReentrant`; updates
+     *      pool before `safeTransfer`.
      */
-    function withdrawTokenCommission(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+    function withdrawTokenCommission(address token, uint256 amount) external onlyOwner nonReentrant {
         if (token == address(0)) revert InvalidToken();
-        if (to == address(0)) revert InvalidRecipient();
         if (tokenCommissionPool[token] < amount) revert InsufficientBalance();
 
         tokenCommissionPool[token] -= amount;
-        IERC20(token).safeTransfer(to, amount);
+        IERC20(token).safeTransfer(commissionRecipient, amount);
 
-        emit TokenCommissionWithdrawn(token, to, amount);
+        emit TokenCommissionWithdrawn(token, commissionRecipient, amount);
     }
 
     /**
      * @notice Owner withdraws `amount` wei of native commission.
-     * @param to Recipient (non-zero).
      * @param amount Wei to send (≤ pool).
-     * @dev `nonReentrant`; updates pool before native transfer.
+     * @dev Always pays immutable `commissionRecipient`. `nonReentrant`; updates
+     *      pool before native transfer.
      */
-    function withdrawNativeCommission(address payable to, uint256 amount) external onlyOwner nonReentrant {
-        if (to == address(0)) revert InvalidRecipient();
+    function withdrawNativeCommission(uint256 amount) external onlyOwner nonReentrant {
         if (nativeCommissionPool < amount) revert InsufficientBalance();
 
         nativeCommissionPool -= amount;
-        (bool success,) = to.call{value: amount}("");
+        (bool success,) = payable(commissionRecipient).call{value: amount}("");
         if (!success) revert NativeTransferFailed();
 
-        emit NativeCommissionWithdrawn(to, amount);
+        emit NativeCommissionWithdrawn(commissionRecipient, amount);
     }
 
     /**
-     * @notice Owner withdraws the full accrued balance for `token` to `to`.
+     * @notice Owner withdraws the full accrued balance for `token`.
      * @param token ERC-20 token (non-zero).
-     * @param to Recipient (non-zero).
-     * @dev `nonReentrant`. Reverts `NoBalance` if pool is zero.
+     * @dev Always pays immutable `commissionRecipient`. `nonReentrant`.
+     *      Reverts `NoBalance` if pool is zero.
      */
-    function withdrawAllTokenCommission(address token, address to) external onlyOwner nonReentrant {
+    function withdrawAllTokenCommission(address token) external onlyOwner nonReentrant {
         if (token == address(0)) revert InvalidToken();
-        if (to == address(0)) revert InvalidRecipient();
         uint256 balance = tokenCommissionPool[token];
         if (balance == 0) revert NoBalance();
 
         tokenCommissionPool[token] = 0;
-        IERC20(token).safeTransfer(to, balance);
+        IERC20(token).safeTransfer(commissionRecipient, balance);
 
-        emit TokenCommissionWithdrawn(token, to, balance);
+        emit TokenCommissionWithdrawn(token, commissionRecipient, balance);
     }
 
     /**
-     * @notice Owner withdraws the full `nativeCommissionPool` to `to`.
-     * @param to Recipient (non-zero).
-     * @dev `nonReentrant`. Reverts `NoBalance` if pool is zero.
+     * @notice Owner withdraws the full `nativeCommissionPool`.
+     * @dev Always pays immutable `commissionRecipient`. `nonReentrant`.
+     *      Reverts `NoBalance` if pool is zero.
      */
-    function withdrawAllNativeCommission(address payable to) external onlyOwner nonReentrant {
-        if (to == address(0)) revert InvalidRecipient();
+    function withdrawAllNativeCommission() external onlyOwner nonReentrant {
         uint256 balance = nativeCommissionPool;
         if (balance == 0) revert NoBalance();
 
         nativeCommissionPool = 0;
-        (bool success,) = to.call{value: balance}("");
+        (bool success,) = payable(commissionRecipient).call{value: balance}("");
         if (!success) revert NativeTransferFailed();
 
-        emit NativeCommissionWithdrawn(to, balance);
+        emit NativeCommissionWithdrawn(commissionRecipient, balance);
     }
 }

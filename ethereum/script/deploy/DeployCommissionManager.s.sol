@@ -10,6 +10,7 @@ import {CommissionManager} from "../../src/CommissionManager.sol";
 /// Env:
 ///   PRIVATE_KEY       — deployer private key (becomes CM owner; transfer to multisig afterwards)
 ///   BRIDGE_ADDRESS    — Bridge contract that will send commissions (non-zero)
+///   COMMISSION_RECIPIENT — immutable destination for every commission withdrawal
 ///
 ///   ETH_USD_FEED      — Optional Chainlink ETH/USD aggregator address. When
 ///                       supplied (non-zero) the script also calls
@@ -34,6 +35,7 @@ contract DeployCommissionManager is Script {
     function run() external returns (CommissionManager cm) {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address bridgeAddress = vm.envAddress("BRIDGE_ADDRESS");
+        address commissionRecipient = vm.envAddress("COMMISSION_RECIPIENT");
         address ethUsdFeed = vm.envOr("ETH_USD_FEED", address(0));
         uint256 ethUsdHb = vm.envOr("ETH_USD_HEARTBEAT", uint256(0));
         address seqFeed = vm.envOr("SEQUENCER_UPTIME_FEED", address(0));
@@ -55,7 +57,7 @@ contract DeployCommissionManager is Script {
         }
 
         vm.startBroadcast(pk);
-        cm = new CommissionManager(bridgeAddress);
+        cm = new CommissionManager(bridgeAddress, commissionRecipient);
         // Install the safety dependencies before enabling ETH/USD quotes.
         if (seqFeed != address(0)) {
             cm.setSequencerUptimeFeed(seqFeed);
@@ -70,6 +72,7 @@ contract DeployCommissionManager is Script {
 
         console2.log("CommissionManager deployed at:", address(cm));
         console2.log("Bridge address:               ", cm.bridgeAddress());
+        console2.log("Immutable commission recipient:", cm.commissionRecipient());
         console2.log("Owner (deployer):             ", cm.owner());
         if (ethUsdFeed != address(0)) {
             console2.log("ETH/USD feed wired:           ", ethUsdFeed);

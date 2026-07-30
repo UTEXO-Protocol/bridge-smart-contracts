@@ -151,7 +151,7 @@ contract DeployAll is Script {
         vm.startBroadcast(pk);
 
         // ---- 2. CommissionManager (nonce n) ------------------------------
-        cm = new CommissionManager(predictedBridge);
+        cm = new CommissionManager(predictedBridge, commission);
 
         // ---- 3. RouteRegistry (nonce n+1) --------------------------------
         // Owned by `deployer` for this batch; transferred to the proxy below
@@ -176,7 +176,7 @@ contract DeployAll is Script {
 
         // ---- 6. MultisigProxy (nonce n+7) --------------------------------
         proxy = new MultisigProxy(
-            address(bridge), address(cm), enc, encThr, initialSrcChain, fed, fedThr, commission, timelock, minTimelock
+            address(bridge), address(cm), enc, encThr, initialSrcChain, fed, fedThr, timelock, minTimelock
         );
 
         // ---- 7. Install initial outflow policies before ownership transfer -
@@ -211,6 +211,7 @@ contract DeployAll is Script {
 
         // ---- 10. Summary -------------------------------------------------
         console2.log("CommissionManager deployed at:  ", address(cm));
+        console2.log("Immutable commission recipient:", cm.commissionRecipient());
         console2.log("RouteRegistry deployed at:      ", address(routeRegistry));
         console2.log("Bridge deployed at:             ", address(bridge));
         console2.log("RGBVerifier deployed at:        ", address(rgbVerifier));

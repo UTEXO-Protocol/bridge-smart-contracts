@@ -47,6 +47,8 @@ interface ICommissionManager {
     error StablePercentTooHigh();
     error MultiplierZero();
     error InvalidFeeShape(uint256 stablePercent, uint8 multiplier);
+    error CommissionRoundsToZero(uint256 amount, uint256 stablePercent, uint8 multiplier);
+    error ZeroNetAmount(uint256 amount, uint256 commission);
     error NativeCommissionNotAllowedOnFundsOut();
     error TokenDecimalsUnavailable();
     error BalanceBelowRecordedPool();
@@ -101,6 +103,8 @@ interface ICommissionManager {
     // ============ State getters ============
 
     function bridgeAddress() external view returns (address);
+
+    function commissionRecipient() external view returns (address);
 
     function globalStablePercent() external view returns (uint256);
 
@@ -218,11 +222,19 @@ interface ICommissionManager {
 
     // ============ Withdrawals (owner) ============
 
-    function withdrawTokenCommission(address token, address to, uint256 amount) external;
+    /// @notice Withdraw accrued token commission to the immutable
+    ///         `commissionRecipient`.
+    function withdrawTokenCommission(address token, uint256 amount) external;
 
-    function withdrawNativeCommission(address payable to, uint256 amount) external;
+    /// @notice Withdraw accrued native commission to the immutable
+    ///         `commissionRecipient`.
+    function withdrawNativeCommission(uint256 amount) external;
 
-    function withdrawAllTokenCommission(address token, address to) external;
+    /// @notice Withdraw all accrued commission for `token` to the immutable
+    ///         `commissionRecipient`.
+    function withdrawAllTokenCommission(address token) external;
 
-    function withdrawAllNativeCommission(address payable to) external;
+    /// @notice Withdraw all accrued native commission to the immutable
+    ///         `commissionRecipient`.
+    function withdrawAllNativeCommission() external;
 }
