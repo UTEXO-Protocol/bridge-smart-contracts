@@ -29,10 +29,10 @@ Production bridge for UTEXO. Inherits `BridgeBase`, implements `IBridge`. Route-
 
 Constructor takes four addresses: the accepted ERC-20 token (immutable), the `RouteRegistry` (mutable — federation can rotate via `UpdateRouteRegistry`), the `CommissionManager` (immutable), and the initial LayerZero adapter (mutable; `address(0)` is allowed — wire it in later via federation governance). The bridge's own chain identifier is `block.chainid` — chain IDs are `uint256` throughout the stack (real EVM chain IDs for EVM legs; backend-assigned IDs in a reserved namespace above `2^32` for non-EVM endpoints, e.g. RGB = `1_000_001`).
 
-- `fundsIn(amount, destinationChainId, destinationAddress, operationId, settlementData)` — open, **`payable`**. Direct entry point for EVM users; the source chain is implicit (`block.chainid`). Quotes commission from `CommissionManager` using route key `(block.chainid, destinationChainId, TOKEN)`; if the route uses NATIVE currency, `msg.value` must equal the quoted native commission. Pulls the full `amount` in tokens from the sender, forwards any token/native commission to `CommissionManager`, and dispatches to the route's `SettlementModule.onFundsIn(...)` via `RouteRegistry`. The `settlementData` blob is opaque to the bridge — its layout is dictated by the destination route's settlement module (empty for routes that don't consume extra data on inbound, e.g. RGB). Emits two events:
+- `fundsIn(amount, destinationChainId, destinationAddress, settlementData)` — open, **`payable`**. Direct entry point for EVM users; the source chain is implicit (`block.chainid`). Quotes commission from `CommissionManager` using route key `(block.chainid, destinationChainId, TOKEN)`; if the route uses NATIVE currency, `msg.value` must be between the fresh quote and 5% above it. Exactly the fresh quote is collected and any surplus is refunded to the caller. Pulls the full `amount` in tokens from the sender, forwards any token/native commission to `CommissionManager`, and dispatches to the route's `SettlementModule.onFundsIn(...)` via `RouteRegistry`. The `settlementData` blob is opaque to the bridge — its layout is dictated by the destination route's settlement module (empty for routes that don't consume extra data on inbound, e.g. RGB). Emits two events:
   - `FundsIn` (from `BridgeBase`) — minimal, uses `netAmount`.
   - `BridgeFundsIn` (from `IBridge`) — full, consumed by the UTEXO backend.
-- `fundsIn(amount, sourceChainId, destinationChainId, destinationAddress, operationId, settlementData)` — `onlyLZAdapter` overload used by `LZAdapter` after a cross-chain `OFT.send` compose lands. The adapter has already authenticated the originating `msg.sender` on the source chain via LayerZero's `OFTComposeMsgCodec.composeFrom`, so it forwards the non-spoofable `sourceChainId` to the bridge. Otherwise identical semantics to `fundsIn`.
+- `fundsIn(amount, sourceChainId, sourceSender, destinationChainId, destinationAddress, settlementData)` — `onlyLZAdapter` overload used by `LZAdapter` after a cross-chain `OFT.send` compose lands. The adapter has already authenticated the originating sender on the source chain via LayerZero's `OFTComposeMsgCodec.composeFrom`, so it forwards the non-spoofable `sourceChainId` and `sourceSender` to the bridge. For NATIVE commission routes, the source-agreed `msg.value` must remain within the immutable ±5% band around the fresh destination quote. Cross-domain refunds are deliberately unsupported, so the complete accepted value is collected as commission.
 - `setLZAdapter(adapter)` — `onlyOwner`. Rotates the address authorized to call the adapter overload. Set to `address(0)` to close the adapter path entirely.
 - `setRouteRegistry(newRouteRegistry)` — `onlyOwner`. Rotates the `RouteRegistry` Bridge talks to. Used to migrate to a redeployed registry (the registry's `bridge` is immutable, so a new registry deploy is the only way to rotate). Reverts on `address(0)`.
 - `fundsOut(recipient, amount, burnId, sourceChainId, destChainId, sourceAddress, proof, settlementData)` — `onlyOwner`, called via `MultisigProxy.execute()` or `MultisigProxy.executeBatch()`. The four scalar amounts (`amount`, `burnId`, `sourceChainId`, `destChainId`) are `uint256`; `recipient` is an address; `sourceAddress` is a string; `proof` and `settlementData` are opaque `bytes` blobs whose layouts are dictated by the route's `FinalityVerifier` and `SettlementModule` respectively. Checks `burnId` has not been consumed yet (single-use replay guard, marks it consumed before any external interaction), calls `RouteRegistry.beforeFundsOut(...)` which routes into `FinalityVerifier.verify(proof)` and `SettlementModule.beforeFundsOut(settlementData, amount)`, quotes commission from `CommissionManager` using `(sourceChainId, destChainId, TOKEN)`, forwards any token commission to the pool, and releases `netAmount` to the recipient. Emits `BridgeFundsOut`. NATIVE commission on `fundsOut` is disallowed (the caller is the multisig, not a user) — the contract reverts `NativeCommissionNotAllowedOnFundsOut`.
@@ -76,7 +76,7 @@ Standalone fee contract. Holds protocol commissions separately from bridge liqui
 - **Config** selects per route: `side` (`FUNDS_IN` vs `FUNDS_OUT`), `currency` (`TOKEN` vs `NATIVE`), `stablePercent` (×100, capped at 9000 = 90%), and `multiplier`. Global defaults apply to any route without an override.
 - **NATIVE quotes** use a Chainlink ETH/USD aggregator (`setEthUsdFeed(feed, heartbeat)`) and the token's `decimals()`. Heartbeat enforces staleness; absent feed ⇒ NATIVE quotes revert.
 - **Ingress:** `receiveTokenCommission(token)` and `receive()` are gated by `onlyBridge` — only `Bridge` may credit commissions. Pools are updated from balance deltas, so fee-on-transfer tokens are supported.
-- **Owner** (`MultisigProxy` in production) configures rules, updates `bridgeAddress`, wires the ETH/USD feed, and withdraws accumulated pools. `renounceOwnership` is blocked.
+- **Owner** (`MultisigProxy` in production) configures rules, updates `bridgeAddress`, wires the ETH/USD feed, and withdraws accumulated pools. Every token/native withdrawal pays the immutable constructor-configured `commissionRecipient`; withdrawal functions do not accept a free recipient. `renounceOwnership` is blocked.
 
 ### MultisigProxy (`src/MultisigProxy.sol`)
 
@@ -93,12 +93,11 @@ Federation-controlled operations (`OperationType`):
 | `UpdateEnclaveSigners` | self | Rotate TEE signer set / threshold |
 | `UpdateFederationSigners` | self | Rotate federation signer set / threshold |
 | `UpdateBridge` | self | Migrate to a redeployed Bridge |
-| `SetCommissionRecipient` | self | Change destination address for CM withdrawals |
 | `SetTeeAllowedCall` | self | Add/remove a `(target, selector)` pair from the TEE allowlist |
 | `SetTimelockDuration` | self | Adjust the timelock window |
 | `AdminExecuteCommissionManager` | CommissionManager | Generic call into CM (route rules, global defaults, ETH/USD feed, `transferOwnership`, …) |
-| `WithdrawTokenCommissionCM` | CommissionManager | Withdraw ERC-20 commission to `commissionRecipient` |
-| `WithdrawNativeCommissionCM` | CommissionManager | Withdraw native commission to `commissionRecipient` |
+| `WithdrawTokenCommissionCM` | CommissionManager | Withdraw ERC-20 commission to CM's immutable `commissionRecipient` |
+| `WithdrawNativeCommissionCM` | CommissionManager | Withdraw native commission to CM's immutable `commissionRecipient` |
 | `UpdateCommissionManager` | self | Migrate to a redeployed CommissionManager |
 | `AdminExecuteAdapter` | LZAdapter | Generic call into the registered LayerZero adapter (`setTrustedEntrypoint`, `refundStuckFunds`, …). Reverts `ZeroTarget` if `MultisigProxy.lzAdapter` is unset. |
 | `UpdateLZAdapter` | self | Rotate `MultisigProxy.lzAdapter` — the routing target for `AdminExecuteAdapter`. Setting to `address(0)` closes the adapter-admin path. |
@@ -182,7 +181,7 @@ set -a && source .env.interact && set +a   # before interact scripts
 - `LZ_ADAPTER` — initial LayerZero adapter address (optional; pass `0x0` if the adapter has not been deployed yet, then wire it in via federation governance after the adapter ships)
 - `ROUTE_REGISTRY_ADDRESS` — `RouteRegistry` address (step-by-step Bridge redeploys only; `DeployAll` predicts it)
 - `COMMISSION_MANAGER` — `CommissionManager` address (step-by-step deploys only)
-- `COMMISSION_RECIPIENT` — destination for CM withdrawals
+- `COMMISSION_RECIPIENT` — immutable destination for every CM withdrawal; choose a long-lived treasury address
 - `ETH_USD_FEED` / `ETH_USD_HEARTBEAT` — Chainlink ETH/USD aggregator + staleness window (required if any route uses NATIVE commission)
 - `ENCLAVE_SIGNERS` / `FEDERATION_SIGNERS` — comma-separated addresses, ordered by bitmap bit index
 - `ENCLAVE_THRESHOLD` / `FEDERATION_THRESHOLD` — M-of-N thresholds
@@ -214,7 +213,7 @@ forge script script/deploy/DeployAll.s.sol \
 
 Predicts the Bridge address from the deployer's future nonce, deploys in order:
 
-1. `CommissionManager` (pinned to the predicted Bridge)
+1. `CommissionManager` (pinned to the predicted Bridge and immutable commission recipient)
 2. `RouteRegistry` (pinned to the predicted Bridge, deployer-owned for this batch)
 3. `Bridge` (with the live `RouteRegistry` + `CommissionManager`)
 4. `RGBVerifier` (wraps the BtcRelay)
@@ -276,16 +275,17 @@ forge script script/interact/BridgeFundsIn.s.sol --rpc-url $RPC_URL --broadcast
 1. Verify Bridge ownership: `Bridge.owner()` returns the `MultisigProxy` address.
 2. Verify RouteRegistry ownership: `RouteRegistry.owner()` returns the `MultisigProxy` address.
 3. Verify CommissionManager ownership: `CommissionManager.owner()` returns the `MultisigProxy` address.
-4. Verify Bridge ↔ Registry linkage: `Bridge.routeRegistry()` returns the live `RouteRegistry`; `RouteRegistry.bridge()` returns the live `Bridge`.
-5. Verify Bridge ↔ CM linkage: `CommissionManager.bridgeAddress()` returns the live `Bridge`; `Bridge.commissionManager()` returns the live `CommissionManager`.
-6. Verify LZ adapter wiring: `Bridge.lzAdapter()` and `MultisigProxy.lzAdapter()` both return `address(0)` immediately after deploy. Once the adapter is live, federation must run two timelocked proposals:
+4. Verify immutable commission destination: `CommissionManager.commissionRecipient()` returns the intended treasury.
+5. Verify Bridge ↔ Registry linkage: `Bridge.routeRegistry()` returns the live `RouteRegistry`; `RouteRegistry.bridge()` returns the live `Bridge`.
+6. Verify Bridge ↔ CM linkage: `CommissionManager.bridgeAddress()` returns the live `Bridge`; `Bridge.commissionManager()` returns the live `CommissionManager`.
+7. Verify LZ adapter wiring: `Bridge.lzAdapter()` and `MultisigProxy.lzAdapter()` both return `address(0)` immediately after deploy. Once the adapter is live, federation must run two timelocked proposals:
    - `proposeAdminExecute` on the proxy with calldata `Bridge.setLZAdapter(adapter)` — opens the adapter `fundsIn` data path.
    - `proposeUpdateLZAdapter(adapter)` — opens the `AdminExecuteAdapter` governance path on the proxy.
-7. Verify enclave signers: `MultisigProxy.getEnclaveSigners()` returns the TEE addresses.
-8. Verify federation signers: `MultisigProxy.getFederationSigners()` returns the governance addresses.
-9. Verify TEE-allowed call: `MultisigProxy.teeAllowedCalls(bridgeAddress, fundsOutSelector)` returns `true` for the 8-arg `fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)` selector.
-10. **Register routes.** For each supported `(sourceChainId, destChainId)` pair, federation runs `MultisigProposeSetRoute` and — after the timelock — `executeProposal` with the printed `opData`. Verify with `RouteRegistry.routes(src, dst)` that the entry is `enabled` and the plugin addresses match.
-11. Test `fundsIn` with a small amount (zero commission by default) on a registered route to confirm token transfer and event emission.
+8. Verify enclave signers: `MultisigProxy.getEnclaveSigners()` returns the TEE addresses.
+9. Verify federation signers: `MultisigProxy.getFederationSigners()` returns the governance addresses.
+10. Verify TEE-allowed call: `MultisigProxy.teeAllowedCalls(bridgeAddress, fundsOutSelector)` returns `true` for the 8-arg `fundsOut(address,uint256,uint256,uint256,uint256,string,bytes,bytes)` selector.
+11. **Register routes.** For each supported `(sourceChainId, destChainId)` pair, federation runs `MultisigProposeSetRoute` and — after the timelock — `executeProposal` with the printed `opData`. Verify with `RouteRegistry.routes(src, dst)` that the entry is `enabled` and the plugin addresses match.
+12. Test `fundsIn` with a small amount (zero commission by default) on a registered route to confirm token transfer and event emission.
 
 ## Project structure
 

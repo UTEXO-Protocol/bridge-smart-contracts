@@ -25,8 +25,9 @@ contract RgbSettlementModuleTest is Test {
     address recipient = makeAddr("recipient");
     address token = makeAddr("token");
 
-    uint256 constant SOURCE_CHAIN_ID = 1_000_001; // RGB
-    uint256 constant DEST_CHAIN_ID = 42161; // arbitrum
+    uint256 constant RGB_CHAIN_ID = 1_000_001; // RGB network the mint is credited to
+    uint256 constant EVM_CHAIN_ID = 42161; // arbitrum
+    uint256 constant OTHER_RGB_CHAIN_ID = 1_000_002; // a second RGB network (e.g. mint/burn)
 
     bytes32 constant TX_ID_1 = bytes32(uint256(100));
     bytes32 constant TX_ID_2 = bytes32(uint256(101));
@@ -46,7 +47,18 @@ contract RgbSettlementModuleTest is Test {
     // Helpers
     // ========================================================================
 
+    /// @dev A deposit toward the RGB network: source = EVM, dest = RGB. The
+    ///      record is therefore tagged with `RGB_CHAIN_ID`.
     function _fundsInCtx(bytes32 operationId, uint256 netAmount) internal view returns (FundsInContext memory) {
+        return _fundsInCtx(operationId, netAmount, RGB_CHAIN_ID);
+    }
+
+    /// @dev Deposit toward an explicit RGB network id (its `destChainId`).
+    function _fundsInCtx(bytes32 operationId, uint256 netAmount, uint256 rgbChainId)
+        internal
+        view
+        returns (FundsInContext memory)
+    {
         return FundsInContext({
             token: token,
             sender: user,
@@ -55,23 +67,28 @@ contract RgbSettlementModuleTest is Test {
             netAmount: netAmount,
             operationId: operationId,
             senderNonce: 0,
-            sourceChainId: SOURCE_CHAIN_ID,
-            destChainId: DEST_CHAIN_ID,
+            sourceChainId: EVM_CHAIN_ID,
+            destChainId: rgbChainId,
             destAddress: "rgb:asset/utxo1abc"
         });
     }
 
-    /// @dev `ctx.amount` is irrelevant to the reworked module — it never
-    ///      compares the release amount against the mint records. We still
-    ///      supply a context so the signature matches.
+    /// @dev A release burning from the RGB network: source = RGB, dest = EVM.
+    ///      Its `sourceChainId` must match the referenced records' network tag.
+    ///      `ctx.amount` is irrelevant to the module — it never compares the
+    ///      release amount against the mint records.
     function _fundsOutCtx() internal view returns (FundsOutContext memory) {
+        return _fundsOutCtx(RGB_CHAIN_ID);
+    }
+
+    function _fundsOutCtx(uint256 rgbChainId) internal view returns (FundsOutContext memory) {
         return FundsOutContext({
             token: token,
             recipient: recipient,
             amount: AMOUNT,
             burnId: BURN_ID,
-            sourceChainId: SOURCE_CHAIN_ID,
-            destChainId: DEST_CHAIN_ID,
+            sourceChainId: rgbChainId,
+            destChainId: EVM_CHAIN_ID,
             sourceAddress: "rgb:sender/utxo1src"
         });
     }
@@ -130,6 +147,11 @@ contract RgbSettlementModuleTest is Test {
     function test_onFundsIn_recordsNetAmount() public {
         _record(TX_ID_1, AMOUNT);
         assertEq(module.fundsInRecords(TX_ID_1), AMOUNT);
+    }
+
+    function test_onFundsIn_tagsRecordWithDestChainId() public {
+        _record(TX_ID_1, AMOUNT);
+        assertEq(module.fundsInRecordChainIds(TX_ID_1), RGB_CHAIN_ID, "record tagged with the RGB network");
     }
 
     function test_onFundsIn_returnsRgbOpId() public {
@@ -275,6 +297,36 @@ contract RgbSettlementModuleTest is Test {
         vm.prank(attacker);
         vm.expectRevert(RgbSettlementModule.NotRouteRegistry.selector);
         module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _amt(AMOUNT)));
+    }
+
+    // ========================================================================
+    // beforeFundsOut — network scope
+    // ========================================================================
+
+    function test_beforeFundsOut_revertsOnCrossNetworkRecord() public {
+        // Record minted to RGB_CHAIN_ID; a release burning from OTHER_RGB_CHAIN_ID
+        // must not be able to cite it as proof-of-mint.
+        _record(TX_ID_1, AMOUNT);
+
+        vm.prank(routeRegistry);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RgbSettlementModule.FundsInRecordChainMismatch.selector, TX_ID_1, OTHER_RGB_CHAIN_ID, RGB_CHAIN_ID
+            )
+        );
+        module.beforeFundsOut(_fundsOutCtx(OTHER_RGB_CHAIN_ID), _settlementData(_single(TX_ID_1), _amt(AMOUNT)));
+    }
+
+    function test_beforeFundsOut_passesWhenNetworksMatch() public {
+        // A single module instance serving two RGB networks: a record minted to
+        // OTHER_RGB_CHAIN_ID is citable by a burn from OTHER_RGB_CHAIN_ID.
+        vm.prank(routeRegistry);
+        module.onFundsIn(_fundsInCtx(TX_ID_2, AMOUNT, OTHER_RGB_CHAIN_ID), abi.encode(RGB_OP_ID));
+
+        vm.prank(routeRegistry);
+        module.beforeFundsOut(_fundsOutCtx(OTHER_RGB_CHAIN_ID), _settlementData(_single(TX_ID_2), _amt(AMOUNT)));
+
+        assertEq(module.fundsInRecordChainIds(TX_ID_2), OTHER_RGB_CHAIN_ID, "second network record tagged correctly");
     }
 
     // ========================================================================

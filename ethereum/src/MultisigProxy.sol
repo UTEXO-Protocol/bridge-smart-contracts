@@ -5,6 +5,7 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IMultisigProxy} from "./interfaces/IMultisigProxy.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
+import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
 
 /// @notice Minimal view of the LayerZero adapter's outbound entry point. The
@@ -58,8 +59,6 @@ contract MultisigProxy is IMultisigProxy {
 
     address[] private _federationSigners;
     uint256 public federationThreshold;
-
-    address public commissionRecipient;
 
     /// @notice Per-source-chain nonce for the typed TEE methods (`fundsOutCall`
     ///         / `lzFundsOutCall`). Each source chain has its own lane, so the
@@ -123,15 +122,14 @@ contract MultisigProxy is IMultisigProxy {
     uint256 public constant SELECTOR_LENGTH = 4;
 
     /// @notice CommissionManager withdrawal selectors that the generic
-    ///         `AdminExecuteCommissionManager` path is NOT allowed to call —
-    ///         they take a free recipient and would bypass the pinned
-    ///         `commissionRecipient`. Withdrawals must go through the
-    ///         dedicated WithdrawTokenCommissionCM / WithdrawNativeCommissionCM
-    ///         ops, which force the recipient to `commissionRecipient`.
-    bytes4 private constant _SEL_WITHDRAW_TOKEN = bytes4(keccak256("withdrawTokenCommission(address,address,uint256)"));
-    bytes4 private constant _SEL_WITHDRAW_NATIVE = bytes4(keccak256("withdrawNativeCommission(address,uint256)"));
-    bytes4 private constant _SEL_WITHDRAW_ALL_TOKEN = bytes4(keccak256("withdrawAllTokenCommission(address,address)"));
-    bytes4 private constant _SEL_WITHDRAW_ALL_NATIVE = bytes4(keccak256("withdrawAllNativeCommission(address)"));
+    ///         `AdminExecuteCommissionManager` path is NOT allowed to call.
+    ///         The asset layer always pays CM's immutable recipient, while this
+    ///         procedural guard keeps standard withdrawals on the dedicated,
+    ///         typed governance operations.
+    bytes4 private constant _SEL_WITHDRAW_TOKEN = ICommissionManager.withdrawTokenCommission.selector;
+    bytes4 private constant _SEL_WITHDRAW_NATIVE = ICommissionManager.withdrawNativeCommission.selector;
+    bytes4 private constant _SEL_WITHDRAW_ALL_TOKEN = ICommissionManager.withdrawAllTokenCommission.selector;
+    bytes4 private constant _SEL_WITHDRAW_ALL_NATIVE = ICommissionManager.withdrawAllNativeCommission.selector;
 
     uint256 private immutable _cachedChainId;
     bytes32 private immutable _cachedDomainSeparator;
@@ -161,8 +159,6 @@ contract MultisigProxy is IMultisigProxy {
     );
     bytes32 private constant _PROPOSE_UPDATE_BRIDGE_TYPEHASH =
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
-    bytes32 private constant _PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH =
-        keccak256("ProposeSetCommissionRecipient(address newRecipient,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
 
@@ -221,7 +217,6 @@ contract MultisigProxy is IMultisigProxy {
         uint256 initialEnclaveSourceChain_,
         address[] memory federationSigners_,
         uint256 federationThreshold_,
-        address commissionRecipient_,
         uint256 timelockDuration_,
         uint256 minTimelock_
     ) {
@@ -232,7 +227,6 @@ contract MultisigProxy is IMultisigProxy {
         _requireValidThreshold(enclaveThreshold_, enclaveSigners_.length);
         if (federationSigners_.length == 0) revert NoSigners();
         _requireValidThreshold(federationThreshold_, federationSigners_.length);
-        if (commissionRecipient_ == address(0)) revert ZeroCommissionRecipient();
         if (minTimelock_ == 0 || minTimelock_ >= MAX_PROPOSAL_LIFETIME) revert InvalidMinTimelock();
         if (timelockDuration_ < minTimelock_) revert TimelockTooShort();
         if (timelockDuration_ >= MAX_PROPOSAL_LIFETIME) revert TimelockTooLong();
@@ -250,7 +244,6 @@ contract MultisigProxy is IMultisigProxy {
         _enclaveSourceChains.push(initialEnclaveSourceChain_);
         _federationSigners = federationSigners_;
         federationThreshold = federationThreshold_;
-        commissionRecipient = commissionRecipient_;
         timelockDuration = timelockDuration_;
         MIN_TIMELOCK = minTimelock_;
 
@@ -640,29 +633,6 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     /// @inheritdoc IMultisigProxy
-    function proposeSetCommissionRecipient(
-        address newRecipient,
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32) {
-        bytes32 structHash = keccak256(
-            abi.encode(_PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH, newRecipient, nonce, deadline)
-        );
-
-        return _propose(
-            OperationType.SetCommissionRecipient,
-            abi.encode(newRecipient),
-            nonce,
-            deadline,
-            structHash,
-            fedBitmap,
-            fedSigs
-        );
-    }
-
-    /// @inheritdoc IMultisigProxy
     function proposeSetTimelockDuration(
         uint256 newDuration,
         uint256 nonce,
@@ -696,8 +666,8 @@ contract MultisigProxy is IMultisigProxy {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
-        // Commission withdrawals must use the pinned-recipient ops; reject them
-        // on the generic path up front (fail-fast, no wasted proposal slot).
+        // Standard withdrawals use the dedicated typed operations; reject them
+        // on this generic path up front (recipient safety remains in CM).
         _requireNotCommissionWithdrawSelector(selector);
 
         bytes32 structHash =
@@ -990,6 +960,11 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     /// @inheritdoc IMultisigProxy
+    function commissionRecipient() public view returns (address) {
+        return ICommissionManager(payable(commissionManager)).commissionRecipient();
+    }
+
+    /// @inheritdoc IMultisigProxy
     function verifyEnclaveSignature(
         uint256 sourceChainId,
         bytes32 digest,
@@ -1113,12 +1088,6 @@ contract MultisigProxy is IMultisigProxy {
             address oldBridge = bridge;
             bridge = newBridge;
             emit BridgeAddressUpdated(oldBridge, newBridge);
-        } else if (opType == OperationType.SetCommissionRecipient) {
-            address newRecipient = abi.decode(opData, (address));
-            if (newRecipient == address(0)) revert ZeroRecipient();
-            address old = commissionRecipient;
-            commissionRecipient = newRecipient;
-            emit CommissionRecipientUpdated(old, newRecipient);
         } else if (opType == OperationType.SetTimelockDuration) {
             uint256 newDuration = abi.decode(opData, (uint256));
             if (newDuration < MIN_TIMELOCK) revert TimelockTooShort();
@@ -1127,9 +1096,8 @@ contract MultisigProxy is IMultisigProxy {
             emit TimelockDurationUpdated(newDuration);
         } else if (opType == OperationType.AdminExecuteCommissionManager) {
             // opData = raw CommissionManager callData. Enforce (again, at the
-            // execution boundary) that this generic path cannot call a
-            // withdrawal selector and re-point commission away from the pinned
-            // `commissionRecipient`.
+            // execution boundary) that standard withdrawals use their typed
+            // governance operations.
             _requireNotCommissionWithdrawSelector(_firstSelector(opData));
             (bool ok, bytes memory ret) = commissionManager.call(opData);
             _propagateRevert(ok, ret);
@@ -1144,18 +1112,16 @@ contract MultisigProxy is IMultisigProxy {
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.WithdrawTokenCommissionCM) {
             (address token, uint256 amount) = abi.decode(opData, (address, uint256));
-            address recipient = commissionRecipient;
-            (bool ok, bytes memory ret) = commissionManager.call(
-                abi.encodeWithSignature("withdrawTokenCommission(address,address,uint256)", token, recipient, amount)
-            );
+            address recipient = commissionRecipient();
+            (bool ok, bytes memory ret) =
+                commissionManager.call(abi.encodeCall(ICommissionManager.withdrawTokenCommission, (token, amount)));
             _propagateRevert(ok, ret);
             emit CommissionWithdrawn(token, amount, recipient);
         } else if (opType == OperationType.WithdrawNativeCommissionCM) {
             uint256 amount = abi.decode(opData, (uint256));
-            address recipient = commissionRecipient;
-            (bool ok, bytes memory ret) = commissionManager.call(
-                abi.encodeWithSignature("withdrawNativeCommission(address,uint256)", recipient, amount)
-            );
+            address recipient = commissionRecipient();
+            (bool ok, bytes memory ret) =
+                commissionManager.call(abi.encodeCall(ICommissionManager.withdrawNativeCommission, (amount)));
             _propagateRevert(ok, ret);
             emit NativeCommissionWithdrawn(amount, recipient);
         } else if (opType == OperationType.UpdateCommissionManager) {
@@ -1360,9 +1326,9 @@ contract MultisigProxy is IMultisigProxy {
         }
     }
 
-    /// @dev Reverts if `selector` is one of the CommissionManager withdrawal
-    ///      selectors, which the generic AdminExecuteCommissionManager path must
-    ///      not reach (they bypass the pinned `commissionRecipient`).
+    /// @dev Reverts for CommissionManager withdrawal selectors so the generic
+    ///      path cannot bypass the dedicated typed governance operations.
+    ///      Recipient safety itself is enforced inside CommissionManager.
     function _requireNotCommissionWithdrawSelector(bytes4 selector) private pure {
         if (
             selector == _SEL_WITHDRAW_TOKEN || selector == _SEL_WITHDRAW_NATIVE || selector == _SEL_WITHDRAW_ALL_TOKEN

@@ -4,6 +4,7 @@ pragma solidity 0.8.35;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {BridgeBase} from "./BridgeBase.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
@@ -11,6 +12,7 @@ import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
 import {FundsInContext, FundsOutContext} from "./interfaces/RouteTypes.sol";
 import {OutflowRateLimiter} from "./libraries/OutflowRateLimiter.sol";
+import {RollingOutflowLimiter} from "./libraries/RollingOutflowLimiter.sol";
 
 /// @title Bridge
 /// @notice Production bridge for locking USDT0 on Arbitrum and unlocking it
@@ -37,6 +39,7 @@ import {OutflowRateLimiter} from "./libraries/OutflowRateLimiter.sol";
 contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using OutflowRateLimiter for OutflowRateLimiter.Bucket;
+    using RollingOutflowLimiter for RollingOutflowLimiter.Window;
 
     // =========================================================================
     // State
@@ -69,6 +72,49 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///         `fundsIn` too as defence-in-depth: current inbound modules ignore
     ///         `settlementData`, but a future module could iterate it.
     uint256 public constant MAX_SETTLEMENT_DATA_LENGTH = 4096;
+
+    /// @notice Basis-point denominator for the immutable rolling safety limits.
+    uint256 public constant BPS_DENOMINATOR = 10_000;
+
+    /// @notice Headroom allowed between the native value supplied to `fundsIn`
+    ///         and the fresh destination-side oracle quote, to absorb ETH/USD
+    ///         drift between quoting and execution.
+    ///
+    ///         Direct deposits may attach up to 5% above the quote as a buffer;
+    ///         exactly the quote is collected and the remainder is refunded, so
+    ///         the band is one-sided and costs neither party. LayerZero deposits
+    ///         carry a source-agreed value that cannot be refunded across
+    ///         domains, so there the band is symmetric — 5% either side — and
+    ///         whatever arrives inside it is collected in full.
+    uint256 public constant NATIVE_COMMISSION_TOLERANCE_BPS = 500;
+
+    /// @notice Minimum rolling interval covered by the immutable safety
+    ///         limiter. The bounded ring implementation retains usage for
+    ///         24-25 hours, never less than this value.
+    uint256 public constant OUTFLOW_SAFETY_WINDOW = 24 hours;
+
+    /// @notice A source chain can move at most 20% of its reference liquidity
+    ///         during one rolling safety window. Compile-time constant: neither
+    ///         federation governance nor the enclave lane can raise it.
+    uint256 public constant MAX_CHAIN_OUTFLOW_BPS = 2_000;
+
+    /// @notice Physical token outflow across all source chains can consume at
+    ///         most 20% of global reference TVL during one rolling safety
+    ///         window. Compile-time constant and independent of configurable
+    ///         token-bucket settings.
+    uint256 public constant MAX_GLOBAL_OUTFLOW_BPS = 2_000;
+
+    /// @notice Share denominator for the outflow token buckets. Bucket
+    ///         allowance is held in shares of reference liquidity rather than
+    ///         absolute token units — `SHARE_UNIT` shares are 100% of the
+    ///         reference — so a bucket configured once keeps its meaning as
+    ///         liquidity grows or shrinks, with no governance retuning.
+    uint256 public constant SHARE_UNIT = 1e18;
+
+    /// @notice Window over which a bucket's `refillBpsPerWindow` accrues in
+    ///         full. Compile-time constant: federation cannot shorten it to
+    ///         make allowance return faster.
+    uint256 public constant BUCKET_REFILL_WINDOW = 24 hours;
 
     /// @notice Domain-separated type hash for the on-chain `operationId`
     ///         derivation. Binds the id to this contract, the deposit context
@@ -143,15 +189,33 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///         bridged toward that chain.
     mapping(uint256 chainId => uint256 locked) public lockedLiquidity;
 
-    /// @notice Per-source-chain outflow rate limiter. Bounds
-    ///         how fast `fundsOut` can drain a single chain's liquidity.
+    /// @notice Total accounted bridge liquidity across all isolated chain
+    ///         buckets. Direct token donations are deliberately excluded so
+    ///         they cannot inflate the immutable global safety allowance.
+    ///         `fundsIn` increases it, `fundsOut` decreases it and
+    ///         `rebalanceLiquidity` preserves it.
+    uint256 public totalLockedLiquidity;
+
+    /// @notice Per-source-chain outflow rate limiter. Bounds how fast
+    ///         `fundsOut` can drain a single chain's liquidity. The public
+    ///         getter exposes raw bucket `tokens`, `capacity`, and `rate` in
+    ///         normalized shares, not token units; use `availableOutflow` for
+    ///         the current token-denominated allowance.
     mapping(uint256 chainId => OutflowRateLimiter.Bucket) public chainBuckets;
 
-    /// @notice Global (aggregate) outflow rate limiter. Bounds
-    ///         total `fundsOut` across all source chains, since a compromised
-    ///         shared TEE could otherwise drain every chain's per-chain bucket
-    ///         in the same window (aggregate = sum of per-chain caps).
+    /// @notice Global (aggregate) outflow rate limiter. Bounds total `fundsOut`
+    ///         across all source chains, since a compromised shared TEE could
+    ///         otherwise drain every chain's per-chain bucket in the same
+    ///         window (aggregate = sum of per-chain caps). Its public getter
+    ///         also reports raw normalized-share units; use
+    ///         `availableGlobalOutflow` for token units.
     OutflowRateLimiter.Bucket public globalBucket;
+
+    /// @dev Immutable-security rolling usage. Federation-configurable token
+    ///      buckets may only make outflow stricter; these windows cannot be
+    ///      reconfigured or disabled.
+    mapping(uint256 chainId => RollingOutflowLimiter.Window) private _chainSafetyWindows;
+    RollingOutflowLimiter.Window private _globalSafetyWindow;
 
     /// @inheritdoc IBridge
     /// @dev Always non-zero (validated at the constructor and setter). Mutable
@@ -253,31 +317,81 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
     /// @inheritdoc IBridge
     /// @dev Owner is `MultisigProxy`; federation gates this on its timelock flow.
-    function setOutflowLimit(uint256 chainId, uint256 capacity, uint256 refillRate) external override onlyOwner {
+    ///      Validation is liquidity-independent, so a policy can be installed
+    ///      before any deposit exists — including at deployment.
+    function setOutflowLimit(uint256 chainId, uint256 burstBps, uint256 refillBpsPerWindow)
+        external
+        override
+        onlyOwner
+    {
         if (chainId == 0) revert InvalidOutflowLimit();
-        OutflowRateLimiter.Settings memory cfg = _buildOutflowConfig(capacity, refillRate);
+        _validateOutflowBps(burstBps, refillBpsPerWindow, MAX_CHAIN_OUTFLOW_BPS);
+
+        OutflowRateLimiter.Settings memory cfg = _buildOutflowConfig(burstBps, refillBpsPerWindow);
         OutflowRateLimiter.validate(cfg, false);
         chainBuckets[chainId].configurePrimed(cfg);
-        emit OutflowLimitUpdated(chainId, capacity, refillRate, chainBuckets[chainId].tokens);
+        emit OutflowLimitUpdated(chainId, burstBps, refillBpsPerWindow, chainBuckets[chainId].tokens);
     }
 
     /// @inheritdoc IBridge
     /// @dev Owner is `MultisigProxy`; federation gates this on its timelock flow.
-    function setGlobalOutflowLimit(uint256 capacity, uint256 refillRate) external override onlyOwner {
-        OutflowRateLimiter.Settings memory cfg = _buildOutflowConfig(capacity, refillRate);
+    function setGlobalOutflowLimit(uint256 burstBps, uint256 refillBpsPerWindow) external override onlyOwner {
+        _validateOutflowBps(burstBps, refillBpsPerWindow, MAX_GLOBAL_OUTFLOW_BPS);
+
+        OutflowRateLimiter.Settings memory cfg = _buildOutflowConfig(burstBps, refillBpsPerWindow);
         OutflowRateLimiter.validate(cfg, false);
         globalBucket.configurePrimed(cfg);
-        emit GlobalOutflowLimitUpdated(capacity, refillRate, globalBucket.tokens);
+        emit GlobalOutflowLimitUpdated(burstBps, refillBpsPerWindow, globalBucket.tokens);
     }
 
     /// @inheritdoc IBridge
     function availableOutflow(uint256 chainId) external view override returns (uint256) {
-        return OutflowRateLimiter.currentState(chainBuckets[chainId]).tokens;
+        uint256 shares = OutflowRateLimiter.currentState(chainBuckets[chainId]).tokens;
+        return _fromShares(shares, _chainReference(chainId));
     }
 
     /// @inheritdoc IBridge
     function availableGlobalOutflow() external view override returns (uint256) {
-        return OutflowRateLimiter.currentState(globalBucket).tokens;
+        uint256 shares = OutflowRateLimiter.currentState(globalBucket).tokens;
+        return _fromShares(shares, _globalReference());
+    }
+
+    /// @inheritdoc IBridge
+    function availableChainSafetyOutflow(uint256 chainId) external view override returns (uint256) {
+        uint256 spent = _chainSafetyWindows[chainId].current();
+        return _remainingSafetyAllowance(lockedLiquidity[chainId] + spent, spent, MAX_CHAIN_OUTFLOW_BPS);
+    }
+
+    /// @inheritdoc IBridge
+    function availableGlobalSafetyOutflow() external view override returns (uint256) {
+        uint256 spent = _globalSafetyWindow.current();
+        return _remainingSafetyAllowance(totalLockedLiquidity + spent, spent, MAX_GLOBAL_OUTFLOW_BPS);
+    }
+
+    /// @inheritdoc IBridge
+    function chainOutflowReference(uint256 chainId) external view override returns (uint256) {
+        return _chainReference(chainId);
+    }
+
+    /// @inheritdoc IBridge
+    function globalOutflowReference() external view override returns (uint256) {
+        return _globalReference();
+    }
+
+    /// @inheritdoc IBridge
+    function effectiveAvailableOutflow(uint256 chainId) external view override returns (uint256) {
+        uint256 chainSpent = _chainSafetyWindows[chainId].current();
+        uint256 chainRef = lockedLiquidity[chainId] + chainSpent;
+        uint256 globalSpent = _globalSafetyWindow.current();
+        uint256 globalRef = totalLockedLiquidity + globalSpent;
+
+        uint256 allowed = lockedLiquidity[chainId];
+        allowed =
+            Math.min(allowed, _fromShares(OutflowRateLimiter.currentState(chainBuckets[chainId]).tokens, chainRef));
+        allowed = Math.min(allowed, _fromShares(OutflowRateLimiter.currentState(globalBucket).tokens, globalRef));
+        allowed = Math.min(allowed, _remainingSafetyAllowance(chainRef, chainSpent, MAX_CHAIN_OUTFLOW_BPS));
+        allowed = Math.min(allowed, _remainingSafetyAllowance(globalRef, globalSpent, MAX_GLOBAL_OUTFLOW_BPS));
+        return allowed;
     }
 
     // =========================================================================
@@ -291,7 +405,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         string calldata destinationAddress,
         bytes calldata settlementData
     ) external payable override whenNotPaused nonReentrant returns (bytes32 operationId) {
-        // Direct EVM deposit: the source sender IS the caller.
+        // Direct EVM deposit: the source sender IS the caller, so a native
+        // surplus can be returned to them — `refundNativeSurplus = true`.
         address caller = _msgSender();
         operationId = _fundsIn(
             caller,
@@ -300,7 +415,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             block.chainid,
             destinationChainId,
             destinationAddress,
-            settlementData
+            settlementData,
+            true
         );
     }
 
@@ -316,8 +432,20 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // LZ deposit: tokens are pulled from the adapter (`_msgSender()`), but
         // the identity bound into `operationId` is the authenticated
         // `sourceSender` forwarded from the source-chain entrypoint.
+        //
+        // `refundNativeSurplus = false`: `msg.value` is the source-agreed
+        // `expectedComposeValue`, and the payer lives on the source chain — the
+        // adapter is only its courier, so refunding `_msgSender()` would pay the
+        // wrong party. The symmetric drift band absorbs the deviation instead.
         operationId = _fundsIn(
-            _msgSender(), sourceSender, amount, sourceChainId, destinationChainId, destinationAddress, settlementData
+            _msgSender(),
+            sourceSender,
+            amount,
+            sourceChainId,
+            destinationChainId,
+            destinationAddress,
+            settlementData,
+            false
         );
     }
 
@@ -350,7 +478,22 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (fundsOutParams.amount > srcLiquidity) {
             revert InsufficientChainLiquidity(fundsOutParams.sourceChainId, fundsOutParams.amount, srcLiquidity);
         }
+
         lockedLiquidity[fundsOutParams.sourceChainId] = srcLiquidity - fundsOutParams.amount;
+        uint256 totalLiquidity = totalLockedLiquidity;
+        totalLockedLiquidity = totalLiquidity - fundsOutParams.amount;
+
+        // Reference liquidity for both limiter layers: pre-debit liquidity plus
+        // usage already recorded in the rolling window. That sum is invariant as
+        // releases drain liquidity inside one window, so a sequence of small
+        // withdrawals cannot geometrically outpace the ceiling. Both the token
+        // buckets and the immutable safety limits below are denominated against
+        // the SAME reference, so the two layers never disagree about what a
+        // percentage means.
+        uint256 chainSpent = _chainSafetyWindows[fundsOutParams.sourceChainId].current();
+        uint256 chainReference = srcLiquidity + chainSpent;
+        uint256 globalSpent = _globalSafetyWindow.current();
+        uint256 globalReference = totalLiquidity + globalSpent;
 
         // Outflow rate limit. Consume both the per-source-chain
         // bucket and the global aggregate bucket; either being short reverts the
@@ -360,8 +503,10 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // aggregate bucket (aggregate-scoped errors via the address(0) sentinel).
         // The limiter is fail-closed: an unconfigured chain/global bucket
         // rejects the release instead of falling back to unlimited outflow.
-        chainBuckets[fundsOutParams.sourceChainId].spend(fundsOutParams.amount, TOKEN);
-        globalBucket.spend(fundsOutParams.amount, address(0));
+        // Amounts are converted to shares of the reference, so a bucket keeps
+        // its configured percentage meaning as liquidity moves.
+        chainBuckets[fundsOutParams.sourceChainId].spend(_toShares(fundsOutParams.amount, chainReference), TOKEN);
+        globalBucket.spend(_toShares(fundsOutParams.amount, globalReference), address(0));
 
         // Quote commission. NATIVE on fundsOut is unrepresentable: the
         // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
@@ -387,6 +532,15 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
                 fundsOutParams.proof,
                 fundsOutParams.settlementData
             );
+
+        // Immutable TVL-relative safety limits. These aggregate every release
+        // over a rolling 24h+ window, so neither one full-pool transaction nor a
+        // same-window sequence of smaller transactions can bypass the ceiling.
+        // They run after the existing bucket and route checks to preserve those
+        // paths' fail-fast errors; any failure here still atomically rolls back
+        // all earlier state and plugin calls.
+        _consumeChainSafetyOutflow(fundsOutParams.sourceChainId, chainSpent, chainReference, fundsOutParams.amount);
+        _consumeGlobalSafetyOutflow(globalSpent, globalReference, fundsOutParams.amount);
 
         // Forward token commission to the CommissionManager pool.
         if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
@@ -457,14 +611,18 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (params.amount > srcLiquidity) {
             revert InsufficientChainLiquidity(params.sourceChainId, params.amount, srcLiquidity);
         }
+
         lockedLiquidity[params.sourceChainId] = srcLiquidity - params.amount;
 
         // Per-source-chain outflow rate limit: release capacity is migrating
         // away from this chain, so it spends the chain bucket like a release.
         // The global bucket is intentionally NOT spent — it bounds physical
         // token egress, and no tokens leave here; the eventual exit pays the
-        // global bucket inside `fundsOut`.
-        chainBuckets[params.sourceChainId].spend(params.amount, TOKEN);
+        // global bucket inside `fundsOut`. Same reference as the immutable
+        // per-chain safety limit consumed below.
+        uint256 chainSpent = _chainSafetyWindows[params.sourceChainId].current();
+        uint256 chainReference = srcLiquidity + chainSpent;
+        chainBuckets[params.sourceChainId].spend(_toShares(params.amount, chainReference), TOKEN);
 
         // Debit-leg verification: route verifier (view-only source proof)
         // first, then the settlement module's release check. `recipient` is
@@ -506,6 +664,14 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             );
 
         lockedLiquidity[params.destinationChainId] += params.amount;
+
+        // Rebalance moves release capacity away from the source chain and
+        // therefore consumes the same immutable per-chain safety allowance as a
+        // physical release. It intentionally does not consume global allowance:
+        // no token leaves custody, and the eventual fundsOut will consume it.
+        // Kept after route validation so route-specific errors retain priority;
+        // a safety-limit revert rolls the complete rebalance back atomically.
+        _consumeChainSafetyOutflow(params.sourceChainId, chainSpent, chainReference, params.amount);
 
         // RGB-only correlation event, same contract as `_fundsIn`: the RGB
         // listener authorises a mint against `FundsIn` and needs no awareness
@@ -633,22 +799,32 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         );
     }
 
-    /// @dev Build an enabled outflow-limit config from uint256 inputs, safely
-    ///      narrowing to the library's uint128 fields. USDT0 amounts fit in
-    ///      uint128; a value above that is a misconfiguration and reverts.
+    /// @dev Translate a basis-point policy into the limiter's share-denominated
+    ///      settings. `capacity` is the burst expressed in shares of reference
+    ///      liquidity, `rate` the per-second share accrual that fills
+    ///      `refillBpsPerWindow` over one `BUCKET_REFILL_WINDOW`. Integer
+    ///      division rounds the rate down, so exact-window refill is
+    ///      conservative by less than one share-per-second remainder.
+    ///      Both fit in uint128 by construction: the largest representable
+    ///      capacity is `SHARE_UNIT` (1e18) and rate is strictly smaller, so the
+    ///      absolute-amount overflow check the old signature needed is gone.
+    ///      Precision lives in `SHARE_UNIT`, not in a carried remainder: at
+    ///      1500 bps the truncated rate loses ~6e-14 relative per second, which
+    ///      is why no fractional-remainder accounting is required.
     ///      `OutflowRateLimiter.validate` then enforces `0 < rate < capacity`.
-    function _buildOutflowConfig(uint256 capacity, uint256 refillRate)
+    function _buildOutflowConfig(uint256 burstBps, uint256 refillBpsPerWindow)
         private
         pure
         returns (OutflowRateLimiter.Settings memory)
     {
-        if (capacity > type(uint128).max || refillRate > type(uint128).max) revert InvalidOutflowLimit();
+        uint256 capacityShares = Math.mulDiv(burstBps, SHARE_UNIT, BPS_DENOMINATOR);
+        uint256 rateShares = Math.mulDiv(refillBpsPerWindow, SHARE_UNIT, BPS_DENOMINATOR) / BUCKET_REFILL_WINDOW;
         return OutflowRateLimiter.Settings({
             isEnabled: true,
             // forge-lint: disable-next-line(unsafe-typecast)
-            capacity: uint128(capacity),
+            capacity: uint128(capacityShares),
             // forge-lint: disable-next-line(unsafe-typecast)
-            rate: uint128(refillRate)
+            rate: uint128(rateShares)
         });
     }
 
@@ -663,7 +839,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 sourceChainId,
         uint256 destinationChainId,
         string memory destinationAddress,
-        bytes calldata settlementData
+        bytes calldata settlementData,
+        bool refundNativeSurplus
     ) private returns (bytes32 operationId) {
         if (amount < minFundsInAmount) {
             revert AmountBelowMinimum(amount, minFundsInAmount);
@@ -678,20 +855,55 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         if (sourceChainId == 0) revert InvalidSourceChainId();
         if (destinationChainId == 0) revert InvalidDestinationChainId();
 
-        // Commission is quoted from the nominal `amount` so the native-commission
-        // quote (and the lower-bound `msg.value` check below) stays predictable
-        // for the caller. The nominal net is intentionally discarded — the
-        // credited net is derived from the ACTUAL received amount after the transfer.
+        // Commission is freshly quoted from the nominal `amount`. For direct
+        // calls `msg.value` is the user's submitted quote; for LayerZero it is
+        // the source-agreed expectedComposeValue authenticated by the adapter.
+        // The nominal net is intentionally discarded — the credited net is
+        // derived from the ACTUAL received amount after the transfer.
         (uint256 tokenCommission, uint256 nativeCommission,) =
             commissionManager.calculateFundsInCommission(sourceChainId, destinationChainId, TOKEN, amount);
 
-        // Native payment: require at least the freshly-quoted commission
-        // — an oracle move up between quote and execution reverts here. Any
-        // overpayment from a favorable move is collected as commission below
-        // (not refunded), so the rule is uniform for direct and LZ deposits.
-        // TOKEN-commission routes (nativeCommission == 0) accept no native.
-        if (msg.value < nativeCommission) revert NativeValueMismatch();
-        if (nativeCommission == 0 && msg.value != 0) revert NativeValueMismatch();
+        // Bound `msg.value` against the fresh quote, then decide how much of it
+        // is actually commission. Both paths accept the same 5% headroom above
+        // the quote; they differ in what happens to that headroom, because only
+        // one of them can pay it back.
+        //
+        //  - Direct deposit (`refundNativeSurplus`): the surplus is a drift
+        //    buffer. The floor is the quote itself and exactly the quote is
+        //    collected, so the protocol never under-collects and the caller is
+        //    never charged more than quoted — the surplus is returned below.
+        //  - LZ deposit: the payer is on the source chain and unreachable, so no
+        //    refund is possible. A symmetric band absorbs drift in both
+        //    directions and the whole source-agreed value is collected.
+        //
+        // TOKEN-commission routes (nativeCommission == 0) still accept no native.
+        // `minimum` and `nativeToCollect` are set together per branch on purpose:
+        // the trailing refund computes `msg.value - nativeToCollect`, so a floor
+        // below what is collected would underflow. Pairing them here makes that
+        // invariant structural rather than something a later edit must remember.
+        uint256 nativeToCollect;
+        if (nativeCommission == 0) {
+            if (msg.value != 0) revert NativeValueMismatch();
+        } else {
+            uint256 minimum;
+            if (refundNativeSurplus) {
+                minimum = nativeCommission;
+                nativeToCollect = nativeCommission;
+            } else {
+                minimum = Math.mulDiv(
+                    nativeCommission,
+                    BPS_DENOMINATOR - NATIVE_COMMISSION_TOLERANCE_BPS,
+                    BPS_DENOMINATOR,
+                    Math.Rounding.Ceil
+                );
+                nativeToCollect = msg.value;
+            }
+            uint256 maximum =
+                Math.mulDiv(nativeCommission, BPS_DENOMINATOR + NATIVE_COMMISSION_TOLERANCE_BPS, BPS_DENOMINATOR);
+            if (msg.value < minimum || msg.value > maximum) {
+                revert NativeCommissionOutOfBounds(msg.value, minimum, maximum);
+            }
+        }
 
         // Build the canonical context. The per-`(sourceChainId, sourceSender)`
         // nonce is consumed here — before any external call, so a downstream
@@ -725,10 +937,11 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 received = IERC20(TOKEN).balanceOf(address(this)) - balanceBefore;
 
         // The token commission is forwarded out of `received`; guard the
-        // subtraction so a token fee that eats more than the commission reverts
-        // cleanly instead of underflowing. A zero net (received == commission) is
-        // left to the existing zero-amount / dust handling, unchanged here.
-        if (received < tokenCommission) revert InsufficientReceived(received, tokenCommission);
+        // subtraction so a token fee that consumes all (or more) of the actual
+        // receipt reverts instead of creating a zero-net settlement or
+        // underflowing. Equality is reachable with fee-on-transfer tokens even
+        // though the nominal commission configuration is strictly below 100%.
+        if (received <= tokenCommission) revert InsufficientReceived(received, tokenCommission);
         ctx.netAmount = received - tokenCommission;
 
         // Forward token commission BEFORE the settlement hook so that any
@@ -749,13 +962,14 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // the accumulated locked liquidity. Credited from the ACTUAL received
         // amount so the ledger can never exceed real custody.
         lockedLiquidity[destinationChainId] += ctx.netAmount;
+        totalLockedLiquidity += ctx.netAmount;
 
-        // Forward the FULL native value to the CommissionManager pool. Any
-        // surplus over the quoted `nativeCommission` (favorable oracle drift) is
-        // collected as commission rather than refunded, so no native is
-        // ever left stranded in the Bridge.
-        if (msg.value != 0) {
-            (bool ok,) = address(commissionManager).call{value: msg.value}("");
+        // Forward the native commission actually owed — exactly the fresh quote
+        // on the direct path, the bounded source-agreed value on the LZ path.
+        // Any remainder is returned to the caller at the end of this function,
+        // so no native is ever retained in Bridge.
+        if (nativeToCollect != 0) {
+            (bool ok,) = address(commissionManager).call{value: nativeToCollect}("");
             if (!ok) revert NativeValueMismatch();
         }
 
@@ -770,11 +984,22 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
             ctx.grossAmount,
             ctx.netAmount,
             tokenCommission,
-            msg.value, // actual native collected (== nativeCommission + any drift surplus)
+            nativeToCollect, // native commission actually credited to the pool
             ctx.sourceChainId,
             ctx.destChainId,
             ctx.destAddress
         );
+
+        // Return the drift buffer LAST: after every state write and after the
+        // commission transfer, so the recipient's fallback observes only settled
+        // state. Reachable on the direct path only — the LZ path collects its
+        // whole source-agreed value, leaving nothing to refund. The overloads are
+        // `nonReentrant`, so this trailing call cannot re-enter.
+        uint256 surplus = msg.value - nativeToCollect;
+        if (surplus != 0) {
+            (bool refunded,) = payable(from).call{value: surplus}("");
+            if (!refunded) revert NativeRefundFailed(from, surplus);
+        }
 
         operationId = ctx.operationId;
     }
@@ -796,6 +1021,88 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         IERC20(TOKEN).safeTransfer(cm, amount);
         uint256 credited = IERC20(TOKEN).balanceOf(cm) - balBefore;
         commissionManager.receiveTokenCommission(TOKEN, credited);
+    }
+
+    /// @dev Consume immutable per-chain rolling allowance. `reference` is
+    ///      `pre-debit liquidity + already spent`, which stays constant while
+    ///      releases consume liquidity inside the same window. This prevents a
+    ///      sequence of individually-small withdrawals from geometrically
+    ///      draining the bucket.
+    function _consumeChainSafetyOutflow(uint256 chainId, uint256 spent, uint256 refLiquidity, uint256 amount) private {
+        uint256 limit = _safetyLimit(refLiquidity, MAX_CHAIN_OUTFLOW_BPS);
+        if (spent + amount > limit) revert ChainSafetyLimitExceeded(chainId, amount, spent, limit);
+
+        uint256 updatedSpent = _chainSafetyWindows[chainId].consume(amount);
+        emit ChainSafetyOutflowConsumed(chainId, amount, updatedSpent, limit);
+    }
+
+    /// @dev Consume immutable aggregate rolling allowance for physical token
+    ///      outflow. Rebalances do not call this function.
+    function _consumeGlobalSafetyOutflow(uint256 spent, uint256 refLiquidity, uint256 amount) private {
+        uint256 limit = _safetyLimit(refLiquidity, MAX_GLOBAL_OUTFLOW_BPS);
+        if (spent + amount > limit) revert GlobalSafetyLimitExceeded(amount, spent, limit);
+
+        uint256 updatedSpent = _globalSafetyWindow.consume(amount);
+        emit GlobalSafetyOutflowConsumed(amount, updatedSpent, limit);
+    }
+
+    /// @dev Validate a bucket policy. Deliberately liquidity-independent so a
+    ///      policy can be installed at deployment, before the first deposit —
+    ///      a percentage needs no reference to be well-formed.
+    ///
+    ///      The combined burst plus full-window refill budget cannot exceed
+    ///      `maxBps`. This makes both a full-TVL instant bucket and an
+    ///      over-permissive burst/refill pair unrepresentable, independently of
+    ///      current liquidity. The immutable rolling limiter remains the
+    ///      non-configurable backstop and no bucket policy can relax it.
+    function _validateOutflowBps(uint256 burstBps, uint256 refillBpsPerWindow, uint256 maxBps) private pure {
+        if (
+            burstBps == 0 || refillBpsPerWindow == 0 || burstBps > maxBps || refillBpsPerWindow > maxBps
+                || burstBps + refillBpsPerWindow > maxBps
+        ) {
+            revert InvalidOutflowPolicy(burstBps, refillBpsPerWindow, maxBps);
+        }
+    }
+
+    /// @dev Convert a token amount to bucket shares of `reference`. Rounds up so
+    ///      a release can never be cheaper in shares than its true fraction of
+    ///      the reference, and so dust cannot pass for free.
+    function _toShares(uint256 amount, uint256 refLiquidity) private pure returns (uint256) {
+        // Unreachable via `fundsOut`/`rebalanceLiquidity`: both revert with
+        // `InsufficientChainLiquidity` before this point when the reference is
+        // zero. Asserted rather than assumed — division safety must not depend
+        // on an upstream caller's ordering.
+        if (refLiquidity == 0) revert ZeroOutflowReference();
+        return Math.mulDiv(amount, SHARE_UNIT, refLiquidity, Math.Rounding.Ceil);
+    }
+
+    /// @dev Convert bucket shares back to token units for the public views.
+    function _fromShares(uint256 shares, uint256 refLiquidity) private pure returns (uint256) {
+        return Math.mulDiv(shares, refLiquidity, SHARE_UNIT);
+    }
+
+    /// @dev Reference liquidity for a source chain: accounted liquidity plus
+    ///      usage still counted in the rolling window.
+    function _chainReference(uint256 chainId) private view returns (uint256) {
+        return lockedLiquidity[chainId] + _chainSafetyWindows[chainId].current();
+    }
+
+    /// @dev Reference liquidity for the aggregate scope.
+    function _globalReference() private view returns (uint256) {
+        return totalLockedLiquidity + _globalSafetyWindow.current();
+    }
+
+    function _remainingSafetyAllowance(uint256 refLiquidity, uint256 spent, uint256 maxBps)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 limit = _safetyLimit(refLiquidity, maxBps);
+        return spent < limit ? limit - spent : 0;
+    }
+
+    function _safetyLimit(uint256 refLiquidity, uint256 maxBps) private pure returns (uint256) {
+        return Math.mulDiv(refLiquidity, maxBps, BPS_DENOMINATOR);
     }
 
     /// @dev Canonical `operationId` = domain-separated hash of the deposit

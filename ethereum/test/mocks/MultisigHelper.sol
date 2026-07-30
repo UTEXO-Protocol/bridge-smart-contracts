@@ -20,6 +20,10 @@ library MultisigHelper {
         "TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)"
     );
 
+    bytes32 internal constant TEE_REBALANCE_TYPEHASH = keccak256(
+        "TeeRebalance(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,string destinationAddress,bytes proof,bytes settlementDataOut,bytes settlementDataIn,uint256 nonce,uint256 deadline)"
+    );
+
     bytes32 internal constant EMERGENCY_PAUSE_TYPEHASH = keccak256("EmergencyPause(uint256 nonce,uint256 deadline)");
 
     bytes32 internal constant EMERGENCY_UNPAUSE_TYPEHASH =
@@ -44,9 +48,6 @@ library MultisigHelper {
 
     bytes32 internal constant PROPOSE_UPDATE_BRIDGE_TYPEHASH =
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
-
-    bytes32 internal constant PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH =
-        keccak256("ProposeSetCommissionRecipient(address newRecipient,uint256 nonce,uint256 deadline)");
 
     bytes32 internal constant PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
@@ -132,6 +133,39 @@ library MultisigHelper {
                     keccak256(p.settlementData),
                     nonce,
                     deadline
+                )
+            )
+        );
+    }
+
+    /// @dev EIP-712 digest for the typed `rebalanceCall` (TeeRebalance). Built
+    ///      in two `abi.encode` halves joined with `bytes.concat`, matching the
+    ///      contract (byte-identical, and compiles without the optimizer).
+    function digestTeeRebalance(bytes32 domainSep, IBridge.RebalanceParams memory p, uint256 nonce, uint256 deadline)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return toTypedDataHash(
+            domainSep,
+            keccak256(
+                bytes.concat(
+                    abi.encode(
+                        TEE_REBALANCE_TYPEHASH,
+                        p.amount,
+                        p.burnId,
+                        p.sourceChainId,
+                        p.destinationChainId,
+                        keccak256(bytes(p.sourceAddress))
+                    ),
+                    abi.encode(
+                        keccak256(bytes(p.destinationAddress)),
+                        keccak256(p.proof),
+                        keccak256(p.settlementDataOut),
+                        keccak256(p.settlementDataIn),
+                        nonce,
+                        deadline
+                    )
                 )
             )
         );
