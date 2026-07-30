@@ -186,7 +186,7 @@ contract IntegrationTest is Test {
         uint64 currentNonce = vm.getNonce(deployer);
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        cm = new CommissionManager(predictedBridge);
+        cm = new CommissionManager(predictedBridge, commissionReceiver);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
         bridge = new Bridge(
             address(token),
@@ -214,15 +214,7 @@ contract IntegrationTest is Test {
         fed[1] = fedA2;
         fed[2] = fedA3;
 
-        proxy = new MultisigProxy(
-            address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, fed, 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK
-        );
-
-        // Outflow rate limits: configure generous buckets while
-        // the deployer still owns the Bridge, so the release path is enabled
-        // before ownership moves to the proxy.
-        bridge.setOutflowLimit(RGB_CHAIN_ID, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
-        bridge.setGlobalOutflowLimit(1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+        proxy = new MultisigProxy(address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, fed, 2, TIMELOCK, MIN_TIMELOCK);
 
         cm.transferOwnership(address(proxy));
         bridge.transferOwnership(address(proxy));
@@ -310,16 +302,27 @@ contract IntegrationTest is Test {
         // -------------------------------------------------------------------------
         uint256 userBefore = token.balanceOf(user);
 
+        // Ten equal deposits make the release below exactly 10% of isolated
+        // and global TVL — the configured bucket burst.
         vm.prank(user);
-        // RGB route: settlementData carries the non-zero RGB OpId. The record is
-        // keyed by the bridge-derived operationId returned here.
         bytes32 opId = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, "rgb:asset1qp0y3mq/utxo1abc", abi.encode(RGB_OP_ID));
+        for (uint256 i = 1; i < 10; i++) {
+            vm.prank(user);
+            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, "rgb:asset1qp0y3mq/utxo1abc", abi.encode(RGB_OP_ID + i));
+        }
 
-        uint256 tokenCommissionIn = tInQuote;
+        uint256 tokenCommissionIn = tInQuote * 10;
         uint256 netBridgedIn = netIn;
 
-        assertEq(token.balanceOf(user), userBefore - USER_DEPOSIT, "user debited gross");
-        assertEq(token.balanceOf(address(bridge)), netBridgedIn, "bridge keeps net");
+        // Balanced maximum-total policy: 10% burst plus 10% refill per window.
+        // Ten deposits back a release of one, so the full burst is spendable.
+        vm.startPrank(address(proxy));
+        bridge.setOutflowLimit(RGB_CHAIN_ID, 1_000, 1_000);
+        bridge.setGlobalOutflowLimit(1_000, 1_000);
+        vm.stopPrank();
+
+        assertEq(token.balanceOf(user), userBefore - USER_DEPOSIT * 10, "user debited ten gross deposits");
+        assertEq(token.balanceOf(address(bridge)), netBridgedIn * 10, "bridge keeps ten net deposits");
         assertEq(token.balanceOf(address(cm)), tokenCommissionIn, "cm got commission");
         assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn, "cm pool mirrors balance");
         assertEq(rgbModule.fundsInRecords(opId), netBridgedIn, "record stores net");
@@ -367,7 +370,7 @@ contract IntegrationTest is Test {
 
         proxy.fundsOutCall(params, outNonce, outDeadline, 3, teeSigs);
 
-        assertEq(token.balanceOf(address(bridge)), 0, "bridge drained");
+        assertEq(token.balanceOf(address(bridge)), netBridgedIn * 9, "one tenth released; safety reserve remains");
         assertEq(token.balanceOf(recipient), netOut, "recipient got net");
         assertEq(token.balanceOf(address(cm)), tokenCommissionIn + tokenCommissionOut, "cm accrued both fees");
         assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn + tokenCommissionOut, "cm pool mirrors");
@@ -400,16 +403,20 @@ contract IntegrationTest is Test {
         proxy.executeProposal(proposalId, opData);
 
         // -------------------------------------------------------------------------
-        // 5. Final invariants: bridge empty, CM empty, recipient holds netOut,
-        //    commissionReceiver holds the full aggregated commission.
+        // 5. Final invariants: the nine-deposit safety reserve remains in the
+        //    bridge, CM is empty, and all commissions reached their receiver.
         // -------------------------------------------------------------------------
-        assertEq(token.balanceOf(address(bridge)), 0, "bridge still empty");
+        assertEq(token.balanceOf(address(bridge)), netBridgedIn * 9, "nine-deposit safety reserve remains");
         assertEq(token.balanceOf(address(cm)), 0, "cm drained");
         assertEq(cm.tokenCommissionPool(address(token)), 0, "cm pool drained");
         assertEq(token.balanceOf(recipient), netOut, "recipient unchanged");
         assertEq(token.balanceOf(commissionReceiver), totalCommission, "commissionReceiver paid");
-        // Token conservation: user-deducted == everything distributed.
-        assertEq(token.balanceOf(recipient) + token.balanceOf(commissionReceiver), USER_DEPOSIT, "token conservation");
+        // Token conservation: ten gross deposits remain fully accounted for.
+        assertEq(
+            token.balanceOf(address(bridge)) + token.balanceOf(recipient) + token.balanceOf(commissionReceiver),
+            USER_DEPOSIT * 10,
+            "token conservation"
+        );
     }
 
     // =========================================================================
@@ -418,9 +425,16 @@ contract IntegrationTest is Test {
 
     function test_endToEnd_nativeCommission_inboundAndWithdraw() public {
         // Configure a NATIVE FUNDS_IN route (2% on token amount, paid in wei).
-        // Wire up a Chainlink ETH/USD feed ($2000 / ETH, 8 decimals, fresh)
-        // via federation governance — the same path production will use.
+        // Wire the complete mandatory R-I-14 config through federation
+        // governance — dependencies first, ETH/USD feed last.
+        MockAggregatorV3 sequencerFeed = new MockAggregatorV3(0, 0, block.timestamp);
         ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);
+        _proposeAndExecuteCmAdminCall(
+            abi.encodeWithSelector(ICommissionManager.setSequencerUptimeFeed.selector, address(sequencerFeed))
+        );
+        _proposeAndExecuteCmAdminCall(
+            abi.encodeWithSelector(ICommissionManager.setEthUsdPriceBounds.selector, uint256(100e8), uint256(100_000e8))
+        );
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(ICommissionManager.setEthUsdFeed.selector, address(ethUsdFeed), uint256(1 days))
         );
