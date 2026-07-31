@@ -1664,6 +1664,39 @@ contract MultisigProxyTest is Test {
         assertTrue(bridge.paused());
     }
 
+    /// @dev Assert that a protected selector is rejected before federation
+    ///      signature verification on every generic raw-call lane. Applying
+    ///      each policy selector-wide closes mutable-target aliasing.
+    function _assertGenericPathsRejectSelector(bytes memory callData, bytes4 errorSelector) internal {
+        bytes4 selector = bytes4(callData);
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes[] memory noSigs = new bytes[](0);
+        bytes memory expected = abi.encodeWithSelector(errorSelector, selector);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecute(callData, nonce, deadline, 0, noSigs);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecuteCommissionManager(callData, nonce, deadline, 0, noSigs);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecuteRouteRegistry(callData, nonce, deadline, 0, noSigs);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, 0, noSigs);
+    }
+
+    function test_federationGenericPathsCannotCallFundsOut() public {
+        bytes memory callData = abi.encodeCall(IBridge.fundsOut, (_fundsOutParams()));
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
+    }
+
+    function test_federationGenericPathsCannotCallRebalanceLiquidity() public {
+        bytes memory callData = abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams()));
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
+    }
+
     // ========================================================================
     // Propose + Execute — UpdateCommissionManager
     // ========================================================================
@@ -3175,22 +3208,15 @@ contract MultisigProxyTest is Test {
 
     // Standard CM withdrawals stay on the dedicated typed operations. Recipient
     // safety no longer depends on this blocklist: CM enforces it immutably.
-    function test_adminExecuteCommissionManager_rejectsWithdrawSelectors_afterFix() public {
+    function test_genericPathsRejectCommissionWithdrawSelectors_afterFix() public {
         bytes[] memory callDatas = new bytes[](4);
         callDatas[0] = abi.encodeWithSignature("withdrawTokenCommission(address,uint256)", address(token), uint256(1));
         callDatas[1] = abi.encodeWithSignature("withdrawNativeCommission(uint256)", uint256(1));
         callDatas[2] = abi.encodeWithSignature("withdrawAllTokenCommission(address)", address(token));
         callDatas[3] = abi.encodeWithSignature("withdrawAllNativeCommission()");
 
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = block.timestamp + 1 days;
-        bytes[] memory noSigs = new bytes[](0); // guard reverts before sig checks
-
         for (uint256 i = 0; i < callDatas.length; i++) {
-            vm.expectRevert(
-                abi.encodeWithSelector(IMultisigProxy.ForbiddenCommissionManagerSelector.selector, bytes4(callDatas[i]))
-            );
-            proxy.proposeAdminExecuteCommissionManager(callDatas[i], nonce, deadline, 0, noSigs);
+            _assertGenericPathsRejectSelector(callDatas[i], IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
         }
     }
 
