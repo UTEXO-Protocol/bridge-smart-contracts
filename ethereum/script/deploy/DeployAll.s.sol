@@ -130,8 +130,8 @@ contract DeployAll is Script {
             "set both ETH_USD_MIN_PRICE and ETH_USD_MAX_PRICE, or neither"
         );
         require(ethUsdMaxPrice == 0 || ethUsdMinPrice < ethUsdMaxPrice, "ETH_USD_MIN_PRICE must be below MAX");
-        // R-I-14: enabling the NATIVE oracle path requires the full Arbitrum
-        // hardening configuration. There is no production opt-out.
+        // Enabling the NATIVE oracle path requires the full Arbitrum hardening
+        // configuration. There is no production opt-out.
         if (ethUsdFeed != address(0)) {
             require(ethUsdHb != 0, "ETH_USD_HEARTBEAT must be set when ETH_USD_FEED is provided");
             require(seqFeed != address(0), "hardening: SEQUENCER_UPTIME_FEED must be set");
@@ -187,7 +187,7 @@ contract DeployAll is Script {
         bridge.setOutflowLimit(initialSrcChain, initialChainBurstBps, initialChainRefillBps);
         bridge.setGlobalOutflowLimit(globalBurstBps, globalRefillBps);
 
-        // ---- 8. Wire R-I-14 dependencies before enabling ETH/USD quotes ----
+        // ---- 8. Wire oracle dependencies before enabling ETH/USD quotes ----
         if (seqFeed != address(0)) {
             cm.setSequencerUptimeFeed(seqFeed);
         }

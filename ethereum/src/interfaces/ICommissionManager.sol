@@ -212,9 +212,9 @@ interface ICommissionManager {
     /// @notice Credit `credited` token units to the commission pool. The Bridge
     ///         measures `credited` as the actual balance increase of this
     ///         contract around its `safeTransfer` (so a fee-on-transfer token is
-    ///         handled and no pre-existing/unsolicited balance is absorbed,
-    ///         R-I-04). Reverts if the resulting pool would exceed the on-chain
-    ///         balance. Callable only by the Bridge.
+    ///         handled and no pre-existing/unsolicited balance is absorbed).
+    ///         Reverts if the resulting pool would exceed the on-chain balance.
+    ///         Callable only by the Bridge.
     function receiveTokenCommission(address token, uint256 credited) external;
 
     /// @notice Native commission ingress; only `bridgeAddress` may call with non-zero value (see implementation).

@@ -19,7 +19,7 @@ contract RGBVerifierTest is Test {
     uint256 constant AMOUNT = 100e18;
     uint256 constant BURN_ID = 9_001;
 
-    // Default verifier thresholds (audit R-W-06 production values).
+    // Default production verifier thresholds.
     uint256 constant MIN_SOURCE_CONF = 6;
     uint256 constant MAX_LATEST_CONF = 1;
     uint256 constant MIN_GAP = 5;
@@ -94,7 +94,7 @@ contract RGBVerifierTest is Test {
     }
 
     // =========================================================================
-    // verify — confirmation-depth invariants (the R-W-06 fix)
+    // verify — confirmation-depth invariants
     // =========================================================================
 
     function test_verify_revertsWhenSourceTooShallow() public {

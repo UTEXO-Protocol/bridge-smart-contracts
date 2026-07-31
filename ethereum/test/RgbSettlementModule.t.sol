@@ -9,8 +9,8 @@ import {FundsInContext, FundsOutContext} from "../src/interfaces/RouteTypes.sol"
 /// @notice Unit tests for the standalone settlement module. The module is
 ///         driven via `vm.prank(routeRegistry)` — no actual `RouteRegistry`.
 ///
-/// @dev    Release semantics under test (post R-C-01 rework): `beforeFundsOut`
-///         is a pure (view) proof-of-mint check. It decodes
+/// @dev    Release semantics under test: `beforeFundsOut` is a pure (view)
+///         proof-of-mint check. It decodes
 ///         `(bytes32[] operationIds, uint256[] amounts)`. Physical releases
 ///         require at least one pair; accounting-only rebalances may be empty.
 ///         Every supplied id must EXIST in `fundsInRecords` with an EXACTLY
