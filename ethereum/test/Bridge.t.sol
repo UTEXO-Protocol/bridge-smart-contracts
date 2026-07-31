@@ -1142,6 +1142,26 @@ contract BridgeTest is Test {
     // but surfaced through Bridge)
     // ========================================================================
 
+    function test_fundsOutRejectsEmptySettlementRecords() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _ensureRgbSafetyCapacity(AMOUNT);
+
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlementWithAmounts(new bytes32[](0), new uint256[](0));
+        uint256 burnId =
+            _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);
+        uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+
+        vm.expectRevert(RgbSettlementModule.EmptySettlementRecords.selector);
+        vm.prank(multisig);
+        _fundsOutWithBurnId(recipient, AMOUNT, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);
+
+        assertFalse(bridge.consumedBurnIds(burnId), "reverted release does not consume burn id");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore, "reverted release does not debit liquidity");
+        assertEq(usdt0.balanceOf(recipient), 0, "reverted release transfers no tokens");
+    }
+
     function test_fundsOut_revertsOnUnknownFundsInId() public {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());

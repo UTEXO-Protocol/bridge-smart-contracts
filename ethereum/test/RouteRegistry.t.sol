@@ -78,7 +78,8 @@ contract RouteRegistryTest is Test {
             burnId: 9_001,
             sourceChainId: SOURCE_CHAIN_ID,
             destChainId: DEST_CHAIN_ID,
-            sourceAddress: "rgb:sender/utxo1src"
+            sourceAddress: "rgb:sender/utxo1src",
+            isRebalance: false
         });
     }
 

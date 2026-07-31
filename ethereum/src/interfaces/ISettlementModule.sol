@@ -35,11 +35,11 @@ interface ISettlementModule {
     ///                       canonical key is `ctx.operationId`.
     function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData) external returns (uint256 externalId);
 
-    /// @notice Hook invoked by `RouteRegistry.beforeFundsOut` *before* Bridge
-    ///         releases funds. The module performs any route-specific state
-    ///         updates needed to authorise the release (e.g. consumes the
-    ///         referenced RGB `fundsInIds`). Reverts if the release is not
-    ///         valid for this module's accounting view.
+    /// @notice Hook invoked by `RouteRegistry.beforeFundsOut` before a physical
+    ///         Bridge release or the debit leg of an accounting-only rebalance.
+    ///         The module performs any route-specific validation or state
+    ///         updates needed to authorise the operation. `ctx.isRebalance`
+    ///         distinguishes the two authenticated Bridge call sites.
     /// @param ctx            Canonical fundsOut context built by Bridge.
     /// @param settlementData Opaque per-route data supplied by the caller;
     ///                       layout defined by the module itself.

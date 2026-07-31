@@ -48,7 +48,8 @@ contract RGBVerifierTest is Test {
             burnId: BURN_ID,
             sourceChainId: SOURCE_CHAIN_ID,
             destChainId: DEST_CHAIN_ID,
-            sourceAddress: "rgb:sender/utxo1src"
+            sourceAddress: "rgb:sender/utxo1src",
+            isRebalance: false
         });
     }
 

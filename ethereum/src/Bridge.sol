@@ -527,7 +527,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
                 burnId: fundsOutParams.burnId,
                 sourceChainId: fundsOutParams.sourceChainId,
                 destChainId: fundsOutParams.destinationChainId,
-                sourceAddress: fundsOutParams.sourceAddress
+                sourceAddress: fundsOutParams.sourceAddress,
+                isRebalance: false
             }),
                 fundsOutParams.proof,
                 fundsOutParams.settlementData
@@ -636,7 +637,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
                 burnId: params.burnId,
                 sourceChainId: params.sourceChainId,
                 destChainId: params.destinationChainId,
-                sourceAddress: params.sourceAddress
+                sourceAddress: params.sourceAddress,
+                isRebalance: true
             }),
                 params.proof,
                 params.settlementDataOut
