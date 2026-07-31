@@ -73,6 +73,7 @@ interface IMultisigProxy {
     error UnknownOperationType();
     error ZeroTarget();
     error ForbiddenCommissionManagerSelector(bytes4 selector);
+    error ForbiddenBridgeReleaseSelector(bytes4 selector);
     error LZAdapterNotSet();
     error InvalidLZAdapter();
 
@@ -235,7 +236,11 @@ interface IMultisigProxy {
     // Federation propose (Phase 1 — timelock)
     // =========================================================================
 
-    /// @notice Propose an arbitrary Bridge call (forwarded via bridge.call).
+    /// @notice Propose a permitted administrative Bridge call (forwarded via
+    ///         `bridge.call`).
+    /// @dev `Bridge.fundsOut` and `Bridge.rebalanceLiquidity` are forbidden:
+    ///      value-moving operations must use the typed enclave-authorized
+    ///      `fundsOutCall`, `lzFundsOutCall`, or `rebalanceCall` entrypoints.
     /// @dev opData = raw ABI-encoded bridge callData (selector + args).
     function proposeAdminExecute(
         bytes calldata callData,
