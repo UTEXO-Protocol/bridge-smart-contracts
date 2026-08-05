@@ -68,6 +68,11 @@ struct FundsInContext {
 /// @param sourceChainId      Source chain id.
 /// @param destChainId        Destination chain id (this chain, in practice).
 /// @param sourceAddress      Sender address on the source chain.
+/// @param isRebalance        `true` only for the accounting-only debit leg of
+///                           `Bridge.rebalanceLiquidity`; `false` for a
+///                           physical `Bridge.fundsOut` token release. The
+///                           Bridge constructs this value and RouteRegistry
+///                           authenticates the Bridge as its caller.
 struct FundsOutContext {
     address token;
     address recipient;
@@ -76,6 +81,7 @@ struct FundsOutContext {
     uint256 sourceChainId;
     uint256 destChainId;
     string sourceAddress;
+    bool isRebalance;
 }
 
 /// @notice Per-route configuration stored in `RouteRegistry`.

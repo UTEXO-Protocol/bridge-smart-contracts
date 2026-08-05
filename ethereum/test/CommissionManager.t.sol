@@ -60,8 +60,8 @@ contract CommissionManagerTest is Test {
         vm.prank(owner);
         cm.setGlobalDefaults(0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
-        // Install a complete healthy Arbitrum oracle config. R-I-14 makes the
-        // sequencer feed and price band mandatory whenever a non-zero NATIVE
+        // Install a complete healthy Arbitrum oracle config. The sequencer feed
+        // and price band are mandatory whenever a non-zero NATIVE
         // quote consumes ETH/USD.
         ethUsdFeed = new MockAggregatorV3(FEED_DECIMALS, DEFAULT_ETH_USD, block.timestamp);
         sequencerFeed = new MockAggregatorV3(0, 0, block.timestamp - cm.SEQUENCER_GRACE_PERIOD() - 1);
@@ -184,8 +184,8 @@ contract CommissionManagerTest is Test {
 
     function test_setGlobalDefaults_updatesAndEmits() public {
         // FUNDS_IN + NATIVE is a valid shape (the user funds the native fee on
-        // deposit). NATIVE + FUNDS_OUT is rejected by the setter (R-W-04) and is
-        // covered by a dedicated revert test.
+        // deposit). NATIVE + FUNDS_OUT is rejected by the setter and is covered
+        // by a dedicated revert test.
         vm.expectEmit(true, true, true, true);
         emit GlobalDefaultsUpdated(200, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
         vm.prank(owner);
@@ -225,7 +225,7 @@ contract CommissionManagerTest is Test {
         cm.setGlobalDefaults(400, 0, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
-    /// @dev UT-FIX-07: setGlobalDefaults rejects the NATIVE + FUNDS_OUT shape.
+    /// @dev setGlobalDefaults rejects the NATIVE + FUNDS_OUT shape.
     function test_setGlobalDefaults_revertsNativeFundsOut() public {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.NativeCommissionNotAllowedOnFundsOut.selector);
@@ -442,7 +442,7 @@ contract CommissionManagerTest is Test {
         cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
     }
 
-    /// @dev UT-FIX-07: setCommissionRule rejects the NATIVE + FUNDS_OUT shape.
+    /// @dev setCommissionRule rejects the NATIVE + FUNDS_OUT shape.
     function test_setCommissionRule_revertsNativeFundsOut() public {
         address t = address(token);
         CommissionConfig memory cfg = CommissionConfig({
@@ -475,7 +475,7 @@ contract CommissionManagerTest is Test {
         assertEq(uint8(stored.currency), uint8(CommissionCurrency.TOKEN));
     }
 
-    // --- Fee-shape invariant (R-W-03 / UT-FIX-06) -----------------------------
+    // --- Fee-shape invariant --------------------------------------------------
     //
     // The stable-fee formula is `amount * stablePercent / multiplier / multiplier`,
     // i.e. a fee fraction of `stablePercent / multiplier^2`. If `stablePercent`
@@ -496,7 +496,7 @@ contract CommissionManagerTest is Test {
         cm.setGlobalDefaults(101, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
-    /// @dev I-08: the exact boundary is a 100% fee and must be rejected too.
+    /// @dev The exact boundary is a 100% fee and must be rejected too.
     function test_setGlobalDefaults_revertsFeeShapeAtExactBoundary() public {
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(100), uint8(10)));
@@ -531,7 +531,7 @@ contract CommissionManagerTest is Test {
         cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
     }
 
-    /// @dev I-08: per-route rules also reject the exact 100% boundary.
+    /// @dev Per-route rules also reject the exact 100% boundary.
     function test_setCommissionRule_revertsFeeShapeAtExactBoundary() public {
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 100,
@@ -562,14 +562,14 @@ contract CommissionManagerTest is Test {
     }
 
     /// @dev Direct regression for the auditor's `8100 / 90^2 == 100%` PoC.
-    function test_R_I_08_rejectsAuditHundredPercentConfiguration() public {
+    function test_rejectsHundredPercentFeeConfiguration() public {
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(8100), uint8(90)));
         cm.setGlobalDefaults(8100, 90, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
     /// @dev A non-zero inbound fee policy cannot silently round to zero.
-    function test_R_I_08_fundsInActiveFeeRejectsCommissionFreeDust() public {
+    function test_fundsInActiveFeeRejectsCommissionFreeDust() public {
         vm.prank(owner);
         cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
@@ -582,7 +582,7 @@ contract CommissionManagerTest is Test {
     }
 
     /// @dev The same runtime invariant applies to outbound fee rules.
-    function test_R_I_08_fundsOutActiveFeeRejectsCommissionFreeDust() public {
+    function test_fundsOutActiveFeeRejectsCommissionFreeDust() public {
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 400,
             multiplier: 100,
@@ -603,7 +603,7 @@ contract CommissionManagerTest is Test {
 
     /// @dev A deliberately disabled fee remains valid; only active policies
     ///      promise a non-zero commission.
-    function test_R_I_08_zeroFeePolicyStillAllowsSmallAmount() public view {
+    function test_zeroFeePolicyStillAllowsSmallAmount() public view {
         (uint256 tokenFee, uint256 nativeFee, uint256 netAmount) =
             cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1);
         assertEq(tokenFee, 0);
@@ -649,8 +649,8 @@ contract CommissionManagerTest is Test {
         cm.receiveTokenCommission(address(token), 0);
     }
 
-    // After the R-I-04 fix the pool is credited by the passed `credited`, not by
-    // balanceOf - pool. Crediting more than the on-chain balance can back reverts
+    // The pool is credited by the passed `credited`, not by balanceOf - pool.
+    // Crediting more than the on-chain balance can back reverts
     // BalanceBelowRecordedPool (guards against over-crediting).
     function test_receiveTokenCommission_revertsWhenCreditExceedsBalance() public {
         token.mint(address(cm), 5 ether);
@@ -659,10 +659,10 @@ contract CommissionManagerTest is Test {
         cm.receiveTokenCommission(address(token), 6 ether);
     }
 
-    // R-I-04 after-fix: an unsolicited direct transfer already sitting in the CM
-    // is NOT folded into the pool. The Bridge measures only its own transfer and
+    // An unsolicited direct transfer already sitting in the CM is NOT folded
+    // into the pool. The Bridge measures only its own transfer and
     // passes that as `credited`; the donation stays as a stray balance.
-    function test_receiveTokenCommission_doesNotAbsorbUnsolicitedBalance_afterFix() public {
+    function test_receiveTokenCommission_doesNotAbsorbUnsolicitedBalance() public {
         uint256 unsolicitedAmount = 3 ether;
         uint256 legitimateAmount = 7 ether;
 

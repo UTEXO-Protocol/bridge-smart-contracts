@@ -9,13 +9,14 @@ import {FundsInContext, FundsOutContext} from "../src/interfaces/RouteTypes.sol"
 /// @notice Unit tests for the standalone settlement module. The module is
 ///         driven via `vm.prank(routeRegistry)` — no actual `RouteRegistry`.
 ///
-/// @dev    Release semantics under test (post R-C-01 rework): `beforeFundsOut`
-///         is a pure (view) proof-of-mint check. It decodes
-///         `(uint256[] operationIds, uint256[] amounts)` and asserts every id
-///         EXISTS in `fundsInRecords` with an EXACTLY matching amount. It does
-///         NOT consume/delete records, does NOT sum them, and does NOT compare
-///         against `ctx.amount` — solvency and replay are owned by the Bridge
-///         (`lockedLiquidity` / `consumedBurnIds`).
+/// @dev    Release semantics under test: `beforeFundsOut` is a pure (view)
+///         proof-of-mint check. It decodes
+///         `(bytes32[] operationIds, uint256[] amounts)`. Physical releases
+///         require at least one pair; accounting-only rebalances may be empty.
+///         Every supplied id must EXIST in `fundsInRecords` with an EXACTLY
+///         matching amount. The module does NOT consume/delete records, sum
+///         them, or compare against `ctx.amount` — solvency and replay are owned
+///         by the Bridge (`lockedLiquidity` / `consumedBurnIds`).
 contract RgbSettlementModuleTest is Test {
     RgbSettlementModule module;
 
@@ -89,7 +90,8 @@ contract RgbSettlementModuleTest is Test {
             burnId: BURN_ID,
             sourceChainId: rgbChainId,
             destChainId: EVM_CHAIN_ID,
-            sourceAddress: "rgb:sender/utxo1src"
+            sourceAddress: "rgb:sender/utxo1src",
+            isRebalance: false
         });
     }
 
@@ -184,7 +186,7 @@ contract RgbSettlementModuleTest is Test {
     // beforeFundsOut — happy paths (existence + exact-amount, no consumption)
     // ========================================================================
 
-    function test_beforeFundsOut_passesOnSingleExactMatch() public {
+    function test_beforeFundsOut_acceptsOneValidPair() public {
         _record(TX_ID_1, AMOUNT);
 
         vm.prank(routeRegistry);
@@ -207,10 +209,18 @@ contract RgbSettlementModuleTest is Test {
         assertEq(module.fundsInRecords(TX_ID_2), amount2, "record 2 intact");
     }
 
-    function test_beforeFundsOut_passesOnEmptyArrays() public {
-        // Degenerate input: nothing to verify, nothing to revert on.
+    function test_beforeFundsOut_revertsOnEmptyArrays() public {
         vm.prank(routeRegistry);
+        vm.expectRevert(RgbSettlementModule.EmptySettlementRecords.selector);
         module.beforeFundsOut(_fundsOutCtx(), _settlementData(new bytes32[](0), new uint256[](0)));
+    }
+
+    function test_beforeFundsOut_allowsEmptyArraysForAccountingOnlyRebalance() public {
+        FundsOutContext memory ctx = _fundsOutCtx();
+        ctx.isRebalance = true;
+
+        vm.prank(routeRegistry);
+        module.beforeFundsOut(ctx, _settlementData(new bytes32[](0), new uint256[](0)));
     }
 
     function test_beforeFundsOut_duplicateIdsAreHarmless() public {
@@ -270,13 +280,18 @@ contract RgbSettlementModuleTest is Test {
         module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), _amt(AMOUNT - 1)));
     }
 
-    function test_beforeFundsOut_revertsOnLengthMismatch() public {
-        _record(TX_ID_1, AMOUNT);
-
-        // Two ids but one amount.
+    function test_beforeFundsOut_revertsWhenOperationIdsEmpty() public {
         vm.prank(routeRegistry);
         vm.expectRevert(RgbSettlementModule.SettlementDataLengthMismatch.selector);
-        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_pair(TX_ID_1, TX_ID_2), _amt(AMOUNT)));
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(new bytes32[](0), _amt(AMOUNT)));
+    }
+
+    function test_beforeFundsOut_revertsWhenAmountsEmpty() public {
+        _record(TX_ID_1, AMOUNT);
+
+        vm.prank(routeRegistry);
+        vm.expectRevert(RgbSettlementModule.SettlementDataLengthMismatch.selector);
+        module.beforeFundsOut(_fundsOutCtx(), _settlementData(_single(TX_ID_1), new uint256[](0)));
     }
 
     function test_beforeFundsOut_revertsOnSecondIdMismatch() public {
