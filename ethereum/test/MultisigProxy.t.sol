@@ -31,7 +31,7 @@ import {EmergencyPause} from "../script/interact/EmergencyPause.s.sol";
 import {EmergencyUnpause} from "../script/interact/EmergencyUnpause.s.sol";
 
 /// @dev Exposes the exact nonce/digest preparation used by the production
-///      scripts so R-I-09 tests cannot pass against a duplicated implementation.
+///      scripts so tests cannot pass against a duplicated implementation.
 contract EmergencyPauseHarness is EmergencyPause {
     function prepare(MultisigProxy proxy, uint256 deadline) external view returns (uint256 nonce, bytes32 digest) {
         return _prepareEmergencyPause(proxy, deadline);
@@ -541,9 +541,9 @@ contract MultisigProxyTest is Test {
         );
     }
 
-    // ---- R-W-11: MIN_TIMELOCK floor (post-fix) ----
+    // ---- MIN_TIMELOCK floor ----
 
-    /// @dev UT-FIX-13: deploying with a timelock below the requested floor reverts.
+    /// @dev Deploying with a timelock below the requested floor reverts.
     function test_constructor_revertsOnTimelockBelowMinTimelock() public {
         // timelock (1h) is below the requested floor (2h) -> TimelockTooShort
         vm.expectRevert(IMultisigProxy.TimelockTooShort.selector);
@@ -588,7 +588,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Strict-majority signer threshold floor (R-W-12 / UT-FIX-14)
+    // Strict-majority signer threshold floor
     //
     // Both signer sets, at construction and on signer-update, must be a strict
     // majority of at least 2 signers: n >= 2, threshold >= 2, threshold <= n,
@@ -687,7 +687,7 @@ contract MultisigProxyTest is Test {
     // ---- Intrinsic set validation runs at propose time ----
     // (empty / zero-address / duplicate paths; threshold and MAX_SIGNERS are
     //  covered by the *AtPropose tests above. Disjointness stays deferred to
-    //  execute — see the R-W-14 *OverlapWith*AtExecute tests.)
+    //  execute — see the *OverlapWith*AtExecute tests.)
 
     function test_proposeUpdateEnclaveSigners_rejectsEmptySetAtPropose() public {
         address[] memory newSigners = new address[](0);
@@ -790,7 +790,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Disjoint signer sets (R-W-14 / UT-FIX-16)
+    // Disjoint signer sets
     //
     // The enclave and federation sets must not share an address, at construction
     // and on signer-update (validated at executeProposal). The setUp sets are
@@ -862,7 +862,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Signer-set size cap (R-I-06 / UT-FIX-27)
+    // Signer-set size cap
     //
     // Either set is capped at MAX_SIGNERS, at construction and on signer-update
     // (validated in _validateSigners at executeProposal). The cap bounds the
@@ -953,7 +953,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // TEE deadline upper bound (R-I-01 / UT-FIX-23)
+    // TEE deadline upper bound
     //
     // fundsOutCall / lzFundsOutCall reject a signed deadline further than
     // MAX_TEE_DEADLINE into the future, so a leaked or pre-signed payload cannot
@@ -1288,13 +1288,13 @@ contract MultisigProxyTest is Test {
         assertFalse(bridge.paused());
     }
 
-    /// @dev R-I-09 known-answer regression for the production pause script.
+    /// @dev Known-answer regression for the production pause script.
     ///      A regular proposal first advances only `proposalNonce`, reproducing
     ///      the state in which the old script selected the wrong nonce lane.
-    function test_R_I_09_emergencyPauseScriptUsesEmergencyNonceAfterLanesDiverge() public {
+    function test_emergencyPauseScriptUsesEmergencyNonceAfterLanesDiverge() public {
         uint256 regularNonce = proxy.proposalNonce();
         uint256 regularDeadline = block.timestamp + 1 days;
-        address newBridge = makeAddr("ri09-pause-regular-proposal");
+        address newBridge = makeAddr("emergency-pause-regular-proposal");
         bytes32 regularDigest =
             MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, regularNonce, regularDeadline);
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
@@ -1331,9 +1331,9 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.proposalNonce(), 1, "regular lane unchanged");
     }
 
-    /// @dev R-I-09 known-answer regression for the production unpause script.
+    /// @dev Known-answer regression for the production unpause script.
     ///      Both lanes are deliberately non-equal before digest construction.
-    function test_R_I_09_emergencyUnpauseScriptUsesEmergencyNonceAfterLanesDiverge() public {
+    function test_emergencyUnpauseScriptUsesEmergencyNonceAfterLanesDiverge() public {
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
 
         uint256 pauseNonce = proxy.emergencyNonce();
@@ -1346,7 +1346,7 @@ contract MultisigProxyTest is Test {
         for (uint256 i = 0; i < 2; i++) {
             uint256 regularNonce = proxy.proposalNonce();
             uint256 regularDeadline = block.timestamp + 1 days;
-            address newBridge = makeAddr(string.concat("ri09-unpause-regular-proposal-", vm.toString(i)));
+            address newBridge = makeAddr(string.concat("emergency-unpause-regular-proposal-", vm.toString(i)));
             bytes32 regularDigest =
                 MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, regularNonce, regularDeadline);
             proxy.proposeUpdateBridge(
@@ -1375,11 +1375,11 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // R-W-05 — two-tier pause (integration via MultisigProxy)
+    // Two-tier pause (integration via MultisigProxy)
     // ========================================================================
 
-    /// @dev After R-W-05, the no-timelock emergency pause freezes the OUTFLOW
-    ///      path too — including the enclave/TEE release, which routes through
+    /// @dev The no-timelock emergency pause freezes the OUTFLOW path too —
+    ///      including the enclave/TEE release, which routes through
     ///      Bridge.fundsOut. A signed fundsOut executed straight after
     ///      emergencyPause must revert OutflowEnforcedPause, and inbound deposits
     ///      must be frozen as well.
@@ -1603,9 +1603,9 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.timelockDuration(), newDuration);
     }
 
-    /// @dev UT-FIX-13: a SetTimelockDuration proposal below the immutable
-    ///      MIN_TIMELOCK floor is rejected at execution; the floor holds.
-    function test_proposeSetTimelockDuration_revertsBelowMinTimelock_afterFix() public {
+    /// @dev A SetTimelockDuration proposal below the immutable MIN_TIMELOCK
+    ///      floor is rejected at execution; the floor holds.
+    function test_proposeSetTimelockDuration_revertsBelowMinTimelock() public {
         uint256 t = block.timestamp;
         uint256 newDuration = MIN_TIMELOCK - 1; // just under the floor
         uint256 nonce = proxy.proposalNonce();
@@ -1625,7 +1625,7 @@ contract MultisigProxyTest is Test {
     }
 
     /// @dev A value exactly at MIN_TIMELOCK is still accepted (boundary).
-    function test_proposeSetTimelockDuration_acceptsAtMinTimelock_afterFix() public {
+    function test_proposeSetTimelockDuration_acceptsAtMinTimelock() public {
         uint256 t = block.timestamp;
         uint256 newDuration = MIN_TIMELOCK; // exactly the floor
         uint256 nonce = proxy.proposalNonce();
@@ -1662,6 +1662,39 @@ contract MultisigProxyTest is Test {
         proxy.executeProposal(id, callData);
 
         assertTrue(bridge.paused());
+    }
+
+    /// @dev Assert that a protected selector is rejected before federation
+    ///      signature verification on every generic raw-call lane. Applying
+    ///      each policy selector-wide closes mutable-target aliasing.
+    function _assertGenericPathsRejectSelector(bytes memory callData, bytes4 errorSelector) internal {
+        bytes4 selector = bytes4(callData);
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes[] memory noSigs = new bytes[](0);
+        bytes memory expected = abi.encodeWithSelector(errorSelector, selector);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecute(callData, nonce, deadline, 0, noSigs);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecuteCommissionManager(callData, nonce, deadline, 0, noSigs);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecuteRouteRegistry(callData, nonce, deadline, 0, noSigs);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, 0, noSigs);
+    }
+
+    function test_federationGenericPathsCannotCallFundsOut() public {
+        bytes memory callData = abi.encodeCall(IBridge.fundsOut, (_fundsOutParams()));
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
+    }
+
+    function test_federationGenericPathsCannotCallRebalanceLiquidity() public {
+        bytes memory callData = abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams()));
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
     }
 
     // ========================================================================
@@ -2168,14 +2201,14 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Domain separator rebuild on chain-id change (R-W-13 / UT-FIX-15)
+    // Domain separator rebuild on chain-id change
     //
     // The separator is cached at deploy with the chain id. After a chain-id
     // change (e.g. a hard fork) it is rebuilt, so a signature made before the
     // fork no longer verifies on the forked chain (no cross-fork replay).
     // ========================================================================
 
-    function test_domainSeparator_rebuiltOnChainIdChange_afterFix() public {
+    function test_domainSeparator_rebuiltOnChainIdChange() public {
         uint256 originalChainId = block.chainid;
         bytes32 dsBefore = proxy.DOMAIN_SEPARATOR();
         assertEq(dsBefore, MultisigHelper.domainSeparator(address(proxy), originalChainId), "cached on original chain");
@@ -2188,7 +2221,7 @@ contract MultisigProxyTest is Test {
         assertEq(dsAfter, MultisigHelper.domainSeparator(address(proxy), forkedChainId), "rebuilt over new chain id");
     }
 
-    function test_fundsOutCallSignatureNotReplayableAfterChainIdChange_afterFix() public {
+    function test_fundsOutCallSignatureNotReplayableAfterChainIdChange() public {
         // Sign a valid TEE fundsOut on the original chain (domainSep was cached
         // at setUp for block.chainid).
         IBridge.FundsOutParams memory params = _fundsOutParams();
@@ -2714,7 +2747,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // R-M-03 / UT-FIX-05 — typed enclave methods are the only TEE entry points
+    // Typed enclave methods are the only TEE entry points
     //
     // The generic enclave `execute`/`executeBatch` + `teeAllowedCalls` allowlist
     // were removed. The enclave (TEE) quorum can now only trigger Bridge.fundsOut
@@ -2724,7 +2757,7 @@ contract MultisigProxyTest is Test {
     // function: enclave signatures over an admin-execute proposal are rejected.
     // ========================================================================
 
-    function test_enclaveKeysCannotDriveAdminExecute_afterFix() public {
+    function test_enclaveKeysCannotDriveAdminExecute() public {
         // A privileged call the TEE quorum might want to smuggle through.
         bytes memory callData = abi.encodeWithSignature("pauseInflow()");
         uint256 nonce = proxy.proposalNonce();
@@ -2745,7 +2778,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // R-W-16 / UT-FIX-18 — lzFundsOutCall binds the release and send-out legs
+    // lzFundsOutCall binds the release and send-out legs
     //
     // Flow-4 release and the cross-chain send are bound on-chain in one signed
     // operation: the Bridge recipient is forced to the adapter (no params field
@@ -2755,7 +2788,7 @@ contract MultisigProxyTest is Test {
     // (net delivered) amount from the signed gross amount.
     // ========================================================================
 
-    function test_lzFundsOutCall_sendsNetDeliveredNotGross_afterFix() public {
+    function test_lzFundsOutCall_sendsNetDeliveredNotGross() public {
         // 5% FUNDS_OUT token commission so gross (AMOUNT) != net (delivered).
         vm.prank(address(proxy));
         cm.setCommissionRule(
@@ -2806,7 +2839,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // C-01 immutable TVL-relative safety limit
+    // Immutable TVL-relative safety limit
     // ========================================================================
 
     /// @dev buckets are set to a maximum-total policy, the pool is fully funded, and
@@ -2868,7 +2901,7 @@ contract MultisigProxyTest is Test {
     ///      first spend is still retained by the conservative rolling window.
     ///      The second release may consume the immutable remainder, but a third
     ///      valid 2-of-3 signed transaction cannot exceed the rolling 20% cap.
-    function test_C01_splitTransactionsCannotExceedAggregateRollingLimit() public {
+    function test_splitTransactionsCannotExceedAggregateRollingLimit() public {
         // Align to an hour boundary so the ring's 24-25h retention is exact
         // relative to the releases below rather than to an arbitrary offset.
         vm.warp((block.timestamp / 1 hours + 1) * 1 hours);
@@ -2942,12 +2975,12 @@ contract MultisigProxyTest is Test {
         proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
     }
 
-    /// @dev C-01 remaining issue, configuration side: a full-TVL bucket is not
-    ///      merely rejected against current liquidity, it is unrepresentable.
+    /// @dev A full-TVL bucket is not merely rejected against current liquidity;
+    ///      it is unrepresentable.
     ///      The policy is a percentage, and `burstBps + refillBpsPerWindow` is
     ///      bounded by the immutable `MAX_CHAIN_OUTFLOW_BPS`, so there is no
     ///      liquidity level at which this proposal would ever succeed.
-    function test_C01_federationCannotConfigureChainBucketForFullTvl() public {
+    function test_federationCannotConfigureChainBucketForFullTvl() public {
         uint256 fullTvlBps = bridge.BPS_DENOMINATOR(); // 10_000 bps == 100% of TVL
         uint256 maxBps = bridge.MAX_CHAIN_OUTFLOW_BPS();
         uint256 availableBefore = bridge.availableOutflow(RGB_CHAIN_ID);
@@ -3015,7 +3048,7 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.enclaveThreshold(RGB_CHAIN_ID), newThreshold, "post enclave threshold");
     }
 
-    function test_proposalUsesSnapshottedTimelock_afterFix() public {
+    function test_proposalUsesSnapshottedTimelock() public {
         uint256 proposedAt = block.timestamp;
         address newBridge = makeAddr("snapshotTimelockBridge");
         uint256 newDuration = 2 hours; // raise above the 1h in force at creation
@@ -3054,10 +3087,9 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.bridge(), newBridge, "snapshotted proposal executes despite the live timelock raise");
     }
 
-    // R-I-09 after-fix: emergency actions run on a separate `emergencyNonce`, so
-    // an emergency pause does NOT stale an already-signed regular proposal — the
-    // pre-signed proposal still submits.
-    function test_emergencyDoesNotStaleRegularProposal_afterFix() public {
+    // Emergency actions run on a separate `emergencyNonce`, so an emergency
+    // pause does NOT stale an already-signed regular proposal.
+    function test_emergencyDoesNotStaleRegularProposal() public {
         address newBridge = makeAddr("nonceCollisionBridge");
         uint256 regularNonce = proxy.proposalNonce();
         uint256 regularDeadline = block.timestamp + 1 days;
@@ -3091,7 +3123,7 @@ contract MultisigProxyTest is Test {
     // transferOwnership, but Ownable2Step only records a pendingOwner. A wrong
     // non-zero address never becomes owner, so governance is not orphaned and
     // the proxy keeps driving owner-only operations.
-    function test_ownershipTransferToWrongAddressDoesNotOrphanGovernance_afterFix() public {
+    function test_ownershipTransferToWrongAddressDoesNotOrphanGovernance() public {
         address wrongOwner = makeAddr("wrongBridgeOwner");
         uint256 startTime = block.timestamp;
 
@@ -3175,30 +3207,23 @@ contract MultisigProxyTest is Test {
 
     // Standard CM withdrawals stay on the dedicated typed operations. Recipient
     // safety no longer depends on this blocklist: CM enforces it immutably.
-    function test_adminExecuteCommissionManager_rejectsWithdrawSelectors_afterFix() public {
+    function test_genericPathsRejectCommissionWithdrawSelectors() public {
         bytes[] memory callDatas = new bytes[](4);
         callDatas[0] = abi.encodeWithSignature("withdrawTokenCommission(address,uint256)", address(token), uint256(1));
         callDatas[1] = abi.encodeWithSignature("withdrawNativeCommission(uint256)", uint256(1));
         callDatas[2] = abi.encodeWithSignature("withdrawAllTokenCommission(address)", address(token));
         callDatas[3] = abi.encodeWithSignature("withdrawAllNativeCommission()");
 
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = block.timestamp + 1 days;
-        bytes[] memory noSigs = new bytes[](0); // guard reverts before sig checks
-
         for (uint256 i = 0; i < callDatas.length; i++) {
-            vm.expectRevert(
-                abi.encodeWithSelector(IMultisigProxy.ForbiddenCommissionManagerSelector.selector, bytes4(callDatas[i]))
-            );
-            proxy.proposeAdminExecuteCommissionManager(callDatas[i], nonce, deadline, 0, noSigs);
+            _assertGenericPathsRejectSelector(callDatas[i], IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
         }
     }
 
-    // R-W-15 / alternate-target regression: even if governance aliases the LZ
-    // adapter target to CM and transfers CM ownership through that unfiltered
+    // Alternate-target regression: even if governance aliases the LZ adapter
+    // target to CM and transfers CM ownership through that unfiltered
     // raw-call path, the new owner cannot choose a withdrawal recipient. The
     // asset layer always sends commission to CM's immutable recipient.
-    function test_R_W_15_adapterAliasTransferredOwnerCannotRedirectCommission() public {
+    function test_adapterAliasTransferredOwnerCannotRedirectCommission() public {
         _setLzAdapter(address(cm));
 
         uint256 amount = 10 ether;

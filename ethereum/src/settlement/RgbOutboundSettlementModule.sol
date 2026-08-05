@@ -26,14 +26,15 @@ import {RgbSettlementModule} from "./RgbSettlementModule.sol";
 ///      auth needed on the target) instead of duplicating storage.
 ///
 ///      Hook semantics:
-///        - `beforeFundsOut`: identical existence + exact-amount + same-network
-///          verification as `RgbSettlementModule.beforeFundsOut` (same
-///          `settlementData` layout, `abi.encode(bytes32[] operationIds,
-///          uint256[] amounts)`), evaluated against the wrapped module's ledger,
-///          including its `fundsInRecordChainIds` network tag vs
-///          `ctx.sourceChainId`. Pure reads — no consumption, matching the
-///          canonical release semantics (solvency is owned by
-///          `Bridge.lockedLiquidity`, replay by `Bridge.consumedBurnIds`).
+///        - `beforeFundsOut`: requires at least one pair and performs the same
+///          existence + exact-amount + same-network verification as
+///          `RgbSettlementModule.beforeFundsOut` (same `settlementData` layout,
+///          `abi.encode(bytes32[] operationIds, uint256[] amounts)`), evaluated
+///          against the wrapped module's ledger, including its
+///          `fundsInRecordChainIds` network tag vs `ctx.sourceChainId`. Pure
+///          reads — no consumption, matching the canonical release semantics
+///          (solvency is owned by `Bridge.lockedLiquidity`, replay by
+///          `Bridge.consumedBurnIds`).
 ///        - `onFundsIn`: returns `0` and writes nothing. No record is created
 ///          (nothing was minted with a new OpId on the credit side) and Bridge
 ///          therefore emits no RGB-only `FundsIn` event for this leg.
@@ -71,6 +72,9 @@ contract RgbOutboundSettlementModule is ISettlementModule {
     /// @notice `beforeFundsOut` `settlementData` decoded to `operationIds` and
     ///         `amounts` arrays of different lengths.
     error SettlementDataLengthMismatch();
+
+    /// @notice The outbound RGB debit supplied no FundsIn accounting record.
+    error EmptySettlementRecords();
 
     // =========================================================================
     // Storage
@@ -127,9 +131,10 @@ contract RgbOutboundSettlementModule is ISettlementModule {
 
     /// @inheritdoc ISettlementModule
     /// @dev Same decoding and checks as `RgbSettlementModule.beforeFundsOut`,
-    ///      but against the wrapped module's ledger: every referenced
-    ///      `operationId` must exist there, with an exactly matching amount, and
-    ///      recorded for the release's `ctx.sourceChainId` RGB network.
+    ///      but against the wrapped module's ledger: at least one pair is
+    ///      required, and every referenced `operationId` must exist there, with
+    ///      an exactly matching amount, and recorded for the release's
+    ///      `ctx.sourceChainId` RGB network.
     function beforeFundsOut(FundsOutContext calldata ctx, bytes calldata settlementData)
         external
         view
@@ -139,6 +144,7 @@ contract RgbOutboundSettlementModule is ISettlementModule {
         (bytes32[] memory operationIds, uint256[] memory amounts) = abi.decode(settlementData, (bytes32[], uint256[]));
 
         if (operationIds.length != amounts.length) revert SettlementDataLengthMismatch();
+        if (operationIds.length == 0) revert EmptySettlementRecords();
 
         for (uint256 i = 0; i < operationIds.length; i++) {
             uint256 recorded = rgbModule.fundsInRecords(operationIds[i]);

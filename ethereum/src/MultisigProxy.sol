@@ -121,15 +121,24 @@ contract MultisigProxy is IMultisigProxy {
     ///         selector before it is sliced via `calldataload`.
     uint256 public constant SELECTOR_LENGTH = 4;
 
-    /// @notice CommissionManager withdrawal selectors that the generic
-    ///         `AdminExecuteCommissionManager` path is NOT allowed to call.
+    /// @notice CommissionManager withdrawal selectors that generic raw-call
+    ///         paths are NOT allowed to call.
     ///         The asset layer always pays CM's immutable recipient, while this
     ///         procedural guard keeps standard withdrawals on the dedicated,
-    ///         typed governance operations.
+    ///         typed governance operations. The guard is selector-wide so a
+    ///         mutable generic target cannot be aliased to CommissionManager.
     bytes4 private constant _SEL_WITHDRAW_TOKEN = ICommissionManager.withdrawTokenCommission.selector;
     bytes4 private constant _SEL_WITHDRAW_NATIVE = ICommissionManager.withdrawNativeCommission.selector;
     bytes4 private constant _SEL_WITHDRAW_ALL_TOKEN = ICommissionManager.withdrawAllTokenCommission.selector;
     bytes4 private constant _SEL_WITHDRAW_ALL_NATIVE = ICommissionManager.withdrawAllNativeCommission.selector;
+
+    /// @notice Bridge value-moving selectors reserved exclusively for the typed
+    ///         enclave entrypoints. They are rejected from EVERY generic raw-call
+    ///         lane, independent of its configured target, so aliasing a mutable
+    ///         CommissionManager / RouteRegistry / adapter target to Bridge cannot
+    ///         bypass the federation restriction.
+    bytes4 private constant _SEL_FUNDS_OUT = IBridge.fundsOut.selector;
+    bytes4 private constant _SEL_REBALANCE_LIQUIDITY = IBridge.rebalanceLiquidity.selector;
 
     uint256 private immutable _cachedChainId;
     bytes32 private immutable _cachedDomainSeparator;
@@ -380,7 +389,7 @@ contract MultisigProxy is IMultisigProxy {
     ///      in one signed operation. The Bridge recipient is forced to
     ///      `lzAdapter`, and the amount sent out is the balance actually
     ///      delivered to the adapter (measured here), so the two legs are bound
-    ///      on-chain and cannot be mismatched (R-W-16).
+    ///      on-chain and cannot be mismatched.
     function lzFundsOutCall(
         LzFundsOutParams calldata params,
         uint256 nonce,
@@ -534,6 +543,8 @@ contract MultisigProxy is IMultisigProxy {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
+        _requireAllowedGenericSelector(selector);
+
         bytes32 structHash =
             keccak256(abi.encode(_PROPOSE_ADMIN_EXECUTE_TYPEHASH, selector, keccak256(callData), nonce, deadline));
 
@@ -668,7 +679,7 @@ contract MultisigProxy is IMultisigProxy {
 
         // Standard withdrawals use the dedicated typed operations; reject them
         // on this generic path up front (recipient safety remains in CM).
-        _requireNotCommissionWithdrawSelector(selector);
+        _requireAllowedGenericSelector(selector);
 
         bytes32 structHash =
             keccak256(abi.encode(_PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, selector, keccak256(callData), nonce, deadline));
@@ -690,6 +701,8 @@ contract MultisigProxy is IMultisigProxy {
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
+
+        _requireAllowedGenericSelector(selector);
 
         bytes32 structHash = keccak256(
             abi.encode(_PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH, selector, keccak256(callData), nonce, deadline)
@@ -785,6 +798,8 @@ contract MultisigProxy is IMultisigProxy {
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
+
+        _requireAllowedGenericSelector(selector);
 
         bytes32 structHash = keccak256(
             abi.encode(_PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, selector, keccak256(callData), nonce, deadline)
@@ -1046,6 +1061,7 @@ contract MultisigProxy is IMultisigProxy {
     function _executeByType(OperationType opType, bytes calldata opData) private {
         if (opType == OperationType.AdminExecute) {
             // opData = raw bridge callData
+            _requireAllowedGenericSelector(_firstSelector(opData));
             (bool ok, bytes memory ret) = bridge.call(opData);
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.UpdateEnclaveSigners) {
@@ -1098,7 +1114,8 @@ contract MultisigProxy is IMultisigProxy {
             // opData = raw CommissionManager callData. Enforce (again, at the
             // execution boundary) that standard withdrawals use their typed
             // governance operations.
-            _requireNotCommissionWithdrawSelector(_firstSelector(opData));
+            bytes4 selector = _firstSelector(opData);
+            _requireAllowedGenericSelector(selector);
             (bool ok, bytes memory ret) = commissionManager.call(opData);
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.AdminExecuteRouteRegistry) {
@@ -1106,6 +1123,7 @@ contract MultisigProxy is IMultisigProxy {
             // (single source of truth), same as SetRoute. Enables ownership
             // migration (transferOwnership / acceptOwnership) for the Ownable2Step
             // RouteRegistry.
+            _requireAllowedGenericSelector(_firstSelector(opData));
             address registry = IBridge(bridge).routeRegistry();
             if (registry == address(0)) revert ZeroTarget();
             (bool ok, bytes memory ret) = registry.call(opData);
@@ -1133,6 +1151,7 @@ contract MultisigProxy is IMultisigProxy {
         } else if (opType == OperationType.AdminExecuteAdapter) {
             // opData = raw LZAdapter callData. The adapter must be wired in
             // first via UpdateLZAdapter; a zero target closes the path.
+            _requireAllowedGenericSelector(_firstSelector(opData));
             if (lzAdapter == address(0)) revert ZeroTarget();
             (bool ok, bytes memory ret) = lzAdapter.call(opData);
             _propagateRevert(ok, ret);
@@ -1186,7 +1205,7 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice EIP-712 domain separator for this contract on the current chain.
     /// @dev Returns the value cached at deploy while `block.chainid` is
     ///      unchanged; after a chain-id change it is rebuilt, so pre-fork
-    ///      signatures are not valid on the forked chain (R-W-13).
+    ///      signatures are not valid on the forked chain.
     function DOMAIN_SEPARATOR() public view returns (bytes32) {
         return _domainSeparator();
     }
@@ -1255,8 +1274,8 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @dev Reverts if any address in `candidate` also appears in `counterpart`.
     ///      Used to keep the enclave and federation signer sets disjoint so the
-    ///      two trust domains stay independent (R-W-14). O(n*m), bounded by the
-    ///      signer-set sizes.
+    ///      two trust domains stay independent. O(n*m), bounded by the signer-set
+    ///      sizes.
     function _requireDisjoint(address[] memory candidate, address[] memory counterpart) private pure {
         for (uint256 i = 0; i < candidate.length; i++) {
             for (uint256 j = 0; j < counterpart.length; j++) {
@@ -1280,7 +1299,7 @@ contract MultisigProxy is IMultisigProxy {
 
     function _validateSigners(address[] memory signers) private pure {
         // Bound the set before the O(N^2) duplicate scan below, and keep every
-        // signer index within the uint256 signature bitmap (R-I-06).
+        // signer index within the uint256 signature bitmap.
         if (signers.length > MAX_SIGNERS) revert TooManySigners(signers.length, MAX_SIGNERS);
         for (uint256 i = 0; i < signers.length; i++) {
             if (signers[i] == address(0)) revert ZeroAddressSigner();
@@ -1336,5 +1355,23 @@ contract MultisigProxy is IMultisigProxy {
         ) {
             revert ForbiddenCommissionManagerSelector(selector);
         }
+    }
+
+    /// @dev Keeps value-moving Bridge operations exclusive to the typed enclave
+    ///      entrypoints. Applied to every generic raw-call lane rather than only
+    ///      `AdminExecute`, because their mutable targets can otherwise be aliased
+    ///      to a Bridge that is owned by this proxy.
+    function _requireNotBridgeReleaseSelector(bytes4 selector) private pure {
+        if (selector == _SEL_FUNDS_OUT || selector == _SEL_REBALANCE_LIQUIDITY) {
+            revert ForbiddenBridgeReleaseSelector(selector);
+        }
+    }
+
+    /// @dev Applies every selector policy consistently to each generic raw-call
+    ///      lane. This prevents a mutable target from being aliased to either a
+    ///      Bridge or CommissionManager to bypass its typed operation.
+    function _requireAllowedGenericSelector(bytes4 selector) private pure {
+        _requireNotCommissionWithdrawSelector(selector);
+        _requireNotBridgeReleaseSelector(selector);
     }
 }

@@ -425,7 +425,7 @@ contract IntegrationTest is Test {
 
     function test_endToEnd_nativeCommission_inboundAndWithdraw() public {
         // Configure a NATIVE FUNDS_IN route (2% on token amount, paid in wei).
-        // Wire the complete mandatory R-I-14 config through federation
+        // Wire the complete mandatory oracle config through federation
         // governance — dependencies first, ETH/USD feed last.
         MockAggregatorV3 sequencerFeed = new MockAggregatorV3(0, 0, block.timestamp);
         ethUsdFeed = new MockAggregatorV3(8, 2_000e8, block.timestamp);

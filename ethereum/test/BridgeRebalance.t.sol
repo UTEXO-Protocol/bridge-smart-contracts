@@ -709,6 +709,23 @@ contract BridgeRebalanceTest is Test {
     // RgbOutboundSettlementModule
     // ========================================================================
 
+    function test_outboundModule_revertsOnEmptyArrays() public {
+        FundsOutContext memory ctx = FundsOutContext({
+            token: address(usdt0),
+            recipient: address(bridge),
+            amount: AMOUNT,
+            burnId: 1,
+            sourceChainId: RGB_CHAIN_ID,
+            destChainId: ARCH_CHAIN_ID,
+            sourceAddress: RGB_SRC_ADDR,
+            isRebalance: true
+        });
+
+        vm.prank(address(routeRegistry));
+        vm.expectRevert(RgbOutboundSettlementModule.EmptySettlementRecords.selector);
+        outboundModule.beforeFundsOut(ctx, _emptySettlement());
+    }
+
     function test_outboundModule_revert_unknownRecord() public {
         bytes32 bogus = keccak256("no-such-record");
         IBridge.RebalanceParams memory p = _rgbToArchParams(AMOUNT, rgbSeedOpId);
@@ -760,7 +777,8 @@ contract BridgeRebalanceTest is Test {
                 burnId: 1,
                 sourceChainId: RGB_CHAIN_ID,
                 destChainId: ARCH_CHAIN_ID,
-                sourceAddress: RGB_SRC_ADDR
+                sourceAddress: RGB_SRC_ADDR,
+                isRebalance: true
             }),
             _emptySettlement()
         );
