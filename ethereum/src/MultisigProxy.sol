@@ -389,7 +389,7 @@ contract MultisigProxy is IMultisigProxy {
     ///      in one signed operation. The Bridge recipient is forced to
     ///      `lzAdapter`, and the amount sent out is the balance actually
     ///      delivered to the adapter (measured here), so the two legs are bound
-    ///      on-chain and cannot be mismatched (R-W-16).
+    ///      on-chain and cannot be mismatched.
     function lzFundsOutCall(
         LzFundsOutParams calldata params,
         uint256 nonce,
@@ -1205,7 +1205,7 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice EIP-712 domain separator for this contract on the current chain.
     /// @dev Returns the value cached at deploy while `block.chainid` is
     ///      unchanged; after a chain-id change it is rebuilt, so pre-fork
-    ///      signatures are not valid on the forked chain (R-W-13).
+    ///      signatures are not valid on the forked chain.
     function DOMAIN_SEPARATOR() public view returns (bytes32) {
         return _domainSeparator();
     }
@@ -1274,8 +1274,8 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @dev Reverts if any address in `candidate` also appears in `counterpart`.
     ///      Used to keep the enclave and federation signer sets disjoint so the
-    ///      two trust domains stay independent (R-W-14). O(n*m), bounded by the
-    ///      signer-set sizes.
+    ///      two trust domains stay independent. O(n*m), bounded by the signer-set
+    ///      sizes.
     function _requireDisjoint(address[] memory candidate, address[] memory counterpart) private pure {
         for (uint256 i = 0; i < candidate.length; i++) {
             for (uint256 j = 0; j < counterpart.length; j++) {
@@ -1299,7 +1299,7 @@ contract MultisigProxy is IMultisigProxy {
 
     function _validateSigners(address[] memory signers) private pure {
         // Bound the set before the O(N^2) duplicate scan below, and keep every
-        // signer index within the uint256 signature bitmap (R-I-06).
+        // signer index within the uint256 signature bitmap.
         if (signers.length > MAX_SIGNERS) revert TooManySigners(signers.length, MAX_SIGNERS);
         for (uint256 i = 0; i < signers.length; i++) {
             if (signers[i] == address(0)) revert ZeroAddressSigner();
