@@ -11,6 +11,7 @@ import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
 import {NullVerifier} from "../../src/verifiers/NullVerifier.sol";
 import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol";
 import {RgbOutboundSettlementModule} from "../../src/settlement/RgbOutboundSettlementModule.sol";
+import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.sol";
 
 /// @title DeployAll
 /// @notice Full production deploy flow.
@@ -29,7 +30,8 @@ import {RgbOutboundSettlementModule} from "../../src/settlement/RgbOutboundSettl
 ///                                 non-RGB-source routes, e.g. Arch → RGB)
 ///   n + 6  → RgbOutboundSettlementModule (debit-RGB / non-RGB-credit routes,
 ///                                 e.g. RGB → Arch; wraps RgbSettlementModule)
-///   n + 7  → MultisigProxy
+///   n + 7  → NullSettlementModule (stateless routes such as EVM ↔ Concordium)
+///   n + 8  → MultisigProxy
 ///          → Bridge.setOutflowLimit for INITIAL_ENCLAVE_SOURCE_CHAIN_ID
 ///          → Bridge.setGlobalOutflowLimit
 ///          → (optional) CommissionManager config txs, each present only when
@@ -93,6 +95,7 @@ contract DeployAll is Script {
             RgbSettlementModule rgbModule,
             NullVerifier nullVerifier,
             RgbOutboundSettlementModule outboundModule,
+            NullSettlementModule nullModule,
             MultisigProxy proxy
         )
     {
@@ -161,7 +164,7 @@ contract DeployAll is Script {
         // ---- 4. Bridge (nonce n+2) ---------------------------------------
         bridge = new Bridge(usdt0, address(routeRegistry), payable(address(cm)), address(0), minFundsIn);
 
-        // ---- 5. Route plugins (nonce n+3 .. n+6) -------------------------
+        // ---- 5. Route plugins (nonce n+3 .. n+7) -------------------------
         rgbVerifier = new RGBVerifier(btcRelay, minSourceConf, maxLatestConf, minConfGap);
         rgbModule = new RgbSettlementModule(address(routeRegistry));
         // NullVerifier: explicit no-proof verifier for operational / non-RGB-
@@ -173,8 +176,11 @@ contract DeployAll is Script {
         // tag), writes nothing on credit. Routes with an RGB credit side use the
         // canonical `rgbModule` instead.
         outboundModule = new RgbOutboundSettlementModule(address(routeRegistry), address(rgbModule));
+        // Stateless routes whose settlement/finality is handled by the TEE or
+        // an external delivery layer still use an explicit non-zero module.
+        nullModule = new NullSettlementModule();
 
-        // ---- 6. MultisigProxy (nonce n+7) --------------------------------
+        // ---- 6. MultisigProxy (nonce n+8) --------------------------------
         proxy = new MultisigProxy(
             address(bridge), address(cm), enc, encThr, initialSrcChain, fed, fedThr, timelock, minTimelock
         );
@@ -221,6 +227,7 @@ contract DeployAll is Script {
         console2.log("RgbSettlementModule deployed at:", address(rgbModule));
         console2.log("NullVerifier deployed at:       ", address(nullVerifier));
         console2.log("RgbOutboundSettlementModule at: ", address(outboundModule));
+        console2.log("NullSettlementModule at:        ", address(nullModule));
         console2.log("MultisigProxy deployed at:      ", address(proxy));
         console2.log("Initial chain bucket burst bps: ", initialChainBurstBps);
         console2.log("Initial chain bucket refill bps:", initialChainRefillBps);
