@@ -3002,7 +3002,7 @@ contract MultisigProxyTest is Test {
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), availableBefore, "safe bucket configuration unchanged");
     }
 
-    function test_governanceCanRotateEnclaveToUnattestedEOA_currentBehavior() public {
+    function test_governanceCanRotateEnclaveToUnattestedEOA() public {
         address[] memory newSigners = new address[](3);
         newSigners[0] = makeAddr("unattestedEnc1");
         newSigners[1] = makeAddr("unattestedEnc2");

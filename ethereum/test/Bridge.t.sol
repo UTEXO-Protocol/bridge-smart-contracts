@@ -3019,10 +3019,7 @@ contract BridgeTest is Test {
         assertEq(rgbModule.fundsInRecords(opId2), record2Before, "record 2 unchanged");
     }
 
-    // Current behavior reproduction
-    // ========================================================================
-
-    function test_fundsOutVerifierProofStillNotRouteContextAware_currentBehavior() public {
+    function test_fundsOutVerifierProofStillNotRouteContextAware() public {
         address alternateRecipient = makeAddr("alternateRecipient");
         uint256 releaseAmount = 37e18;
         // Isolated liquidity and the outflow limit gate the `sourceChainId`
@@ -3130,9 +3127,9 @@ contract BridgeTest is Test {
         assertEq(usdt0.balanceOf(user), victimBefore - AMOUNT, "victim deposit went through");
     }
 
-    // Current behavior: a plain ERC20 transfer can change Bridge's raw balance,
+    // A plain ERC20 transfer can change Bridge's raw balance,
     // but it does not enter the Bridge.fundsIn accounting path.
-    function test_directTokenTransferDoesNotCreateFundsInAccounting_currentBehavior() public {
+    function test_directTokenTransferDoesNotCreateFundsInAccounting() public {
         address donor = makeAddr("directTransferDonor");
         uint256 directAmount = 17e18;
         bytes32 expectedOpId = _deriveOpId(
@@ -3192,9 +3189,9 @@ contract BridgeTest is Test {
         assertEq(rgbModule.fundsInRecords(opId), recordBefore + AMOUNT, "record created only by fundsIn");
     }
 
-    // Current behavior: Bridge only rejects an empty destination address, so a
+    // Bridge only rejects an empty destination address, so a
     // non-empty string is accepted and emitted without format validation.
-    function test_fundsIn_acceptsInvalidButNonEmptyDestinationAddress_currentBehavior() public {
+    function test_fundsIn_acceptsInvalidButNonEmptyDestinationAddress() public {
         string memory invalidDestination = "not-rgb-destination";
         bytes32 expectedOpId = _deriveOpId(
             SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, AMOUNT, RGB_CHAIN_ID, invalidDestination, _rgbData()
