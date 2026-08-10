@@ -5,6 +5,7 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IMultisigProxy} from "./interfaces/IMultisigProxy.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
+import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
 
 /// @notice Minimal view of the LayerZero adapter's outbound entry point. The
@@ -58,8 +59,6 @@ contract MultisigProxy is IMultisigProxy {
 
     address[] private _federationSigners;
     uint256 public federationThreshold;
-
-    address public commissionRecipient;
 
     /// @notice Per-source-chain nonce for the typed TEE methods (`fundsOutCall`
     ///         / `lzFundsOutCall`). Each source chain has its own lane, so the
@@ -122,16 +121,24 @@ contract MultisigProxy is IMultisigProxy {
     ///         selector before it is sliced via `calldataload`.
     uint256 public constant SELECTOR_LENGTH = 4;
 
-    /// @notice CommissionManager withdrawal selectors that the generic
-    ///         `AdminExecuteCommissionManager` path is NOT allowed to call —
-    ///         they take a free recipient and would bypass the pinned
-    ///         `commissionRecipient`. Withdrawals must go through the
-    ///         dedicated WithdrawTokenCommissionCM / WithdrawNativeCommissionCM
-    ///         ops, which force the recipient to `commissionRecipient`.
-    bytes4 private constant _SEL_WITHDRAW_TOKEN = bytes4(keccak256("withdrawTokenCommission(address,address,uint256)"));
-    bytes4 private constant _SEL_WITHDRAW_NATIVE = bytes4(keccak256("withdrawNativeCommission(address,uint256)"));
-    bytes4 private constant _SEL_WITHDRAW_ALL_TOKEN = bytes4(keccak256("withdrawAllTokenCommission(address,address)"));
-    bytes4 private constant _SEL_WITHDRAW_ALL_NATIVE = bytes4(keccak256("withdrawAllNativeCommission(address)"));
+    /// @notice CommissionManager withdrawal selectors that generic raw-call
+    ///         paths are NOT allowed to call.
+    ///         The asset layer always pays CM's immutable recipient, while this
+    ///         procedural guard keeps standard withdrawals on the dedicated,
+    ///         typed governance operations. The guard is selector-wide so a
+    ///         mutable generic target cannot be aliased to CommissionManager.
+    bytes4 private constant _SEL_WITHDRAW_TOKEN = ICommissionManager.withdrawTokenCommission.selector;
+    bytes4 private constant _SEL_WITHDRAW_NATIVE = ICommissionManager.withdrawNativeCommission.selector;
+    bytes4 private constant _SEL_WITHDRAW_ALL_TOKEN = ICommissionManager.withdrawAllTokenCommission.selector;
+    bytes4 private constant _SEL_WITHDRAW_ALL_NATIVE = ICommissionManager.withdrawAllNativeCommission.selector;
+
+    /// @notice Bridge value-moving selectors reserved exclusively for the typed
+    ///         enclave entrypoints. They are rejected from EVERY generic raw-call
+    ///         lane, independent of its configured target, so aliasing a mutable
+    ///         CommissionManager / RouteRegistry / adapter target to Bridge cannot
+    ///         bypass the federation restriction.
+    bytes4 private constant _SEL_FUNDS_OUT = IBridge.fundsOut.selector;
+    bytes4 private constant _SEL_REBALANCE_LIQUIDITY = IBridge.rebalanceLiquidity.selector;
 
     uint256 private immutable _cachedChainId;
     bytes32 private immutable _cachedDomainSeparator;
@@ -146,6 +153,9 @@ contract MultisigProxy is IMultisigProxy {
     bytes32 private constant _TEE_LZ_FUNDS_OUT_TYPEHASH = keccak256(
         "TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)"
     );
+    bytes32 private constant _TEE_REBALANCE_TYPEHASH = keccak256(
+        "TeeRebalance(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,string destinationAddress,bytes proof,bytes settlementDataOut,bytes settlementDataIn,uint256 nonce,uint256 deadline)"
+    );
 
     // Federation propose — typed EIP-712 structs per operation (Bridge side)
     bytes32 private constant _PROPOSE_ADMIN_EXECUTE_TYPEHASH =
@@ -158,8 +168,6 @@ contract MultisigProxy is IMultisigProxy {
     );
     bytes32 private constant _PROPOSE_UPDATE_BRIDGE_TYPEHASH =
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
-    bytes32 private constant _PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH =
-        keccak256("ProposeSetCommissionRecipient(address newRecipient,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
 
@@ -218,7 +226,6 @@ contract MultisigProxy is IMultisigProxy {
         uint256 initialEnclaveSourceChain_,
         address[] memory federationSigners_,
         uint256 federationThreshold_,
-        address commissionRecipient_,
         uint256 timelockDuration_,
         uint256 minTimelock_
     ) {
@@ -229,7 +236,6 @@ contract MultisigProxy is IMultisigProxy {
         _requireValidThreshold(enclaveThreshold_, enclaveSigners_.length);
         if (federationSigners_.length == 0) revert NoSigners();
         _requireValidThreshold(federationThreshold_, federationSigners_.length);
-        if (commissionRecipient_ == address(0)) revert ZeroCommissionRecipient();
         if (minTimelock_ == 0 || minTimelock_ >= MAX_PROPOSAL_LIFETIME) revert InvalidMinTimelock();
         if (timelockDuration_ < minTimelock_) revert TimelockTooShort();
         if (timelockDuration_ >= MAX_PROPOSAL_LIFETIME) revert TimelockTooLong();
@@ -247,7 +253,6 @@ contract MultisigProxy is IMultisigProxy {
         _enclaveSourceChains.push(initialEnclaveSourceChain_);
         _federationSigners = federationSigners_;
         federationThreshold = federationThreshold_;
-        commissionRecipient = commissionRecipient_;
         timelockDuration = timelockDuration_;
         MIN_TIMELOCK = minTimelock_;
 
@@ -315,11 +320,76 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     /// @inheritdoc IMultisigProxy
+    /// @dev Typed enclave rebalance: the only call this makes is
+    ///      `Bridge.rebalanceLiquidity`. Signer-set selection, nonce stream and
+    ///      timing rules mirror `fundsOutCall`: the SOURCE chain's enclave set
+    ///      authorises the operation (it attests the funds left that chain — a
+    ///      compromised set can migrate at most `lockedLiquidity[source]`, the
+    ///      same bound a rogue `fundsOut` has), and the shared per-source-chain
+    ///      `teeNonce` orders it against releases from the same chain.
+    function rebalanceCall(
+        IBridge.RebalanceParams calldata params,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 enclaveBitmap,
+        bytes[] calldata enclaveSigs
+    ) external {
+        _checkTeeTiming(deadline);
+        if (enclaveThreshold[params.sourceChainId] == 0) revert UnknownSourceChain(params.sourceChainId);
+        if (nonce != teeNonce[params.sourceChainId]) revert InvalidNonce();
+
+        _verifySignatures(
+            _hashTypedData(_rebalanceStructHash(params, nonce, deadline)),
+            enclaveBitmap,
+            enclaveSigs,
+            _enclaveSigners[params.sourceChainId],
+            enclaveThreshold[params.sourceChainId]
+        );
+
+        teeNonce[params.sourceChainId]++;
+
+        IBridge(bridge).rebalanceLiquidity(params);
+
+        emit RebalanceExecuted(params.sourceChainId, params.destinationChainId, nonce, enclaveBitmap);
+    }
+
+    /// @dev EIP-712 struct hash for `TeeRebalance`. Built in two `abi.encode`
+    ///      halves joined with `bytes.concat` (every field is a 32-byte word;
+    ///      dynamic ones are pre-hashed) — byte-identical to a single encode,
+    ///      but each half stays shallow enough to compile without the optimizer.
+    function _rebalanceStructHash(IBridge.RebalanceParams calldata params, uint256 nonce, uint256 deadline)
+        private
+        pure
+        returns (bytes32)
+    {
+        return keccak256(
+            bytes.concat(
+                abi.encode(
+                    _TEE_REBALANCE_TYPEHASH,
+                    params.amount,
+                    params.burnId,
+                    params.sourceChainId,
+                    params.destinationChainId,
+                    keccak256(bytes(params.sourceAddress))
+                ),
+                abi.encode(
+                    keccak256(bytes(params.destinationAddress)),
+                    keccak256(params.proof),
+                    keccak256(params.settlementDataOut),
+                    keccak256(params.settlementDataIn),
+                    nonce,
+                    deadline
+                )
+            )
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
     /// @dev Typed Flow-4 release: releases to the LZ adapter and bridges onward
     ///      in one signed operation. The Bridge recipient is forced to
     ///      `lzAdapter`, and the amount sent out is the balance actually
     ///      delivered to the adapter (measured here), so the two legs are bound
-    ///      on-chain and cannot be mismatched (R-W-16).
+    ///      on-chain and cannot be mismatched.
     function lzFundsOutCall(
         LzFundsOutParams calldata params,
         uint256 nonce,
@@ -473,6 +543,8 @@ contract MultisigProxy is IMultisigProxy {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
+        _requireAllowedGenericSelector(selector);
+
         bytes32 structHash =
             keccak256(abi.encode(_PROPOSE_ADMIN_EXECUTE_TYPEHASH, selector, keccak256(callData), nonce, deadline));
 
@@ -572,29 +644,6 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     /// @inheritdoc IMultisigProxy
-    function proposeSetCommissionRecipient(
-        address newRecipient,
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32) {
-        bytes32 structHash = keccak256(
-            abi.encode(_PROPOSE_SET_COMMISSION_RECIPIENT_TYPEHASH, newRecipient, nonce, deadline)
-        );
-
-        return _propose(
-            OperationType.SetCommissionRecipient,
-            abi.encode(newRecipient),
-            nonce,
-            deadline,
-            structHash,
-            fedBitmap,
-            fedSigs
-        );
-    }
-
-    /// @inheritdoc IMultisigProxy
     function proposeSetTimelockDuration(
         uint256 newDuration,
         uint256 nonce,
@@ -628,9 +677,9 @@ contract MultisigProxy is IMultisigProxy {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
-        // Commission withdrawals must use the pinned-recipient ops; reject them
-        // on the generic path up front (fail-fast, no wasted proposal slot).
-        _requireNotCommissionWithdrawSelector(selector);
+        // Standard withdrawals use the dedicated typed operations; reject them
+        // on this generic path up front (recipient safety remains in CM).
+        _requireAllowedGenericSelector(selector);
 
         bytes32 structHash =
             keccak256(abi.encode(_PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, selector, keccak256(callData), nonce, deadline));
@@ -652,6 +701,8 @@ contract MultisigProxy is IMultisigProxy {
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
+
+        _requireAllowedGenericSelector(selector);
 
         bytes32 structHash = keccak256(
             abi.encode(_PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH, selector, keccak256(callData), nonce, deadline)
@@ -747,6 +798,8 @@ contract MultisigProxy is IMultisigProxy {
 
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
+
+        _requireAllowedGenericSelector(selector);
 
         bytes32 structHash = keccak256(
             abi.encode(_PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, selector, keccak256(callData), nonce, deadline)
@@ -922,6 +975,11 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     /// @inheritdoc IMultisigProxy
+    function commissionRecipient() public view returns (address) {
+        return ICommissionManager(payable(commissionManager)).commissionRecipient();
+    }
+
+    /// @inheritdoc IMultisigProxy
     function verifyEnclaveSignature(
         uint256 sourceChainId,
         bytes32 digest,
@@ -1003,6 +1061,7 @@ contract MultisigProxy is IMultisigProxy {
     function _executeByType(OperationType opType, bytes calldata opData) private {
         if (opType == OperationType.AdminExecute) {
             // opData = raw bridge callData
+            _requireAllowedGenericSelector(_firstSelector(opData));
             (bool ok, bytes memory ret) = bridge.call(opData);
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.UpdateEnclaveSigners) {
@@ -1045,12 +1104,6 @@ contract MultisigProxy is IMultisigProxy {
             address oldBridge = bridge;
             bridge = newBridge;
             emit BridgeAddressUpdated(oldBridge, newBridge);
-        } else if (opType == OperationType.SetCommissionRecipient) {
-            address newRecipient = abi.decode(opData, (address));
-            if (newRecipient == address(0)) revert ZeroRecipient();
-            address old = commissionRecipient;
-            commissionRecipient = newRecipient;
-            emit CommissionRecipientUpdated(old, newRecipient);
         } else if (opType == OperationType.SetTimelockDuration) {
             uint256 newDuration = abi.decode(opData, (uint256));
             if (newDuration < MIN_TIMELOCK) revert TimelockTooShort();
@@ -1059,10 +1112,10 @@ contract MultisigProxy is IMultisigProxy {
             emit TimelockDurationUpdated(newDuration);
         } else if (opType == OperationType.AdminExecuteCommissionManager) {
             // opData = raw CommissionManager callData. Enforce (again, at the
-            // execution boundary) that this generic path cannot call a
-            // withdrawal selector and re-point commission away from the pinned
-            // `commissionRecipient`.
-            _requireNotCommissionWithdrawSelector(_firstSelector(opData));
+            // execution boundary) that standard withdrawals use their typed
+            // governance operations.
+            bytes4 selector = _firstSelector(opData);
+            _requireAllowedGenericSelector(selector);
             (bool ok, bytes memory ret) = commissionManager.call(opData);
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.AdminExecuteRouteRegistry) {
@@ -1070,24 +1123,23 @@ contract MultisigProxy is IMultisigProxy {
             // (single source of truth), same as SetRoute. Enables ownership
             // migration (transferOwnership / acceptOwnership) for the Ownable2Step
             // RouteRegistry.
+            _requireAllowedGenericSelector(_firstSelector(opData));
             address registry = IBridge(bridge).routeRegistry();
             if (registry == address(0)) revert ZeroTarget();
             (bool ok, bytes memory ret) = registry.call(opData);
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.WithdrawTokenCommissionCM) {
             (address token, uint256 amount) = abi.decode(opData, (address, uint256));
-            address recipient = commissionRecipient;
-            (bool ok, bytes memory ret) = commissionManager.call(
-                abi.encodeWithSignature("withdrawTokenCommission(address,address,uint256)", token, recipient, amount)
-            );
+            address recipient = commissionRecipient();
+            (bool ok, bytes memory ret) =
+                commissionManager.call(abi.encodeCall(ICommissionManager.withdrawTokenCommission, (token, amount)));
             _propagateRevert(ok, ret);
             emit CommissionWithdrawn(token, amount, recipient);
         } else if (opType == OperationType.WithdrawNativeCommissionCM) {
             uint256 amount = abi.decode(opData, (uint256));
-            address recipient = commissionRecipient;
-            (bool ok, bytes memory ret) = commissionManager.call(
-                abi.encodeWithSignature("withdrawNativeCommission(address,uint256)", recipient, amount)
-            );
+            address recipient = commissionRecipient();
+            (bool ok, bytes memory ret) =
+                commissionManager.call(abi.encodeCall(ICommissionManager.withdrawNativeCommission, (amount)));
             _propagateRevert(ok, ret);
             emit NativeCommissionWithdrawn(amount, recipient);
         } else if (opType == OperationType.UpdateCommissionManager) {
@@ -1099,6 +1151,7 @@ contract MultisigProxy is IMultisigProxy {
         } else if (opType == OperationType.AdminExecuteAdapter) {
             // opData = raw LZAdapter callData. The adapter must be wired in
             // first via UpdateLZAdapter; a zero target closes the path.
+            _requireAllowedGenericSelector(_firstSelector(opData));
             if (lzAdapter == address(0)) revert ZeroTarget();
             (bool ok, bytes memory ret) = lzAdapter.call(opData);
             _propagateRevert(ok, ret);
@@ -1152,7 +1205,7 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice EIP-712 domain separator for this contract on the current chain.
     /// @dev Returns the value cached at deploy while `block.chainid` is
     ///      unchanged; after a chain-id change it is rebuilt, so pre-fork
-    ///      signatures are not valid on the forked chain (R-W-13).
+    ///      signatures are not valid on the forked chain.
     function DOMAIN_SEPARATOR() public view returns (bytes32) {
         return _domainSeparator();
     }
@@ -1221,8 +1274,8 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @dev Reverts if any address in `candidate` also appears in `counterpart`.
     ///      Used to keep the enclave and federation signer sets disjoint so the
-    ///      two trust domains stay independent (R-W-14). O(n*m), bounded by the
-    ///      signer-set sizes.
+    ///      two trust domains stay independent. O(n*m), bounded by the signer-set
+    ///      sizes.
     function _requireDisjoint(address[] memory candidate, address[] memory counterpart) private pure {
         for (uint256 i = 0; i < candidate.length; i++) {
             for (uint256 j = 0; j < counterpart.length; j++) {
@@ -1246,7 +1299,7 @@ contract MultisigProxy is IMultisigProxy {
 
     function _validateSigners(address[] memory signers) private pure {
         // Bound the set before the O(N^2) duplicate scan below, and keep every
-        // signer index within the uint256 signature bitmap (R-I-06).
+        // signer index within the uint256 signature bitmap.
         if (signers.length > MAX_SIGNERS) revert TooManySigners(signers.length, MAX_SIGNERS);
         for (uint256 i = 0; i < signers.length; i++) {
             if (signers[i] == address(0)) revert ZeroAddressSigner();
@@ -1292,9 +1345,9 @@ contract MultisigProxy is IMultisigProxy {
         }
     }
 
-    /// @dev Reverts if `selector` is one of the CommissionManager withdrawal
-    ///      selectors, which the generic AdminExecuteCommissionManager path must
-    ///      not reach (they bypass the pinned `commissionRecipient`).
+    /// @dev Reverts for CommissionManager withdrawal selectors so the generic
+    ///      path cannot bypass the dedicated typed governance operations.
+    ///      Recipient safety itself is enforced inside CommissionManager.
     function _requireNotCommissionWithdrawSelector(bytes4 selector) private pure {
         if (
             selector == _SEL_WITHDRAW_TOKEN || selector == _SEL_WITHDRAW_NATIVE || selector == _SEL_WITHDRAW_ALL_TOKEN
@@ -1302,5 +1355,23 @@ contract MultisigProxy is IMultisigProxy {
         ) {
             revert ForbiddenCommissionManagerSelector(selector);
         }
+    }
+
+    /// @dev Keeps value-moving Bridge operations exclusive to the typed enclave
+    ///      entrypoints. Applied to every generic raw-call lane rather than only
+    ///      `AdminExecute`, because their mutable targets can otherwise be aliased
+    ///      to a Bridge that is owned by this proxy.
+    function _requireNotBridgeReleaseSelector(bytes4 selector) private pure {
+        if (selector == _SEL_FUNDS_OUT || selector == _SEL_REBALANCE_LIQUIDITY) {
+            revert ForbiddenBridgeReleaseSelector(selector);
+        }
+    }
+
+    /// @dev Applies every selector policy consistently to each generic raw-call
+    ///      lane. This prevents a mutable target from being aliased to either a
+    ///      Bridge or CommissionManager to bypass its typed operation.
+    function _requireAllowedGenericSelector(bytes4 selector) private pure {
+        _requireNotCommissionWithdrawSelector(selector);
+        _requireNotBridgeReleaseSelector(selector);
     }
 }

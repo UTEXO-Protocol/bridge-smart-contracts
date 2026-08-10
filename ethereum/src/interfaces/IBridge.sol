@@ -25,6 +25,13 @@ interface IBridge {
     error InvalidBurnId(uint256 provided, uint256 expected);
     error BurnIdAlreadyConsumed(uint256 burnId);
     error NativeValueMismatch();
+    error NativeCommissionOutOfBounds(uint256 provided, uint256 minimum, uint256 maximum);
+    error NativeRefundFailed(address recipient, uint256 amount);
+    error RebalanceSameChain(uint256 chainId);
+    error ChainSafetyLimitExceeded(uint256 chainId, uint256 requested, uint256 spentInWindow, uint256 windowLimit);
+    error GlobalSafetyLimitExceeded(uint256 requested, uint256 spentInWindow, uint256 windowLimit);
+    error InvalidOutflowPolicy(uint256 burstBps, uint256 refillBpsPerWindow, uint256 maxBps);
+    error ZeroOutflowReference();
 
     // =========================================================================
     // Events
@@ -53,17 +60,29 @@ interface IBridge {
     event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
 
     /// @notice Emitted on `setOutflowLimit` (per-chain outflow token bucket).
-    /// @param chainId    Source chain the limit applies to.
-    /// @param capacity   New bucket capacity (max instant outflow).
-    /// @param refillRate New refill rate (token units per second).
-    /// @param available  Accrued allowance carried over after the update.
-    event OutflowLimitUpdated(uint256 indexed chainId, uint256 capacity, uint256 refillRate, uint256 available);
+    /// @param chainId             Source chain the limit applies to.
+    /// @param burstBps            Max instant outflow, in bps of reference liquidity.
+    /// @param refillBpsPerWindow  Allowance restored per refill window, in bps.
+    /// @param availableShares     Accrued allowance carried over, in shares.
+    event OutflowLimitUpdated(
+        uint256 indexed chainId, uint256 burstBps, uint256 refillBpsPerWindow, uint256 availableShares
+    );
 
     /// @notice Emitted on `setGlobalOutflowLimit` (aggregate outflow token bucket).
-    /// @param capacity   New bucket capacity (max instant aggregate outflow).
-    /// @param refillRate New refill rate (token units per second).
-    /// @param available  Accrued allowance carried over after the update.
-    event GlobalOutflowLimitUpdated(uint256 capacity, uint256 refillRate, uint256 available);
+    /// @param burstBps            Max instant aggregate outflow, in bps of reference TVL.
+    /// @param refillBpsPerWindow  Allowance restored per refill window, in bps.
+    /// @param availableShares     Accrued allowance carried over, in shares.
+    event GlobalOutflowLimitUpdated(uint256 burstBps, uint256 refillBpsPerWindow, uint256 availableShares);
+
+    /// @notice Emitted after an outflow consumes immutable per-chain rolling
+    ///         safety allowance.
+    event ChainSafetyOutflowConsumed(
+        uint256 indexed chainId, uint256 amount, uint256 spentInWindow, uint256 windowLimit
+    );
+
+    /// @notice Emitted after a physical token outflow consumes immutable global
+    ///         rolling safety allowance.
+    event GlobalSafetyOutflowConsumed(uint256 amount, uint256 spentInWindow, uint256 windowLimit);
 
     /// @notice RGB-route deposit event. Emitted only when the route's settlement
     ///         module returns a non-zero external correlation id — in practice
@@ -130,6 +149,33 @@ interface IBridge {
         string sourceAddress
     );
 
+    /// @notice Emitted on every successful `rebalanceLiquidity`. The canonical
+    ///         record of an accounting-only liquidity migration between two
+    ///         chain buckets — no tokens move on this chain. When the
+    ///         destination route's settlement module returns a non-zero RGB
+    ///         OpId, the standard `FundsIn` event is emitted alongside (the RGB
+    ///         side consumes `FundsIn` only and needs no rebalance awareness).
+    /// @param operationId        Credit-leg canonical id, derived on-chain (keys
+    ///                           the destination route's settlement record).
+    /// @param burnId             Debit-leg replay key, shares the `consumedBurnIds`
+    ///                           namespace with `fundsOut`.
+    /// @param sourceChainId      Chain bucket debited.
+    /// @param destinationChainId Chain bucket credited.
+    /// @param amount             Amount migrated between the buckets (no commission).
+    /// @param sourceAddress      Source-chain identity behind the debit (e.g. the
+    ///                           RGB burner); its hash is folded into `operationId`.
+    /// @param destinationAddress Destination-chain address backing the credit
+    ///                           (e.g. the bridge's RGB wallet receiving a mint).
+    event BridgeRebalance(
+        bytes32 indexed operationId,
+        uint256 indexed burnId,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        uint256 amount,
+        string sourceAddress,
+        string destinationAddress
+    );
+
     // =========================================================================
     // External — user-facing
     // =========================================================================
@@ -137,11 +183,15 @@ interface IBridge {
     /// @notice Direct deposit overload for EVM users on this chain. The
     ///         `sourceChainId` half of the commission route key is filled with
     ///         `block.chainid` — non-spoofable by the caller.
-    /// @dev Payable: if the active route uses NATIVE commission currency, `msg.value`
-    ///      must be at least the quoted native commission — any surplus (from
-    ///      favorable ETH/USD drift between quote and execution) is collected as
-    ///      commission, not refunded (R-I-03). If the route takes no native
-    ///      commission (TOKEN currency), `msg.value` must be 0.
+    /// @dev Payable: if the active route uses NATIVE commission currency,
+    ///      `msg.value` must be at least the freshly quoted native commission
+    ///      and at most `NATIVE_COMMISSION_TOLERANCE_BPS` above it. Attach the
+    ///      quote plus a small buffer so ETH/USD drift between quoting and
+    ///      execution cannot revert the deposit: exactly the fresh quote is
+    ///      charged and the surplus is refunded to the caller before the call
+    ///      returns. A caller that cannot receive native value must therefore
+    ///      send the exact quote. If the route takes no native commission
+    ///      (TOKEN currency), `msg.value` must be 0.
     /// @dev `settlementData` is an opaque per-route blob forwarded into the
     ///      route's `ISettlementModule.onFundsIn`. Routes whose module does not
     ///      consume any extra data (e.g. RGB) accept an empty bytes string.
@@ -164,6 +214,12 @@ interface IBridge {
     ///      overload is effectively closed. `sourceSender` is authenticated by
     ///      the source-chain entrypoint and adapter, not by an arbitrary
     ///      caller — it is bound into the derived `operationId`.
+    /// @dev Native commission here is the source-agreed value the adapter
+    ///      forwards, and its payer lives on the source chain. Because no refund
+    ///      can reach them, `msg.value` is accepted anywhere within
+    ///      `NATIVE_COMMISSION_TOLERANCE_BPS` either side of the fresh quote and
+    ///      is collected in full — unlike the direct overload, which charges the
+    ///      quote exactly and refunds the difference.
     /// @return operationId The canonical bridge-side operation id.
     function fundsIn(
         uint256 amount,
@@ -208,6 +264,59 @@ interface IBridge {
     ///      / `globalBucket` getters and the `availableOutflow` previews.
     function fundsOut(FundsOutParams calldata params) external;
 
+    /// @notice Parameters for `rebalanceLiquidity`.
+    /// @param amount             Amount to migrate from the source bucket to the
+    ///                           destination bucket. No commission is taken.
+    /// @param burnId             Bridge-derived replay guard for the debit leg.
+    ///                           Must equal the Bridge's canonical hash of the
+    ///                           rebalance fields (no nonce — an identical intent
+    ///                           can never execute twice, matching `fundsOut`).
+    ///                           Lives in the same `consumedBurnIds` namespace as
+    ///                           `fundsOut` burn ids.
+    /// @param sourceChainId      Chain whose bucket is debited (burn side).
+    /// @param destinationChainId Chain whose bucket is credited (mint side).
+    /// @param sourceAddress      Source-chain identity behind the debit;
+    ///                           `keccak256(sourceAddress)` is folded into the
+    ///                           credit-leg `operationId`.
+    /// @param destinationAddress Destination-chain address backing the credit.
+    /// @param proof              Opaque payload for the route's `IFinalityVerifier`
+    ///                           (debit-leg source proof; e.g. BtcRelay pairs for
+    ///                           an RGB burn).
+    /// @param settlementDataOut  Opaque payload for the route module's
+    ///                           `beforeFundsOut` (debit-leg settlement check).
+    /// @param settlementDataIn   Opaque payload for the route module's
+    ///                           `onFundsIn` (credit-leg settlement write).
+    struct RebalanceParams {
+        uint256 amount;
+        uint256 burnId;
+        uint256 sourceChainId;
+        uint256 destinationChainId;
+        string sourceAddress;
+        string destinationAddress;
+        bytes proof;
+        bytes settlementDataOut;
+        bytes settlementDataIn;
+    }
+
+    /// @notice Migrate isolated liquidity between two chain buckets without
+    ///         moving tokens: debit `lockedLiquidity[sourceChainId]`, credit
+    ///         `lockedLiquidity[destinationChainId]`, atomically and
+    ///         proof-gated via the `(sourceChainId, destinationChainId)` route.
+    ///         Composition: the debit leg is `fundsOut` minus the token payout
+    ///         (replay guard, route verifier + settlement check, bucket debit,
+    ///         per-chain rate limit); the credit leg is `fundsIn` minus the
+    ///         token pull (operationId derivation, settlement write, bucket
+    ///         credit, `FundsIn` emission for RGB destinations).
+    ///         Only callable by owner (`MultisigProxy`, TEE M-of-N — the
+    ///         source chain's enclave set attests the funds left that chain).
+    /// @dev Consumes the source chain's outflow bucket (release capacity is
+    ///      migrating away) but NOT the global bucket (no token egress; the
+    ///      eventual physical exit pays the global bucket in `fundsOut`).
+    ///      Gated on `whenOutflowNotPaused` only: an inflow-only pause is
+    ///      documented as "withdrawals stay open for liquidity migration", and
+    ///      this is exactly a liquidity migration.
+    function rebalanceLiquidity(RebalanceParams calldata params) external;
+
     // =========================================================================
     // External — admin (called via MultisigProxy)
     // =========================================================================
@@ -238,28 +347,74 @@ interface IBridge {
     function minFundsInAmount() external view returns (uint256);
 
     /// @notice Configure (or reconfigure) the per-chain outflow token bucket for
-    ///         `chainId`. Owner-only (MultisigProxy timelock flow). Reverts
-    ///         `InvalidOutflowLimit` on zero `chainId` or zero `capacity`. A
-    ///         reconfiguration accrues the pending refill under the old settings
-    ///         and preserves the accrued `available` (clamped to the new
-    ///         capacity) — it never gifts a fresh full burst.
-    function setOutflowLimit(uint256 chainId, uint256 capacity, uint256 refillRate) external;
+    ///         `chainId`. Owner-only (MultisigProxy timelock flow).
+    ///
+    ///         Both parameters are basis points of the chain's reference
+    ///         liquidity, not absolute token units: `burstBps` is the maximum
+    ///         instant outflow and `refillBpsPerWindow` the allowance restored
+    ///         over one `BUCKET_REFILL_WINDOW`. The bucket therefore tracks
+    ///         liquidity automatically — the same policy means 5k at 100k TVL
+    ///         and 50k at 1M TVL, with no governance retuning.
+    ///
+    ///         Validation is liquidity-independent — both values must be
+    ///         non-zero and their sum must not exceed
+    ///         `MAX_CHAIN_OUTFLOW_BPS` — so a policy can be installed at
+    ///         deployment before any deposit exists. This combined bound makes
+    ///         a full-TVL bucket and an over-permissive burst/refill pair
+    ///         unrepresentable at every liquidity level.
+    ///         Reverts `InvalidOutflowLimit` on zero `chainId` and
+    ///         `InvalidOutflowPolicy` on an out-of-range policy.
+    ///
+    ///         A reconfiguration accrues the pending refill under the old policy
+    ///         and preserves the accrued allowance (clamped to the new burst) —
+    ///         it never gifts a fresh full burst.
+    function setOutflowLimit(uint256 chainId, uint256 burstBps, uint256 refillBpsPerWindow) external;
 
     /// @notice Configure (or reconfigure) the global (aggregate) outflow token
     ///         bucket that bounds total `fundsOut` across all source chains.
-    ///         Owner-only. Same accrue-and-preserve semantics as
-    ///         `setOutflowLimit`.
-    function setGlobalOutflowLimit(uint256 capacity, uint256 refillRate) external;
+    ///         Owner-only. Same bps semantics, combined burst-plus-refill bound
+    ///         (against `MAX_GLOBAL_OUTFLOW_BPS`) and accrue-and-preserve
+    ///         behaviour as `setOutflowLimit`.
+    function setGlobalOutflowLimit(uint256 burstBps, uint256 refillBpsPerWindow) external;
 
-    /// @notice Spendable per-chain outflow allowance right now, including the
-    ///         refill accrued since the last update (which the stored
-    ///         `chainBuckets` getter does not materialize). Returns 0 for an
+    /// @notice Spendable per-chain bucket allowance right now in token units,
+    ///         including the refill accrued since the last update (which the
+    ///         stored `chainBuckets` getter does not materialize, and which it
+    ///         reports in shares rather than tokens). Returns 0 for an
     ///         unconfigured chain.
     function availableOutflow(uint256 chainId) external view returns (uint256);
 
-    /// @notice Spendable global outflow allowance right now, including the
-    ///         accrued refill. Returns 0 if the global bucket is unconfigured.
+    /// @notice Spendable global bucket allowance right now in token units,
+    ///         including the accrued refill. Returns 0 if the global bucket is
+    ///         unconfigured.
     function availableGlobalOutflow() external view returns (uint256);
+
+    /// @notice Remaining immutable per-chain safety allowance in the current
+    ///         rolling window. Independent of the configurable token bucket.
+    function availableChainSafetyOutflow(uint256 chainId) external view returns (uint256);
+
+    /// @notice Remaining immutable global safety allowance in the current
+    ///         rolling window. Independent of the configurable token bucket.
+    function availableGlobalSafetyOutflow() external view returns (uint256);
+
+    /// @notice Reference liquidity every percentage in this contract is measured
+    ///         against for `chainId`: accounted liquidity plus usage still
+    ///         counted in the rolling window. Constant while releases drain
+    ///         liquidity inside one window — each release moves the same amount
+    ///         from one term to the other — and it steps down to plain
+    ///         `lockedLiquidity` once that usage expires. Both the configurable
+    ///         bucket and the immutable safety limit are denominated against it.
+    function chainOutflowReference(uint256 chainId) external view returns (uint256);
+
+    /// @notice Aggregate counterpart of `chainOutflowReference`.
+    function globalOutflowReference() external view returns (uint256);
+
+    /// @notice The amount `fundsOut` would actually permit for `chainId` right
+    ///         now, in token units: the minimum of isolated chain liquidity,
+    ///         both token buckets and both immutable safety allowances. Use this
+    ///         rather than the single-layer views when asking "how much can
+    ///         leave" — no individual layer answers that question.
+    function effectiveAvailableOutflow(uint256 chainId) external view returns (uint256);
 
     /// @notice Current trusted adapter; `address(0)` means the adapter
     ///         overload is closed.

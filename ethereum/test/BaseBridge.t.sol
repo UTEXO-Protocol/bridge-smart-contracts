@@ -184,11 +184,11 @@ contract BaseBridgeTest is Test {
     }
 
     // ========================================================================
-    // R-W-05 — two-tier pause (inflow vs outflow / emergency)
+    // Two-tier pause (inflow vs outflow / emergency)
     // ========================================================================
 
-    /// @dev UT-FIX-08: with outflow frozen, fundsOut reverts. The
-    ///      whenOutflowNotPaused modifier runs before the body, so a dummy
+    /// @dev With outflow frozen, fundsOut reverts. The whenOutflowNotPaused
+    ///      modifier runs before the body, so a dummy
     ///      release is enough to exercise the gate.
     function test_fundsOut_revertsWhenOutflowPaused() public {
         vm.prank(user);

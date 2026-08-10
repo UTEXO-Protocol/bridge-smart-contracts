@@ -17,6 +17,7 @@ contract CommissionManagerTest is Test {
     CommissionManager internal cm;
     MockERC20 internal token;
     MockAggregatorV3 internal ethUsdFeed;
+    MockAggregatorV3 internal sequencerFeed;
 
     address internal constant BRIDGE = address(0xB01);
     address internal owner = makeAddr("owner");
@@ -35,6 +36,8 @@ contract CommissionManagerTest is Test {
     uint8 internal constant FEED_DECIMALS = 8;
     int256 internal constant DEFAULT_ETH_USD = 2_000e8; // $2000 / ETH
     uint256 internal constant HEARTBEAT = 1 hours;
+    uint256 internal constant MIN_ETH_USD = 100e8;
+    uint256 internal constant MAX_ETH_USD = 100_000e8;
 
     event BridgeAddressUpdated(address indexed newBridge);
     event GlobalDefaultsUpdated(
@@ -52,29 +55,39 @@ contract CommissionManagerTest is Test {
         vm.warp(HEARTBEAT * 10);
 
         vm.prank(owner);
-        cm = new CommissionManager(BRIDGE);
+        cm = new CommissionManager(BRIDGE, recipient);
         token = new MockERC20("Test", "TST");
         vm.prank(owner);
         cm.setGlobalDefaults(0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
-        // Deploy a default ETH/USD feed and wire it in. Tests that need to
-        // exercise the "feed unset" branch redeploy CM without calling
-        // `setEthUsdFeed` (see test_convertTokenFeeToNative_revertsIfFeedUnset).
+        // Install a complete healthy Arbitrum oracle config. The sequencer feed
+        // and price band are mandatory whenever a non-zero NATIVE
+        // quote consumes ETH/USD.
         ethUsdFeed = new MockAggregatorV3(FEED_DECIMALS, DEFAULT_ETH_USD, block.timestamp);
-        vm.prank(owner);
+        sequencerFeed = new MockAggregatorV3(0, 0, block.timestamp - cm.SEQUENCER_GRACE_PERIOD() - 1);
+        vm.startPrank(owner);
+        cm.setSequencerUptimeFeed(address(sequencerFeed));
+        cm.setEthUsdPriceBounds(MIN_ETH_USD, MAX_ETH_USD);
         cm.setEthUsdFeed(address(ethUsdFeed), HEARTBEAT);
+        vm.stopPrank();
     }
 
     // --- Constructor ---
 
     function test_constructor_setsBridgeAndOwner() public view {
         assertEq(cm.bridgeAddress(), BRIDGE);
+        assertEq(cm.commissionRecipient(), recipient);
         assertEq(cm.owner(), owner);
     }
 
     function test_constructor_revertsOnZeroBridge() public {
         vm.expectRevert(ICommissionManager.InvalidBridgeAddress.selector);
-        new CommissionManager(address(0));
+        new CommissionManager(address(0), recipient);
+    }
+
+    function test_constructor_revertsOnZeroCommissionRecipient() public {
+        vm.expectRevert(ICommissionManager.InvalidRecipient.selector);
+        new CommissionManager(BRIDGE, address(0));
     }
 
     function test_renounceOwnership_blocked() public {
@@ -108,7 +121,7 @@ contract CommissionManagerTest is Test {
     function test_convertTokenFeeToNative_revertsIfFeedUnset() public {
         // Fresh CM with no feed configured.
         vm.prank(owner);
-        CommissionManager freshCm = new CommissionManager(BRIDGE);
+        CommissionManager freshCm = new CommissionManager(BRIDGE, recipient);
         vm.expectRevert(ICommissionManager.EthUsdFeedNotSet.selector);
         freshCm.convertTokenFeeToNative(1e18, 18);
     }
@@ -143,17 +156,14 @@ contract CommissionManagerTest is Test {
         cm.convertTokenFeeToNative(1, 19);
     }
 
-    // With the min/max band UNSET (the default), a fresh positive answer is
-    // accepted no matter how extreme — which is exactly why an Arbitrum
-    // deployment configures `setEthUsdPriceBounds`. Band-enabled rejection is
-    // covered by test_convertTokenFeeToNative_revertsWhenPriceBelowMin/AboveMax.
-    function test_convertTokenFeeToNative_allowsOutlierWhenBandUnset() public {
+    function test_convertTokenFeeToNative_revertsBeforeReadingOutlierWhenBandUnset() public {
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(0, 0);
         ethUsdFeed.setAnswer(1); // $1e-8 — an extreme outlier
         ethUsdFeed.setUpdatedAt(block.timestamp);
 
-        uint256 nativeFee = cm.convertTokenFeeToNative(1e18, 18);
-
-        assertEq(nativeFee, 1e26, "fresh outlier accepted while band is unset");
+        vm.expectRevert(ICommissionManager.ChainlinkHardeningNotConfigured.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
     }
 
     function test_buildRouteKey_matchesEncodeHash() public view {
@@ -174,8 +184,8 @@ contract CommissionManagerTest is Test {
 
     function test_setGlobalDefaults_updatesAndEmits() public {
         // FUNDS_IN + NATIVE is a valid shape (the user funds the native fee on
-        // deposit). NATIVE + FUNDS_OUT is rejected by the setter (R-W-04) and is
-        // covered by a dedicated revert test.
+        // deposit). NATIVE + FUNDS_OUT is rejected by the setter and is covered
+        // by a dedicated revert test.
         vm.expectEmit(true, true, true, true);
         emit GlobalDefaultsUpdated(200, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
         vm.prank(owner);
@@ -215,7 +225,7 @@ contract CommissionManagerTest is Test {
         cm.setGlobalDefaults(400, 0, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
-    /// @dev UT-FIX-07: setGlobalDefaults rejects the NATIVE + FUNDS_OUT shape.
+    /// @dev setGlobalDefaults rejects the NATIVE + FUNDS_OUT shape.
     function test_setGlobalDefaults_revertsNativeFundsOut() public {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.NativeCommissionNotAllowedOnFundsOut.selector);
@@ -432,7 +442,7 @@ contract CommissionManagerTest is Test {
         cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
     }
 
-    /// @dev UT-FIX-07: setCommissionRule rejects the NATIVE + FUNDS_OUT shape.
+    /// @dev setCommissionRule rejects the NATIVE + FUNDS_OUT shape.
     function test_setCommissionRule_revertsNativeFundsOut() public {
         address t = address(token);
         CommissionConfig memory cfg = CommissionConfig({
@@ -465,14 +475,13 @@ contract CommissionManagerTest is Test {
         assertEq(uint8(stored.currency), uint8(CommissionCurrency.TOKEN));
     }
 
-    // --- Fee-shape invariant (R-W-03 / UT-FIX-06) -----------------------------
+    // --- Fee-shape invariant --------------------------------------------------
     //
     // The stable-fee formula is `amount * stablePercent / multiplier / multiplier`,
     // i.e. a fee fraction of `stablePercent / multiplier^2`. If `stablePercent`
-    // exceeds `multiplier^2` the quoted fee exceeds the bridged amount and the
-    // later `netAmount = amount - fee` underflows (Panic 0x11), bricking the
-    // route until the federation reconfigures. The setters must therefore reject
-    // any `(stablePercent, multiplier)` pair where `stablePercent > multiplier^2`.
+    // reaches `multiplier^2` the fee consumes the whole bridged amount; above it,
+    // `netAmount = amount - fee` underflows. The setters must therefore require
+    // `stablePercent < multiplier^2`, guaranteeing a positive nominal net.
     function test_setGlobalDefaults_revertsWhenStablePercentExceedsMultiplierSquared() public {
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(9000), uint8(1)));
@@ -487,15 +496,11 @@ contract CommissionManagerTest is Test {
         cm.setGlobalDefaults(101, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
-    /// @dev Exact boundary `stablePercent == multiplier^2` is accepted: it is a 100%
-    ///      fee (`netAmount = 0`) which is degenerate but does not underflow, so the
-    ///      invariant rejects only the strictly-greater case.
-    function test_setGlobalDefaults_acceptsFeeShapeAtExactBoundary() public {
+    /// @dev The exact boundary is a 100% fee and must be rejected too.
+    function test_setGlobalDefaults_revertsFeeShapeAtExactBoundary() public {
         vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(100), uint8(10)));
         cm.setGlobalDefaults(100, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
-        (uint256 sp, uint8 m,,) = cm.getGlobalDefaults();
-        assertEq(sp, 100);
-        assertEq(m, 10);
     }
 
     /// @dev Regression for the uint8 widening in the fix. With the default
@@ -526,8 +531,8 @@ contract CommissionManagerTest is Test {
         cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
     }
 
-    /// @dev Exact boundary `stablePercent == multiplier^2` accepted on the route setter.
-    function test_setCommissionRule_acceptsFeeShapeAtExactBoundary() public {
+    /// @dev Per-route rules also reject the exact 100% boundary.
+    function test_setCommissionRule_revertsFeeShapeAtExactBoundary() public {
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 100,
             multiplier: 10,
@@ -536,10 +541,8 @@ contract CommissionManagerTest is Test {
             isSet: true
         });
         vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(100), uint8(10)));
         cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
-        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token));
-        assertEq(stored.stablePercent, 100);
-        assertEq(stored.multiplier, 10);
     }
 
     /// @dev uint8-widening regression on the per-route setter: `(9000, 100)` is valid.
@@ -558,19 +561,54 @@ contract CommissionManagerTest is Test {
         assertEq(stored.multiplier, 100);
     }
 
-    /// @dev End state of the invariant: a config accepted at the exact boundary
-    ///      yields `fee == amount` and `netAmount == 0` without underflowing. This
-    ///      is what the setter guard guarantees for every storable rule — the
-    ///      `amount - fee` subtraction in the calculators can never go negative.
-    function test_calculateFundsInCommission_acceptedBoundaryDoesNotUnderflow() public {
+    /// @dev Direct regression for the auditor's `8100 / 90^2 == 100%` PoC.
+    function test_rejectsHundredPercentFeeConfiguration() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(100, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
-        uint256 amount = 50_000;
-        (uint256 tok, uint256 nat, uint256 net) =
-            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), amount);
-        assertEq(tok, amount); // 100% fee at the boundary
-        assertEq(nat, 0);
-        assertEq(net, 0); // no underflow
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(8100), uint8(90)));
+        cm.setGlobalDefaults(8100, 90, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev A non-zero inbound fee policy cannot silently round to zero.
+    function test_fundsInActiveFeeRejectsCommissionFreeDust() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICommissionManager.CommissionRoundsToZero.selector, uint256(24), uint256(400), uint8(100)
+            )
+        );
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24);
+    }
+
+    /// @dev The same runtime invariant applies to outbound fee rules.
+    function test_fundsOutActiveFeeRejectsCommissionFreeDust() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 400,
+            multiplier: 100,
+            side: CommissionSide.FUNDS_OUT,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICommissionManager.CommissionRoundsToZero.selector, uint256(24), uint256(400), uint8(100)
+            )
+        );
+        cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24);
+    }
+
+    /// @dev A deliberately disabled fee remains valid; only active policies
+    ///      promise a non-zero commission.
+    function test_zeroFeePolicyStillAllowsSmallAmount() public view {
+        (uint256 tokenFee, uint256 nativeFee, uint256 netAmount) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1);
+        assertEq(tokenFee, 0);
+        assertEq(nativeFee, 0);
+        assertEq(netAmount, 1);
     }
 
     // --- Bridge address ---
@@ -611,8 +649,8 @@ contract CommissionManagerTest is Test {
         cm.receiveTokenCommission(address(token), 0);
     }
 
-    // After the R-I-04 fix the pool is credited by the passed `credited`, not by
-    // balanceOf - pool. Crediting more than the on-chain balance can back reverts
+    // The pool is credited by the passed `credited`, not by balanceOf - pool.
+    // Crediting more than the on-chain balance can back reverts
     // BalanceBelowRecordedPool (guards against over-crediting).
     function test_receiveTokenCommission_revertsWhenCreditExceedsBalance() public {
         token.mint(address(cm), 5 ether);
@@ -621,10 +659,10 @@ contract CommissionManagerTest is Test {
         cm.receiveTokenCommission(address(token), 6 ether);
     }
 
-    // R-I-04 after-fix: an unsolicited direct transfer already sitting in the CM
-    // is NOT folded into the pool. The Bridge measures only its own transfer and
+    // An unsolicited direct transfer already sitting in the CM is NOT folded
+    // into the pool. The Bridge measures only its own transfer and
     // passes that as `credited`; the donation stays as a stray balance.
-    function test_receiveTokenCommission_doesNotAbsorbUnsolicitedBalance_afterFix() public {
+    function test_receiveTokenCommission_doesNotAbsorbUnsolicitedBalance() public {
         uint256 unsolicitedAmount = 3 ether;
         uint256 legitimateAmount = 7 ether;
 
@@ -657,7 +695,7 @@ contract CommissionManagerTest is Test {
         cm.receiveTokenCommission(address(token), amt);
 
         vm.prank(owner);
-        cm.withdrawTokenCommission(address(token), recipient, amt);
+        cm.withdrawTokenCommission(address(token), amt);
 
         assertEq(cm.tokenCommissionPool(address(token)), 0);
         assertEq(token.balanceOf(recipient), amt);
@@ -670,7 +708,7 @@ contract CommissionManagerTest is Test {
         cm.receiveTokenCommission(address(token), amt);
 
         vm.prank(owner);
-        cm.withdrawAllTokenCommission(address(token), recipient);
+        cm.withdrawAllTokenCommission(address(token));
 
         assertEq(cm.tokenCommissionPool(address(token)), 0);
         assertEq(token.balanceOf(recipient), amt);
@@ -679,7 +717,31 @@ contract CommissionManagerTest is Test {
     function test_withdrawTokenCommission_revertsInsufficient() public {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.InsufficientBalance.selector);
-        cm.withdrawTokenCommission(address(token), recipient, 1);
+        cm.withdrawTokenCommission(address(token), 1);
+    }
+
+    function test_legacyFreeRecipientWithdrawalSelectorsUnavailable() public {
+        uint256 amount = 10 ether;
+        token.mint(address(cm), amount);
+        vm.prank(BRIDGE);
+        cm.receiveTokenCommission(address(token), amount);
+
+        bytes[] memory legacyCalls = new bytes[](4);
+        legacyCalls[0] =
+            abi.encodeWithSignature("withdrawTokenCommission(address,address,uint256)", address(token), user, amount);
+        legacyCalls[1] = abi.encodeWithSignature("withdrawNativeCommission(address,uint256)", user, amount);
+        legacyCalls[2] = abi.encodeWithSignature("withdrawAllTokenCommission(address,address)", address(token), user);
+        legacyCalls[3] = abi.encodeWithSignature("withdrawAllNativeCommission(address)", user);
+
+        for (uint256 i = 0; i < legacyCalls.length; i++) {
+            vm.prank(owner);
+            (bool ok,) = address(cm).call(legacyCalls[i]);
+            assertFalse(ok, "legacy free-recipient selector must not exist");
+        }
+
+        assertEq(cm.tokenCommissionPool(address(token)), amount, "failed legacy calls preserve pool");
+        assertEq(token.balanceOf(user), 0, "arbitrary recipient receives nothing");
+        assertEq(token.balanceOf(recipient), 0, "no valid withdrawal executed");
     }
 
     // --- Native commission ---
@@ -711,7 +773,7 @@ contract CommissionManagerTest is Test {
 
         uint256 before = recipient.balance;
         vm.prank(owner);
-        cm.withdrawNativeCommission(payable(recipient), 2 ether);
+        cm.withdrawNativeCommission(2 ether);
         assertEq(cm.nativeCommissionPool(), 0);
         assertEq(recipient.balance, before + 2 ether);
     }
@@ -724,7 +786,7 @@ contract CommissionManagerTest is Test {
 
         uint256 before = recipient.balance;
         vm.prank(owner);
-        cm.withdrawAllNativeCommission(payable(recipient));
+        cm.withdrawAllNativeCommission();
         assertEq(cm.nativeCommissionPool(), 0);
         assertEq(recipient.balance, before + 3 ether);
     }
@@ -732,7 +794,7 @@ contract CommissionManagerTest is Test {
     function test_withdrawNativeCommission_revertsInsufficient() public {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.InsufficientBalance.selector);
-        cm.withdrawNativeCommission(payable(recipient), 1 wei);
+        cm.withdrawNativeCommission(1 wei);
     }
 
     // --- Formula regression coverage ---
@@ -752,9 +814,12 @@ contract CommissionManagerTest is Test {
         // formula instead of mirroring the implementation expression.
         for (uint256 i = 0; i < tokenFees.length; i++) {
             MockAggregatorV3 feed = new MockAggregatorV3(feedDecimals[i], prices[i], block.timestamp);
+            uint256 decimalScale = 10 ** uint256(feedDecimals[i]);
 
-            vm.prank(owner);
+            vm.startPrank(owner);
+            cm.setEthUsdPriceBounds(100 * decimalScale, 100_000 * decimalScale);
             cm.setEthUsdFeed(address(feed), HEARTBEAT);
+            vm.stopPrank();
 
             assertEq(
                 cm.convertTokenFeeToNative(tokenFees[i], tokenDecimals[i]), expectedNativeFees[i], "native fee formula"
@@ -782,9 +847,12 @@ contract CommissionManagerTest is Test {
 
     // --- sequencer uptime ---
 
-    function test_convertTokenFeeToNative_noSequencerCheckWhenUnset() public view {
-        // No sequencer feed wired (setUp does not set one) → quote works.
-        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14);
+    function test_convertTokenFeeToNative_revertsWhenSequencerFeedUnset() public {
+        vm.prank(owner);
+        cm.setSequencerUptimeFeed(address(0));
+
+        vm.expectRevert(ICommissionManager.ChainlinkHardeningNotConfigured.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
     }
 
     function test_convertTokenFeeToNative_revertsWhenSequencerDown() public {
@@ -808,6 +876,19 @@ contract CommissionManagerTest is Test {
         cm.convertTokenFeeToNative(1e18, 18);
     }
 
+    function test_convertTokenFeeToNative_revertsOnUninitializedSequencerRound() public {
+        _setSequencer(0, 0);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidSequencerRound.selector, uint256(0)));
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
+    function test_convertTokenFeeToNative_revertsOnFutureSequencerRound() public {
+        uint256 futureStartedAt = block.timestamp + 1;
+        _setSequencer(0, futureStartedAt);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidSequencerRound.selector, futureStartedAt));
+        cm.convertTokenFeeToNative(1e18, 18);
+    }
+
     function test_convertTokenFeeToNative_passesWhenSequencerUpPastGrace() public {
         _setSequencer(0, block.timestamp - cm.SEQUENCER_GRACE_PERIOD() - 1);
         assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14); // same as happy path
@@ -815,9 +896,12 @@ contract CommissionManagerTest is Test {
 
     // --- min/max price band ---
 
-    function test_convertTokenFeeToNative_noBandWhenUnset() public view {
-        // No band configured in setUp → any positive fresh answer is accepted.
-        assertEq(cm.convertTokenFeeToNative(1e18, 18), 5e14);
+    function test_convertTokenFeeToNative_revertsWhenBandUnset() public {
+        vm.prank(owner);
+        cm.setEthUsdPriceBounds(0, 0);
+
+        vm.expectRevert(ICommissionManager.ChainlinkHardeningNotConfigured.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
     }
 
     function test_convertTokenFeeToNative_revertsWhenPriceBelowMin() public {
@@ -869,6 +953,9 @@ contract CommissionManagerTest is Test {
         vm.prank(owner);
         cm.setSequencerUptimeFeed(address(0));
         assertEq(cm.sequencerUptimeFeed(), address(0));
+
+        vm.expectRevert(ICommissionManager.ChainlinkHardeningNotConfigured.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
     }
 
     function test_setSequencerUptimeFeed_onlyOwner() public {
@@ -893,6 +980,9 @@ contract CommissionManagerTest is Test {
         cm.setEthUsdPriceBounds(0, 0);
         assertEq(cm.ethUsdMinPrice(), 0);
         assertEq(cm.ethUsdMaxPrice(), 0);
+
+        vm.expectRevert(ICommissionManager.ChainlinkHardeningNotConfigured.selector);
+        cm.convertTokenFeeToNative(1e18, 18);
     }
 
     function test_setEthUsdPriceBounds_revertsOnZeroMinWithNonZeroMax() public {

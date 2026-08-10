@@ -15,6 +15,7 @@ import {RouteRegistry} from "../src/RouteRegistry.sol";
 import {IRouteRegistry} from "../src/interfaces/IRouteRegistry.sol";
 import {RGBVerifier} from "../src/verifiers/RGBVerifier.sol";
 import {RgbSettlementModule} from "../src/settlement/RgbSettlementModule.sol";
+import {OutflowRateLimiter} from "../src/libraries/OutflowRateLimiter.sol";
 import {RouteConfig} from "../src/interfaces/RouteTypes.sol";
 import {
     CommissionConfig,
@@ -26,6 +27,22 @@ import {
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockBtcRelay} from "./mocks/MockBtcRelay.sol";
 import {MultisigHelper} from "./mocks/MultisigHelper.sol";
+import {EmergencyPause} from "../script/interact/EmergencyPause.s.sol";
+import {EmergencyUnpause} from "../script/interact/EmergencyUnpause.s.sol";
+
+/// @dev Exposes the exact nonce/digest preparation used by the production
+///      scripts so tests cannot pass against a duplicated implementation.
+contract EmergencyPauseHarness is EmergencyPause {
+    function prepare(MultisigProxy proxy, uint256 deadline) external view returns (uint256 nonce, bytes32 digest) {
+        return _prepareEmergencyPause(proxy, deadline);
+    }
+}
+
+contract EmergencyUnpauseHarness is EmergencyUnpause {
+    function prepare(MultisigProxy proxy, uint256 deadline) external view returns (uint256 nonce, bytes32 digest) {
+        return _prepareEmergencyUnpause(proxy, deadline);
+    }
+}
 
 contract MockOutboundLZAdapter {
     MockERC20 public immutable token;
@@ -72,6 +89,9 @@ contract MultisigProxyTest is Test {
 
     // ---- Re-declared events ------------------------------------------------
     event FundsOutExecuted(uint256 indexed sourceChainId, uint256 indexed nonce, uint256 enclaveBitmap);
+    event RebalanceExecuted(
+        uint256 indexed sourceChainId, uint256 indexed destinationChainId, uint256 nonce, uint256 enclaveBitmap
+    );
     event LzFundsOutExecuted(
         uint256 indexed sourceChainId,
         uint256 indexed nonce,
@@ -167,6 +187,11 @@ contract MultisigProxyTest is Test {
     string constant DST_ADDR = "rgb:asset/utxo1abc";
     string constant SRC_ADDR = "rgb:sender/utxo1src";
     uint256 constant AMOUNT = 100e18;
+
+    /// @dev Balanced policy that consumes the full configurable budget:
+    ///      10% instant burst plus 10% refill per window.
+    uint256 constant MAX_BURST_BPS = 1_000;
+    uint256 constant MAX_REFILL_BPS = 1_000;
     uint256 constant TX_ID = 42;
     uint256 constant RGB_OP_ID = 0xABCDEF;
     uint256 constant BURN_ID = 9_001;
@@ -214,7 +239,7 @@ contract MultisigProxyTest is Test {
         uint64 currentNonce = vm.getNonce(deployer);
         address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
 
-        cm = new CommissionManager(predictedBridge);
+        cm = new CommissionManager(predictedBridge, commissionReceiver);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
         bridge = new Bridge(
             address(token),
@@ -242,15 +267,7 @@ contract MultisigProxyTest is Test {
         fed[1] = fedA2;
         fed[2] = fedA3;
 
-        proxy = new MultisigProxy(
-            address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, fed, 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK
-        );
-
-        // Outflow rate limits: configure generous buckets while
-        // the deployer still owns the Bridge, so the release path is enabled
-        // before ownership moves to the proxy.
-        bridge.setOutflowLimit(RGB_CHAIN_ID, 1_000_000 ether, uint256(1_000_000 ether) / 1 days);
-        bridge.setGlobalOutflowLimit(1_000_000 ether, uint256(1_000_000 ether) / 1 days);
+        proxy = new MultisigProxy(address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, fed, 2, TIMELOCK, MIN_TIMELOCK);
 
         // Production-flow ownership transfer.
         bridge.transferOwnership(address(proxy));
@@ -270,11 +287,22 @@ contract MultisigProxyTest is Test {
         domainSep = proxy.DOMAIN_SEPARATOR();
 
         // Fund user, lock tokens into the bridge so fundsOut has a pool.
-        token.mint(user, AMOUNT * 10);
+        // Keep a separate user balance for tests that make follow-up deposits
+        // or fund the CommissionManager after the 10x seed deposit.
+        token.mint(user, AMOUNT * 20);
         vm.prank(user);
         token.approve(address(bridge), type(uint256).max);
+        // Policies are percentages of reference liquidity, so they are installed
+        // before the deposit — the order a deployment uses. `burstBps +
+        // refillBpsPerWindow` is capped at 20%. This balanced policy spends the
+        // full configurable budget: 10% available up front, 10% refill/window.
+        vm.startPrank(address(proxy));
+        bridge.setOutflowLimit(RGB_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
+        bridge.setGlobalOutflowLimit(MAX_BURST_BPS, MAX_REFILL_BPS);
+        vm.stopPrank();
+
         vm.prank(user);
-        seedOpId = bridge.fundsIn(AMOUNT * 5, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
+        seedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
     }
 
     // ========================================================================
@@ -476,9 +504,7 @@ contract MultisigProxyTest is Test {
         address[] memory fed = new address[](1);
         fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.ZeroBridge.selector);
-        new MultisigProxy(
-            address(0), address(cm), enc, 1, RGB_CHAIN_ID, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK
-        );
+        new MultisigProxy(address(0), address(cm), enc, 1, RGB_CHAIN_ID, fed, 1, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnZeroCommissionManager() public {
@@ -487,9 +513,7 @@ contract MultisigProxyTest is Test {
         address[] memory fed = new address[](1);
         fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.ZeroCommissionManager.selector);
-        new MultisigProxy(
-            address(bridge), address(0), enc, 1, RGB_CHAIN_ID, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK
-        );
+        new MultisigProxy(address(bridge), address(0), enc, 1, RGB_CHAIN_ID, fed, 1, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnNoEnclaveSigners() public {
@@ -497,9 +521,7 @@ contract MultisigProxyTest is Test {
         address[] memory fed = new address[](1);
         fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.NoSigners.selector);
-        new MultisigProxy(
-            address(bridge), address(cm), enc, 1, RGB_CHAIN_ID, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK
-        );
+        new MultisigProxy(address(bridge), address(cm), enc, 1, RGB_CHAIN_ID, fed, 1, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnBadEnclaveThreshold() public {
@@ -509,86 +531,35 @@ contract MultisigProxyTest is Test {
         address[] memory fed = new address[](1);
         fed[0] = fedA1;
         vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
-        new MultisigProxy(
-            address(bridge), address(cm), enc, 3, RGB_CHAIN_ID, fed, 1, commissionReceiver, TIMELOCK, MIN_TIMELOCK
-        );
-    }
-
-    function test_constructor_revertsOnZeroCommission() public {
-        vm.expectRevert(IMultisigProxy.ZeroCommissionRecipient.selector);
-        new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _validEnc(),
-            2,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            address(0),
-            TIMELOCK,
-            MIN_TIMELOCK
-        );
+        new MultisigProxy(address(bridge), address(cm), enc, 3, RGB_CHAIN_ID, fed, 1, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnTimelockTooLong() public {
         vm.expectRevert(IMultisigProxy.TimelockTooLong.selector);
         new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _validEnc(),
-            2,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            commissionReceiver,
-            30 days,
-            MIN_TIMELOCK
+            address(bridge), address(cm), _validEnc(), 2, RGB_CHAIN_ID, _validFed(), 2, 30 days, MIN_TIMELOCK
         );
     }
 
-    // ---- R-W-11: MIN_TIMELOCK floor (post-fix) ----
+    // ---- MIN_TIMELOCK floor ----
 
-    /// @dev UT-FIX-13: deploying with a timelock below the requested floor reverts.
+    /// @dev Deploying with a timelock below the requested floor reverts.
     function test_constructor_revertsOnTimelockBelowMinTimelock() public {
         // timelock (1h) is below the requested floor (2h) -> TimelockTooShort
         vm.expectRevert(IMultisigProxy.TimelockTooShort.selector);
-        new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _validEnc(),
-            2,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            commissionReceiver,
-            1 hours,
-            2 hours
-        );
+        new MultisigProxy(address(bridge), address(cm), _validEnc(), 2, RGB_CHAIN_ID, _validFed(), 2, 1 hours, 2 hours);
     }
 
     /// @dev A zero floor is rejected — it would defeat the purpose of the fix.
     function test_constructor_revertsOnZeroMinTimelock() public {
         vm.expectRevert(IMultisigProxy.InvalidMinTimelock.selector);
-        new MultisigProxy(
-            address(bridge), address(cm), _validEnc(), 2, RGB_CHAIN_ID, _validFed(), 2, commissionReceiver, TIMELOCK, 0
-        );
+        new MultisigProxy(address(bridge), address(cm), _validEnc(), 2, RGB_CHAIN_ID, _validFed(), 2, TIMELOCK, 0);
     }
 
     /// @dev A floor at/above the upper bound leaves no valid range — rejected.
     function test_constructor_revertsOnMinTimelockTooLong() public {
         vm.expectRevert(IMultisigProxy.InvalidMinTimelock.selector);
-        new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _validEnc(),
-            2,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            commissionReceiver,
-            TIMELOCK,
-            30 days
-        );
+        new MultisigProxy(address(bridge), address(cm), _validEnc(), 2, RGB_CHAIN_ID, _validFed(), 2, TIMELOCK, 30 days);
     }
 
     function test_minTimelock_returnsConfiguredFloor() public view {
@@ -602,18 +573,7 @@ contract MultisigProxyTest is Test {
         enc[0] = encA1;
         enc[1] = encA1;
         vm.expectRevert(IMultisigProxy.DuplicateSigner.selector);
-        new MultisigProxy(
-            address(bridge),
-            address(cm),
-            enc,
-            2,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
-        );
+        new MultisigProxy(address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, _validFed(), 2, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_revertsOnZeroAddressSigner() public {
@@ -624,22 +584,11 @@ contract MultisigProxyTest is Test {
         enc[0] = address(0);
         enc[1] = encA2;
         vm.expectRevert(IMultisigProxy.ZeroAddressSigner.selector);
-        new MultisigProxy(
-            address(bridge),
-            address(cm),
-            enc,
-            2,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
-        );
+        new MultisigProxy(address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, _validFed(), 2, TIMELOCK, MIN_TIMELOCK);
     }
 
     // ========================================================================
-    // Strict-majority signer threshold floor (R-W-12 / UT-FIX-14)
+    // Strict-majority signer threshold floor
     //
     // Both signer sets, at construction and on signer-update, must be a strict
     // majority of at least 2 signers: n >= 2, threshold >= 2, threshold <= n,
@@ -671,16 +620,7 @@ contract MultisigProxyTest is Test {
     function test_constructor_rejectsOneOfThree_enclave() public {
         vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
         new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _signers(3),
-            1,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
+            address(bridge), address(cm), _signers(3), 1, RGB_CHAIN_ID, _validFed(), 2, TIMELOCK, MIN_TIMELOCK
         );
     }
 
@@ -688,16 +628,7 @@ contract MultisigProxyTest is Test {
         // n < 2 — single-key set, rejected even though 2*1 > 1.
         vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
         new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _signers(1),
-            1,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
+            address(bridge), address(cm), _signers(1), 1, RGB_CHAIN_ID, _validFed(), 2, TIMELOCK, MIN_TIMELOCK
         );
     }
 
@@ -705,16 +636,7 @@ contract MultisigProxyTest is Test {
         // 2-of-4: 2*2 == 4, not a strict majority.
         vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
         new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _signers(4),
-            2,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
+            address(bridge), address(cm), _signers(4), 2, RGB_CHAIN_ID, _validFed(), 2, TIMELOCK, MIN_TIMELOCK
         );
     }
 
@@ -722,31 +644,13 @@ contract MultisigProxyTest is Test {
         // Enclave valid, federation 1-of-3 — the floor applies to both sets.
         vm.expectRevert(IMultisigProxy.InvalidThreshold.selector);
         new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _validEnc(),
-            2,
-            RGB_CHAIN_ID,
-            _signers(3),
-            1,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
+            address(bridge), address(cm), _validEnc(), 2, RGB_CHAIN_ID, _signers(3), 1, TIMELOCK, MIN_TIMELOCK
         );
     }
 
     function test_constructor_acceptsTwoOfTwo() public {
         MultisigProxy p = new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _signers(2),
-            2,
-            RGB_CHAIN_ID,
-            _signersB(2),
-            2,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
+            address(bridge), address(cm), _signers(2), 2, RGB_CHAIN_ID, _signersB(2), 2, TIMELOCK, MIN_TIMELOCK
         );
         assertEq(p.enclaveThreshold(RGB_CHAIN_ID), 2);
         assertEq(p.federationThreshold(), 2);
@@ -755,16 +659,7 @@ contract MultisigProxyTest is Test {
     function test_constructor_acceptsThreeOfFour() public {
         // Strict majority with a non-trivial set (2*3 > 4).
         MultisigProxy p = new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _signers(4),
-            3,
-            RGB_CHAIN_ID,
-            _signersB(4),
-            3,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
+            address(bridge), address(cm), _signers(4), 3, RGB_CHAIN_ID, _signersB(4), 3, TIMELOCK, MIN_TIMELOCK
         );
         assertEq(p.enclaveThreshold(RGB_CHAIN_ID), 3);
         assertEq(p.federationThreshold(), 3);
@@ -792,7 +687,7 @@ contract MultisigProxyTest is Test {
     // ---- Intrinsic set validation runs at propose time ----
     // (empty / zero-address / duplicate paths; threshold and MAX_SIGNERS are
     //  covered by the *AtPropose tests above. Disjointness stays deferred to
-    //  execute — see the R-W-14 *OverlapWith*AtExecute tests.)
+    //  execute — see the *OverlapWith*AtExecute tests.)
 
     function test_proposeUpdateEnclaveSigners_rejectsEmptySetAtPropose() public {
         address[] memory newSigners = new address[](0);
@@ -895,7 +790,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Disjoint signer sets (R-W-14 / UT-FIX-16)
+    // Disjoint signer sets
     //
     // The enclave and federation sets must not share an address, at construction
     // and on signer-update (validated at executeProposal). The setUp sets are
@@ -911,23 +806,12 @@ contract MultisigProxyTest is Test {
         fed[0] = encA1;
         fed[1] = fedA2;
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.SignerSetsOverlap.selector, encA1));
-        new MultisigProxy(
-            address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, fed, 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK
-        );
+        new MultisigProxy(address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, fed, 2, TIMELOCK, MIN_TIMELOCK);
     }
 
     function test_constructor_acceptsDisjointSignerSets() public {
         MultisigProxy p = new MultisigProxy(
-            address(bridge),
-            address(cm),
-            _signers(2),
-            2,
-            RGB_CHAIN_ID,
-            _signersB(2),
-            2,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
+            address(bridge), address(cm), _signers(2), 2, RGB_CHAIN_ID, _signersB(2), 2, TIMELOCK, MIN_TIMELOCK
         );
         assertEq(p.getEnclaveSigners(RGB_CHAIN_ID).length, 2);
         assertEq(p.getFederationSigners().length, 2);
@@ -978,7 +862,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Signer-set size cap (R-I-06 / UT-FIX-27)
+    // Signer-set size cap
     //
     // Either set is capped at MAX_SIGNERS, at construction and on signer-update
     // (validated in _validateSigners at executeProposal). The cap bounds the
@@ -992,16 +876,7 @@ contract MultisigProxyTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.TooManySigners.selector, max + 1, max));
         new MultisigProxy(
-            address(bridge),
-            address(cm),
-            enc,
-            encThreshold,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            commissionReceiver,
-            TIMELOCK,
-            MIN_TIMELOCK
+            address(bridge), address(cm), enc, encThreshold, RGB_CHAIN_ID, _validFed(), 2, TIMELOCK, MIN_TIMELOCK
         );
     }
 
@@ -1017,7 +892,6 @@ contract MultisigProxyTest is Test {
             RGB_CHAIN_ID,
             _signersB(max),
             threshold,
-            commissionReceiver,
             TIMELOCK,
             MIN_TIMELOCK
         );
@@ -1079,7 +953,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // TEE deadline upper bound (R-I-01 / UT-FIX-23)
+    // TEE deadline upper bound
     //
     // fundsOutCall / lzFundsOutCall reject a signed deadline further than
     // MAX_TEE_DEADLINE into the future, so a leaked or pre-signed payload cannot
@@ -1163,6 +1037,117 @@ contract MultisigProxyTest is Test {
 
         vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
         proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
+    }
+
+    // ========================================================================
+    // TEE rebalanceCall
+    // ========================================================================
+
+    /// @dev Rebalance params over the registered (RGB → SOURCE) route: debit
+    ///      leg is burn-backed (BtcRelay proof + seed record check), credit leg
+    ///      writes a record and threads a fresh RGB OpId. Canonical burnId is
+    ///      derived purely from the intent (no nonce), mirroring the Bridge formula.
+    function _rebalanceParams() internal view returns (IBridge.RebalanceParams memory p) {
+        bytes memory proof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
+        p = IBridge.RebalanceParams({
+            amount: AMOUNT,
+            burnId: 0,
+            sourceChainId: RGB_CHAIN_ID,
+            destinationChainId: SOURCE_CHAIN_ID,
+            sourceAddress: SRC_ADDR,
+            destinationAddress: DST_ADDR,
+            proof: proof,
+            settlementDataOut: _settlement(_fundsInIds()),
+            settlementDataIn: abi.encode(RGB_OP_ID + 7)
+        });
+
+        p.burnId = uint256(
+            keccak256(
+                bytes.concat(
+                    abi.encode(
+                        bridge.REBALANCE_BURN_ID_TYPEHASH(),
+                        address(bridge),
+                        block.chainid,
+                        address(token),
+                        p.amount,
+                        p.sourceChainId,
+                        p.destinationChainId
+                    ),
+                    abi.encode(
+                        keccak256(bytes(p.sourceAddress)),
+                        keccak256(bytes(p.destinationAddress)),
+                        keccak256(p.proof),
+                        keccak256(p.settlementDataOut),
+                        keccak256(p.settlementDataIn)
+                    )
+                )
+            )
+        );
+    }
+
+    function test_rebalanceCall_executesViaBridge() public {
+        IBridge.RebalanceParams memory params = _rebalanceParams();
+        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestTeeRebalance(domainSep, params, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        uint256 srcBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 dstBefore = bridge.lockedLiquidity(SOURCE_CHAIN_ID);
+        uint256 custodyBefore = token.balanceOf(address(bridge));
+
+        vm.expectEmit(true, true, false, true);
+        emit RebalanceExecuted(RGB_CHAIN_ID, SOURCE_CHAIN_ID, nonce, bitmap);
+
+        proxy.rebalanceCall(params, nonce, deadline, bitmap, sigs);
+
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), srcBefore - AMOUNT, "source bucket debited");
+        assertEq(bridge.lockedLiquidity(SOURCE_CHAIN_ID), dstBefore + AMOUNT, "destination bucket credited");
+        assertEq(token.balanceOf(address(bridge)), custodyBefore, "no tokens moved");
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce + 1, "shared teeNonce stream advanced");
+    }
+
+    function test_rebalanceCall_revertsOnWrongNonce() public {
+        IBridge.RebalanceParams memory params = _rebalanceParams();
+        uint256 nonce = 99;
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestTeeRebalance(domainSep, params, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.rebalanceCall(params, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_rebalanceCall_revertsOnUnknownSourceChain() public {
+        IBridge.RebalanceParams memory params = _rebalanceParams();
+        params.sourceChainId = 555; // no enclave set registered for this chain
+        uint256 nonce = 0;
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestTeeRebalance(domainSep, params, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnknownSourceChain.selector, 555));
+        proxy.rebalanceCall(params, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_rebalanceCall_revertsOnBelowThreshold() public {
+        IBridge.RebalanceParams memory params = _rebalanceParams();
+        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 digest = MultisigHelper.digestTeeRebalance(domainSep, params, nonce, deadline);
+        uint256[] memory pks = new uint256[](1);
+        pks[0] = encPk1;
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.BelowThreshold.selector);
+        proxy.rebalanceCall(params, nonce, deadline, 0x1, sigs);
     }
 
     // ========================================================================
@@ -1303,12 +1288,98 @@ contract MultisigProxyTest is Test {
         assertFalse(bridge.paused());
     }
 
+    /// @dev Known-answer regression for the production pause script.
+    ///      A regular proposal first advances only `proposalNonce`, reproducing
+    ///      the state in which the old script selected the wrong nonce lane.
+    function test_emergencyPauseScriptUsesEmergencyNonceAfterLanesDiverge() public {
+        uint256 regularNonce = proxy.proposalNonce();
+        uint256 regularDeadline = block.timestamp + 1 days;
+        address newBridge = makeAddr("emergency-pause-regular-proposal");
+        bytes32 regularDigest =
+            MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, regularNonce, regularDeadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        proxy.proposeUpdateBridge(
+            newBridge, regularNonce, regularDeadline, bitmap, MultisigHelper.signAll(vm, regularDigest, pks)
+        );
+
+        assertEq(proxy.proposalNonce(), 1, "regular lane advanced");
+        assertEq(proxy.emergencyNonce(), 0, "emergency lane untouched");
+
+        uint256 deadline = block.timestamp + 1 hours;
+
+        // Negative control: the pre-fix script read proposalNonce(), producing
+        // a correctly signed emergency digest for the wrong nonce.
+        uint256 wrongNonce = proxy.proposalNonce();
+        bytes32 wrongDigest = MultisigHelper.digestEmergencyPause(domainSep, wrongNonce, deadline);
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.emergencyPause(wrongNonce, deadline, bitmap, MultisigHelper.signAll(vm, wrongDigest, pks));
+
+        // Exercise the exact preparation function called by EmergencyPause.run().
+        EmergencyPauseHarness harness = new EmergencyPauseHarness();
+        (uint256 scriptNonce, bytes32 scriptDigest) = harness.prepare(proxy, deadline);
+        bytes32 expectedStructHash =
+            keccak256(abi.encode(keccak256("EmergencyPause(uint256 nonce,uint256 deadline)"), uint256(0), deadline));
+        bytes32 expectedDigest = keccak256(abi.encodePacked("\x19\x01", domainSep, expectedStructHash));
+
+        assertEq(scriptNonce, 0, "script reads emergency lane");
+        assertEq(scriptDigest, expectedDigest, "script produces canonical pause digest");
+
+        proxy.emergencyPause(scriptNonce, deadline, bitmap, MultisigHelper.signAll(vm, scriptDigest, pks));
+
+        assertTrue(bridge.paused(), "emergency pause succeeds");
+        assertEq(proxy.emergencyNonce(), 1, "emergency lane advanced");
+        assertEq(proxy.proposalNonce(), 1, "regular lane unchanged");
+    }
+
+    /// @dev Known-answer regression for the production unpause script.
+    ///      Both lanes are deliberately non-equal before digest construction.
+    function test_emergencyUnpauseScriptUsesEmergencyNonceAfterLanesDiverge() public {
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+
+        uint256 pauseNonce = proxy.emergencyNonce();
+        uint256 pauseDeadline = block.timestamp + 1 hours;
+        bytes32 pauseDigest = MultisigHelper.digestEmergencyPause(domainSep, pauseNonce, pauseDeadline);
+        proxy.emergencyPause(pauseNonce, pauseDeadline, bitmap, MultisigHelper.signAll(vm, pauseDigest, pks));
+        assertTrue(bridge.paused(), "precondition: bridge paused");
+
+        // Advance the regular lane twice so proposalNonce=2, emergencyNonce=1.
+        for (uint256 i = 0; i < 2; i++) {
+            uint256 regularNonce = proxy.proposalNonce();
+            uint256 regularDeadline = block.timestamp + 1 days;
+            address newBridge = makeAddr(string.concat("emergency-unpause-regular-proposal-", vm.toString(i)));
+            bytes32 regularDigest =
+                MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, regularNonce, regularDeadline);
+            proxy.proposeUpdateBridge(
+                newBridge, regularNonce, regularDeadline, bitmap, MultisigHelper.signAll(vm, regularDigest, pks)
+            );
+        }
+
+        assertEq(proxy.proposalNonce(), 2, "regular lane advanced independently");
+        assertEq(proxy.emergencyNonce(), 1, "pause advanced emergency lane once");
+
+        uint256 deadline = block.timestamp + 1 hours;
+        EmergencyUnpauseHarness harness = new EmergencyUnpauseHarness();
+        (uint256 scriptNonce, bytes32 scriptDigest) = harness.prepare(proxy, deadline);
+        bytes32 expectedStructHash =
+            keccak256(abi.encode(keccak256("EmergencyUnpause(uint256 nonce,uint256 deadline)"), uint256(1), deadline));
+        bytes32 expectedDigest = keccak256(abi.encodePacked("\x19\x01", domainSep, expectedStructHash));
+
+        assertEq(scriptNonce, 1, "script reads emergency lane");
+        assertEq(scriptDigest, expectedDigest, "script produces canonical unpause digest");
+
+        proxy.emergencyUnpause(scriptNonce, deadline, bitmap, MultisigHelper.signAll(vm, scriptDigest, pks));
+
+        assertFalse(bridge.paused(), "emergency unpause succeeds");
+        assertEq(proxy.emergencyNonce(), 2, "emergency lane advanced");
+        assertEq(proxy.proposalNonce(), 2, "regular lane unchanged");
+    }
+
     // ========================================================================
-    // R-W-05 — two-tier pause (integration via MultisigProxy)
+    // Two-tier pause (integration via MultisigProxy)
     // ========================================================================
 
-    /// @dev After R-W-05, the no-timelock emergency pause freezes the OUTFLOW
-    ///      path too — including the enclave/TEE release, which routes through
+    /// @dev The no-timelock emergency pause freezes the OUTFLOW path too —
+    ///      including the enclave/TEE release, which routes through
     ///      Bridge.fundsOut. A signed fundsOut executed straight after
     ///      emergencyPause must revert OutflowEnforcedPause, and inbound deposits
     ///      must be frozen as well.
@@ -1532,9 +1603,9 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.timelockDuration(), newDuration);
     }
 
-    /// @dev UT-FIX-13: a SetTimelockDuration proposal below the immutable
-    ///      MIN_TIMELOCK floor is rejected at execution; the floor holds.
-    function test_proposeSetTimelockDuration_revertsBelowMinTimelock_afterFix() public {
+    /// @dev A SetTimelockDuration proposal below the immutable MIN_TIMELOCK
+    ///      floor is rejected at execution; the floor holds.
+    function test_proposeSetTimelockDuration_revertsBelowMinTimelock() public {
         uint256 t = block.timestamp;
         uint256 newDuration = MIN_TIMELOCK - 1; // just under the floor
         uint256 nonce = proxy.proposalNonce();
@@ -1554,7 +1625,7 @@ contract MultisigProxyTest is Test {
     }
 
     /// @dev A value exactly at MIN_TIMELOCK is still accepted (boundary).
-    function test_proposeSetTimelockDuration_acceptsAtMinTimelock_afterFix() public {
+    function test_proposeSetTimelockDuration_acceptsAtMinTimelock() public {
         uint256 t = block.timestamp;
         uint256 newDuration = MIN_TIMELOCK; // exactly the floor
         uint256 nonce = proxy.proposalNonce();
@@ -1591,6 +1662,39 @@ contract MultisigProxyTest is Test {
         proxy.executeProposal(id, callData);
 
         assertTrue(bridge.paused());
+    }
+
+    /// @dev Assert that a protected selector is rejected before federation
+    ///      signature verification on every generic raw-call lane. Applying
+    ///      each policy selector-wide closes mutable-target aliasing.
+    function _assertGenericPathsRejectSelector(bytes memory callData, bytes4 errorSelector) internal {
+        bytes4 selector = bytes4(callData);
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes[] memory noSigs = new bytes[](0);
+        bytes memory expected = abi.encodeWithSelector(errorSelector, selector);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecute(callData, nonce, deadline, 0, noSigs);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecuteCommissionManager(callData, nonce, deadline, 0, noSigs);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecuteRouteRegistry(callData, nonce, deadline, 0, noSigs);
+
+        vm.expectRevert(expected);
+        proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, 0, noSigs);
+    }
+
+    function test_federationGenericPathsCannotCallFundsOut() public {
+        bytes memory callData = abi.encodeCall(IBridge.fundsOut, (_fundsOutParams()));
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
+    }
+
+    function test_federationGenericPathsCannotCallRebalanceLiquidity() public {
+        bytes memory callData = abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams()));
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
     }
 
     // ========================================================================
@@ -2097,14 +2201,14 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Domain separator rebuild on chain-id change (R-W-13 / UT-FIX-15)
+    // Domain separator rebuild on chain-id change
     //
     // The separator is cached at deploy with the chain id. After a chain-id
     // change (e.g. a hard fork) it is rebuilt, so a signature made before the
     // fork no longer verifies on the forked chain (no cross-fork replay).
     // ========================================================================
 
-    function test_domainSeparator_rebuiltOnChainIdChange_afterFix() public {
+    function test_domainSeparator_rebuiltOnChainIdChange() public {
         uint256 originalChainId = block.chainid;
         bytes32 dsBefore = proxy.DOMAIN_SEPARATOR();
         assertEq(dsBefore, MultisigHelper.domainSeparator(address(proxy), originalChainId), "cached on original chain");
@@ -2117,7 +2221,7 @@ contract MultisigProxyTest is Test {
         assertEq(dsAfter, MultisigHelper.domainSeparator(address(proxy), forkedChainId), "rebuilt over new chain id");
     }
 
-    function test_fundsOutCallSignatureNotReplayableAfterChainIdChange_afterFix() public {
+    function test_fundsOutCallSignatureNotReplayableAfterChainIdChange() public {
         // Sign a valid TEE fundsOut on the original chain (domainSep was cached
         // at setUp for block.chainid).
         IBridge.FundsOutParams memory params = _fundsOutParams();
@@ -2177,12 +2281,12 @@ contract MultisigProxyTest is Test {
         uint256 nativePoolBefore = cm.nativeCommissionPool();
         uint256 recordBefore = rgbModule.fundsInRecords(seedOpId);
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(recipientBefore, 0, "pre recipient token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
         assertEq(nativePoolBefore, 0, "pre native pool");
-        assertEq(recordBefore, AMOUNT * 5, "pre record");
+        assertEq(recordBefore, AMOUNT * 10, "pre record");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
 
         vm.expectEmit(true, true, false, true);
@@ -2256,12 +2360,12 @@ contract MultisigProxyTest is Test {
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore = mockOft.balance;
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(adapterBefore, 0, "pre adapter token");
         assertEq(oftBefore, 0, "pre oft token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
-        assertEq(recordBefore, AMOUNT * 5, "pre record");
+        assertEq(recordBefore, AMOUNT * 10, "pre record");
         assertEq(adapterEthBefore, 0, "pre adapter native");
         assertEq(oftEthBefore, 0, "pre oft native");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
@@ -2344,13 +2448,13 @@ contract MultisigProxyTest is Test {
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore = mockOft.balance;
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(adapterBefore, 0, "pre adapter token");
         assertEq(oftBefore, 0, "pre oft token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
         assertEq(nativePoolBefore, 0, "pre native pool");
-        assertEq(recordBefore, AMOUNT * 5, "pre record");
+        assertEq(recordBefore, AMOUNT * 10, "pre record");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
 
         // An underfunded native fee reverts in sendOut, after Bridge.fundsOut
@@ -2430,13 +2534,13 @@ contract MultisigProxyTest is Test {
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore = mockOft.balance;
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(adapterBefore, 0, "pre adapter token");
         assertEq(oftBefore, 0, "pre oft token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
         assertEq(nativePoolBefore, 0, "pre native pool");
-        assertEq(recordBefore, AMOUNT * 5, "pre record");
+        assertEq(recordBefore, AMOUNT * 10, "pre record");
         assertEq(adapter.sendOutCalls(), 0, "pre adapter calls");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
 
@@ -2511,13 +2615,13 @@ contract MultisigProxyTest is Test {
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore = mockOft.balance;
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(adapterBefore, 0, "pre adapter token");
         assertEq(oftBefore, 0, "pre oft token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
         assertEq(nativePoolBefore, 0, "pre native pool");
-        assertEq(recordBefore, AMOUNT * 5, "pre record");
+        assertEq(recordBefore, AMOUNT * 10, "pre record");
         assertEq(adapter.sendOutCalls(), 0, "pre adapter calls");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
 
@@ -2603,12 +2707,12 @@ contract MultisigProxyTest is Test {
         uint256 adapterEthBefore = address(adapter).balance;
         uint256 oftEthBefore = mockOft.balance;
 
-        assertEq(bridgeBefore, AMOUNT * 6, "pre bridge pool");
+        assertEq(bridgeBefore, AMOUNT * 11, "pre bridge pool");
         assertEq(adapterBefore, 0, "pre adapter token");
         assertEq(oftBefore, 0, "pre oft token");
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
-        assertEq(originalRecordBefore, AMOUNT * 5, "pre original record");
+        assertEq(originalRecordBefore, AMOUNT * 10, "pre original record");
         assertEq(duplicateRecordBefore, AMOUNT, "pre duplicate record");
         assertEq(adapter.sendOutCalls(), 0, "pre adapter calls");
         assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
@@ -2643,7 +2747,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // R-M-03 / UT-FIX-05 — typed enclave methods are the only TEE entry points
+    // Typed enclave methods are the only TEE entry points
     //
     // The generic enclave `execute`/`executeBatch` + `teeAllowedCalls` allowlist
     // were removed. The enclave (TEE) quorum can now only trigger Bridge.fundsOut
@@ -2653,7 +2757,7 @@ contract MultisigProxyTest is Test {
     // function: enclave signatures over an admin-execute proposal are rejected.
     // ========================================================================
 
-    function test_enclaveKeysCannotDriveAdminExecute_afterFix() public {
+    function test_enclaveKeysCannotDriveAdminExecute() public {
         // A privileged call the TEE quorum might want to smuggle through.
         bytes memory callData = abi.encodeWithSignature("pauseInflow()");
         uint256 nonce = proxy.proposalNonce();
@@ -2674,7 +2778,7 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // R-W-16 / UT-FIX-18 — lzFundsOutCall binds the release and send-out legs
+    // lzFundsOutCall binds the release and send-out legs
     //
     // Flow-4 release and the cross-chain send are bound on-chain in one signed
     // operation: the Bridge recipient is forced to the adapter (no params field
@@ -2684,7 +2788,7 @@ contract MultisigProxyTest is Test {
     // (net delivered) amount from the signed gross amount.
     // ========================================================================
 
-    function test_lzFundsOutCall_sendsNetDeliveredNotGross_afterFix() public {
+    function test_lzFundsOutCall_sendsNetDeliveredNotGross() public {
         // 5% FUNDS_OUT token commission so gross (AMOUNT) != net (delivered).
         vm.prank(address(proxy));
         cm.setCommissionRule(
@@ -2735,48 +2839,170 @@ contract MultisigProxyTest is Test {
     }
 
     // ========================================================================
-    // Current behavior reproduction
+    // Immutable TVL-relative safety limit
     // ========================================================================
 
-    function test_enclaveSignedFundsOutCanDrainPool_currentBehavior() public {
+    /// @dev buckets are set to a maximum-total policy, the pool is fully funded, and
+    ///      a valid 2-of-3 enclave quorum signs a release of the entire pool.
+    ///      It reverts. Note what the assertions now show that the audited build
+    ///      could not: `availableOutflow` reports 10% of TVL, not ≥ TVL, so the
+    ///      PoC's own `assertGe(availableOutflow, tvl)` premise no longer holds
+    ///      either.
+    function test_enclaveSignedFullPoolDrainRevertsWithMaxAllowedBuckets() public {
         address drainRecipient = makeAddr("drainRecipient");
 
-        // The TEE path checks signatures, but it does not impose an on-chain
-        // amount cap on the signed Bridge fundsOut.
         uint256 bridgeBefore = token.balanceOf(address(bridge));
-        uint256 recipientBefore = token.balanceOf(drainRecipient);
         uint256 recordBefore = rgbModule.fundsInRecords(seedOpId);
+        uint256 maxBps = bridge.MAX_CHAIN_OUTFLOW_BPS();
 
-        assertEq(bridgeBefore, AMOUNT * 5, "pre bridge pool");
-        assertEq(recipientBefore, 0, "pre recipient token");
+        assertEq(bridgeBefore, AMOUNT * 10, "pre bridge pool");
         assertEq(recordBefore, bridgeBefore, "pre record backs full pool");
-        // Current behavior: if an on-chain amount cap or rate limit is added
-        // later, this test should be inverted to expect a revert.
+        assertLt(bridge.availableOutflow(RGB_CHAIN_ID), bridgeBefore, "chain bucket cannot cover TVL");
+        assertLt(bridge.availableGlobalOutflow(), bridgeBefore, "global bucket cannot cover TVL");
+        assertEq(
+            bridge.effectiveAvailableOutflow(RGB_CHAIN_ID),
+            bridgeBefore * MAX_BURST_BPS / bridge.BPS_DENOMINATOR(),
+            "at most the configured burst can leave, well under TVL"
+        );
+
         IBridge.FundsOutParams memory params = _fundsOutParams(drainRecipient, bridgeBefore, BURN_ID);
-        assertFalse(bridge.consumedBurnIds(params.burnId), "pre burn id");
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = block.timestamp + 1 hours;
         bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit BridgeFundsOut(
-            drainRecipient, bridgeBefore, bridgeBefore, 0, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+        // The whole pool is 10_000 bps of the reference; the bucket's burst is
+        // MAX_BURST_BPS. Requesting 100% therefore exceeds capacity outright.
+        uint256 shareUnit = bridge.SHARE_UNIT();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OutflowRateLimiter.TokenRequestAboveCapacity.selector,
+                MAX_BURST_BPS * shareUnit / bridge.BPS_DENOMINATOR(),
+                shareUnit, // the full pool is exactly one SHARE_UNIT of reference
+                address(token)
+            )
         );
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit FundsOutExecuted(RGB_CHAIN_ID, nonce, bitmap);
-
         proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
 
-        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce + 1, "nonce incremented");
-        assertTrue(bridge.consumedBurnIds(params.burnId), "burn id consumed");
-        assertEq(token.balanceOf(address(bridge)), 0, "bridge pool drained");
-        assertEq(token.balanceOf(drainRecipient), recipientBefore + bridgeBefore, "recipient got full pool");
-        assertEq(rgbModule.fundsInRecords(seedOpId), recordBefore, "record unchanged (proof-of-mint permanent)");
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce, "reverted release does not consume nonce");
+        assertFalse(bridge.consumedBurnIds(params.burnId), "reverted release does not consume burn id");
+        assertEq(token.balanceOf(address(bridge)), bridgeBefore, "entire pool remains");
+        assertEq(token.balanceOf(drainRecipient), 0, "recipient receives nothing");
+        assertEq(
+            bridge.availableChainSafetyOutflow(RGB_CHAIN_ID),
+            bridgeBefore * maxBps / bridge.BPS_DENOMINATOR(),
+            "immutable allowance unchanged"
+        );
     }
 
-    function test_governanceCanRotateEnclaveToUnattestedEOA_currentBehavior() public {
+    /// @dev Fragmented drain: the attacker splits the release across refill
+    ///      windows. At the 24-hour boundary the bucket has refilled, while the
+    ///      first spend is still retained by the conservative rolling window.
+    ///      The second release may consume the immutable remainder, but a third
+    ///      valid 2-of-3 signed transaction cannot exceed the rolling 20% cap.
+    function test_splitTransactionsCannotExceedAggregateRollingLimit() public {
+        // Align to an hour boundary so the ring's 24-25h retention is exact
+        // relative to the releases below rather than to an arbitrary offset.
+        vm.warp((block.timestamp / 1 hours + 1) * 1 hours);
+
+        uint256 tvl = token.balanceOf(address(bridge));
+        uint256 hardLimit = tvl * bridge.MAX_CHAIN_OUTFLOW_BPS() / bridge.BPS_DENOMINATOR();
+
+        _signedRelease(makeAddr("split-recipient-1"), hardLimit / 2, BURN_ID);
+        assertEq(bridge.availableChainSafetyOutflow(RGB_CHAIN_ID), hardLimit / 2, "half the allowance left");
+        assertEq(bridge.availableGlobalSafetyOutflow(), hardLimit / 2);
+
+        // At 24h + 1s the conservatively rounded share bucket is fully refilled,
+        // while the rolling limiter deliberately still counts the first release.
+        vm.warp(block.timestamp + bridge.BUCKET_REFILL_WINDOW() + 1);
+        _signedRelease(makeAddr("split-recipient-2"), hardLimit / 2, BURN_ID + 1);
+        assertEq(bridge.availableChainSafetyOutflow(RGB_CHAIN_ID), 0, "immutable chain allowance exhausted");
+        assertEq(bridge.availableGlobalSafetyOutflow(), 0, "immutable global allowance exhausted");
+
+        // One second of bucket refill makes the immutable limiter the failing
+        // layer, and `effectiveAvailableOutflow` reports the truth: nothing.
+        vm.warp(block.timestamp + 1);
+        assertGt(bridge.availableOutflow(RGB_CHAIN_ID), 0, "bucket has accrued allowance");
+        assertEq(bridge.effectiveAvailableOutflow(RGB_CHAIN_ID), 0, "but nothing may leave");
+
+        (IBridge.FundsOutParams memory third, uint256 nonce, uint256 deadline, uint256 bitmap, bytes[] memory sigs) =
+            _prepareRelease(makeAddr("split-recipient-3"), 1, BURN_ID + 2);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IBridge.ChainSafetyLimitExceeded.selector, RGB_CHAIN_ID, uint256(1), hardLimit, hardLimit
+            )
+        );
+        proxy.fundsOutCall(third, nonce, deadline, bitmap, sigs);
+
+        assertEq(token.balanceOf(address(bridge)), tvl - hardLimit, "at most 20% left during the window");
+
+        // Liveness: once the oldest usage expires the next tranche is releasable.
+        // The ring retains for 24-25h, so 25h past the aligned start clears it.
+        vm.warp(block.timestamp + 25 hours);
+        assertGt(bridge.availableChainSafetyOutflow(RGB_CHAIN_ID), 0, "allowance returns in the next window");
+        assertGt(bridge.effectiveAvailableOutflow(RGB_CHAIN_ID), 0, "releases resume");
+    }
+
+    /// @dev Everything a signed release needs, resolved up front. Kept separate
+    ///      from submission so `vm.expectRevert` can sit immediately before the
+    ///      single `fundsOutCall` — the preparation itself makes external calls
+    ///      and would otherwise absorb the expectation.
+    function _prepareRelease(address to, uint256 amount, uint256 burnId)
+        internal
+        view
+        returns (
+            IBridge.FundsOutParams memory params,
+            uint256 nonce,
+            uint256 deadline,
+            uint256 bitmap,
+            bytes[] memory sigs
+        )
+    {
+        params = _fundsOutParams(to, amount, burnId);
+        nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
+        uint256[] memory pks;
+        (pks, bitmap) = _encSigSet2of3();
+        sigs = MultisigHelper.signAll(vm, digest, pks);
+    }
+
+    /// @dev Sign and submit a `fundsOut` through the enclave 2-of-3 quorum.
+    function _signedRelease(address to, uint256 amount, uint256 burnId) internal {
+        (IBridge.FundsOutParams memory params, uint256 nonce, uint256 deadline, uint256 bitmap, bytes[] memory sigs) =
+            _prepareRelease(to, amount, burnId);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
+    }
+
+    /// @dev A full-TVL bucket is not merely rejected against current liquidity;
+    ///      it is unrepresentable.
+    ///      The policy is a percentage, and `burstBps + refillBpsPerWindow` is
+    ///      bounded by the immutable `MAX_CHAIN_OUTFLOW_BPS`, so there is no
+    ///      liquidity level at which this proposal would ever succeed.
+    function test_federationCannotConfigureChainBucketForFullTvl() public {
+        uint256 fullTvlBps = bridge.BPS_DENOMINATOR(); // 10_000 bps == 100% of TVL
+        uint256 maxBps = bridge.MAX_CHAIN_OUTFLOW_BPS();
+        uint256 availableBefore = bridge.availableOutflow(RGB_CHAIN_ID);
+
+        bytes memory callData = abi.encodeCall(IBridge.setOutflowLimit, (RGB_CHAIN_ID, fullTvlBps, uint256(1)));
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+
+        bytes32 digest =
+            MultisigHelper.digestProposeAdminExecute(domainSep, bytes4(callData), callData, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 proposalId =
+            proxy.proposeAdminExecute(callData, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks));
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidOutflowPolicy.selector, fullTvlBps, uint256(1), maxBps));
+        proxy.executeProposal(proposalId, callData);
+
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), availableBefore, "safe bucket configuration unchanged");
+    }
+
+    function test_governanceCanRotateEnclaveToUnattestedEOA() public {
         address[] memory newSigners = new address[](3);
         newSigners[0] = makeAddr("unattestedEnc1");
         newSigners[1] = makeAddr("unattestedEnc2");
@@ -2822,7 +3048,7 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.enclaveThreshold(RGB_CHAIN_ID), newThreshold, "post enclave threshold");
     }
 
-    function test_proposalUsesSnapshottedTimelock_afterFix() public {
+    function test_proposalUsesSnapshottedTimelock() public {
         uint256 proposedAt = block.timestamp;
         address newBridge = makeAddr("snapshotTimelockBridge");
         uint256 newDuration = 2 hours; // raise above the 1h in force at creation
@@ -2861,10 +3087,9 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.bridge(), newBridge, "snapshotted proposal executes despite the live timelock raise");
     }
 
-    // R-I-09 after-fix: emergency actions run on a separate `emergencyNonce`, so
-    // an emergency pause does NOT stale an already-signed regular proposal — the
-    // pre-signed proposal still submits.
-    function test_emergencyDoesNotStaleRegularProposal_afterFix() public {
+    // Emergency actions run on a separate `emergencyNonce`, so an emergency
+    // pause does NOT stale an already-signed regular proposal.
+    function test_emergencyDoesNotStaleRegularProposal() public {
         address newBridge = makeAddr("nonceCollisionBridge");
         uint256 regularNonce = proxy.proposalNonce();
         uint256 regularDeadline = block.timestamp + 1 days;
@@ -2898,7 +3123,7 @@ contract MultisigProxyTest is Test {
     // transferOwnership, but Ownable2Step only records a pendingOwner. A wrong
     // non-zero address never becomes owner, so governance is not orphaned and
     // the proxy keeps driving owner-only operations.
-    function test_ownershipTransferToWrongAddressDoesNotOrphanGovernance_afterFix() public {
+    function test_ownershipTransferToWrongAddressDoesNotOrphanGovernance() public {
         address wrongOwner = makeAddr("wrongBridgeOwner");
         uint256 startTime = block.timestamp;
 
@@ -2980,37 +3205,60 @@ contract MultisigProxyTest is Test {
         assertEq(routeRegistry.pendingOwner(), newOwner, "RR transfer started via new op");
     }
 
-    // The typed commission-withdraw path pins the recipient to
-    // commissionRecipient, while generic CM admin execution forwards arbitrary
-    // calldata and lets the encoded withdrawal recipient win.
-    // R-W-15 after-fix: the generic AdminExecuteCommissionManager path can no
-    // longer reach a commission-withdrawal selector, so it cannot re-point
-    // commission away from the pinned `commissionRecipient`. The guard fires at
-    // propose time (before signature verification), so no valid federation
-    // signatures are needed to observe it.
-    function test_adminExecuteCommissionManager_rejectsWithdrawSelectors_afterFix() public {
+    // Standard CM withdrawals stay on the dedicated typed operations. Recipient
+    // safety no longer depends on this blocklist: CM enforces it immutably.
+    function test_genericPathsRejectCommissionWithdrawSelectors() public {
         bytes[] memory callDatas = new bytes[](4);
-        callDatas[0] = abi.encodeWithSignature(
-            "withdrawTokenCommission(address,address,uint256)", address(token), user, uint256(1)
-        );
-        callDatas[1] = abi.encodeWithSignature("withdrawNativeCommission(address,uint256)", user, uint256(1));
-        callDatas[2] = abi.encodeWithSignature("withdrawAllTokenCommission(address,address)", address(token), user);
-        callDatas[3] = abi.encodeWithSignature("withdrawAllNativeCommission(address)", user);
-
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = block.timestamp + 1 days;
-        bytes[] memory noSigs = new bytes[](0); // guard reverts before sig checks
+        callDatas[0] = abi.encodeWithSignature("withdrawTokenCommission(address,uint256)", address(token), uint256(1));
+        callDatas[1] = abi.encodeWithSignature("withdrawNativeCommission(uint256)", uint256(1));
+        callDatas[2] = abi.encodeWithSignature("withdrawAllTokenCommission(address)", address(token));
+        callDatas[3] = abi.encodeWithSignature("withdrawAllNativeCommission()");
 
         for (uint256 i = 0; i < callDatas.length; i++) {
-            vm.expectRevert(
-                abi.encodeWithSelector(IMultisigProxy.ForbiddenCommissionManagerSelector.selector, bytes4(callDatas[i]))
-            );
-            proxy.proposeAdminExecuteCommissionManager(callDatas[i], nonce, deadline, 0, noSigs);
+            _assertGenericPathsRejectSelector(callDatas[i], IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
         }
     }
 
-    // The generic path stays open for non-withdrawal CommissionManager setters.
-    function test_adminExecuteCommissionManager_allowsNonWithdrawSelector() public {
+    // Alternate-target regression: even if governance aliases the LZ adapter
+    // target to CM and transfers CM ownership through that unfiltered
+    // raw-call path, the new owner cannot choose a withdrawal recipient. The
+    // asset layer always sends commission to CM's immutable recipient.
+    function test_adapterAliasTransferredOwnerCannotRedirectCommission() public {
+        _setLzAdapter(address(cm));
+
+        uint256 amount = 10 ether;
+        token.mint(address(cm), amount);
+        vm.prank(address(bridge));
+        cm.receiveTokenCommission(address(token), amount);
+
+        bytes memory callData = abi.encodeWithSignature("transferOwnership(address)", user);
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest =
+            MultisigHelper.digestProposeAdminExecuteAdapter(domainSep, bytes4(callData), callData, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, callData);
+
+        vm.prank(user);
+        cm.acceptOwnership();
+        assertEq(cm.owner(), user, "governed CM ownership migration still works");
+
+        uint256 pinnedBefore = token.balanceOf(commissionReceiver);
+        uint256 attackerBefore = token.balanceOf(user);
+        vm.prank(user);
+        cm.withdrawTokenCommission(address(token), amount);
+
+        assertEq(token.balanceOf(commissionReceiver), pinnedBefore + amount, "immutable recipient paid");
+        assertEq(token.balanceOf(user), attackerBefore, "new owner cannot redirect commission to itself");
+        assertEq(proxy.commissionRecipient(), commissionReceiver, "proxy reports CM's immutable recipient");
+    }
+
+    // The generic path stays open for permitted CommissionManager setters.
+    function test_adminExecuteCommissionManager_allowsConfigSelector() public {
         bytes memory callData = abi.encodeWithSignature(
             "setGlobalDefaults(uint256,uint8,uint8,uint8)", uint256(0), uint8(100), uint8(0), uint8(0)
         );
@@ -3022,7 +3270,22 @@ contract MultisigProxyTest is Test {
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         bytes32 id = proxy.proposeAdminExecuteCommissionManager(callData, nonce, deadline, bitmap, sigs);
-        assertTrue(id != bytes32(0), "non-withdrawal CM selector accepted on the generic path");
+        assertTrue(id != bytes32(0), "CM config selector accepted on the generic path");
+    }
+
+    // Deployment compatibility: the deployer initiates CM's Ownable2Step handoff
+    // directly, then the proxy must be able to propose acceptOwnership().
+    function test_adminExecuteCommissionManager_allowsAcceptOwnershipSelector() public {
+        bytes memory callData = abi.encodeWithSignature("acceptOwnership()");
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest =
+            MultisigHelper.digestProposeAdminExecuteCM(domainSep, bytes4(callData), callData, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeAdminExecuteCommissionManager(callData, nonce, deadline, bitmap, sigs);
+        assertTrue(id != bytes32(0), "CM acceptOwnership selector accepted on the generic path");
     }
 
     // ========================================================================
@@ -3380,7 +3643,7 @@ contract MultisigProxyTest is Test {
         address[] memory enc = _validEnc();
         address[] memory fed = _validFed();
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnknownSourceChain.selector, uint256(0)));
-        new MultisigProxy(address(bridge), address(cm), enc, 2, 0, fed, 2, commissionReceiver, TIMELOCK, MIN_TIMELOCK);
+        new MultisigProxy(address(bridge), address(cm), enc, 2, 0, fed, 2, TIMELOCK, MIN_TIMELOCK);
     }
 
     /// @dev ...and rejected up front by proposeUpdateEnclaveSigners (before sigs).
