@@ -246,7 +246,8 @@ contract MultisigProxyTest is Test {
             address(routeRegistry),
             payable(address(cm)),
             address(0),
-            1 // minFundsInAmount: smallest non-zero floor for tests
+            1, // minFundsInAmount: smallest non-zero floor for tests
+            1 // minFundsOutAmount: smallest non-zero floor for tests
         );
 
         rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
@@ -1734,6 +1735,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: 400, // 4%
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_IN,
                 currency: CommissionCurrency.TOKEN,
@@ -2253,6 +2255,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2327,6 +2330,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2414,6 +2418,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2488,6 +2493,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2574,6 +2580,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2668,6 +2675,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2797,6 +2805,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: 500, // 5%
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -3260,7 +3269,12 @@ contract MultisigProxyTest is Test {
     // The generic path stays open for permitted CommissionManager setters.
     function test_adminExecuteCommissionManager_allowsConfigSelector() public {
         bytes memory callData = abi.encodeWithSignature(
-            "setGlobalDefaults(uint256,uint8,uint8,uint8)", uint256(0), uint8(100), uint8(0), uint8(0)
+            "setGlobalDefaults(uint256,uint256,uint8,uint8,uint8)",
+            uint256(0),
+            uint256(0),
+            uint8(100),
+            uint8(0),
+            uint8(0)
         );
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;

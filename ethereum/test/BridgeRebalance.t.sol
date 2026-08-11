@@ -103,7 +103,7 @@ contract BridgeRebalanceTest is Test {
 
         cm = new CommissionManager(predictedBridge, deployer);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
-        bridge = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1);
+        bridge = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 1);
 
         rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
         nullVerifier = new NullVerifier();

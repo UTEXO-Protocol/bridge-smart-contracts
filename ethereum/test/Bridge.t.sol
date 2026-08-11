@@ -24,6 +24,7 @@ import {FeeOnTransferERC20} from "./mocks/FeeOnTransferERC20.sol";
 import {MockBtcRelay} from "./mocks/MockBtcRelay.sol";
 import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
 import {MockSettlementModule} from "./mocks/MockSettlementModule.sol";
+import {MockDepositFloor} from "./mocks/MockDepositFloor.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
@@ -59,6 +60,7 @@ contract BridgeTest is Test {
     event LZAdapterDisabled(address indexed oldAdapter);
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
     event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
+    event MinFundsOutAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
     event OutflowLimitUpdated(uint256 indexed chainId, uint256 capacity, uint256 refillRate, uint256 available);
     event GlobalOutflowLimitUpdated(uint256 capacity, uint256 refillRate, uint256 available);
 
@@ -129,7 +131,8 @@ contract BridgeTest is Test {
             address(routeRegistry),
             payable(address(cm)),
             address(0),
-            1 // minFundsInAmount: smallest non-zero floor; cases that need a higher floor deploy their own Bridge
+            1, // minFundsInAmount: smallest non-zero floor; cases that need a higher floor deploy their own Bridge
+            1 // minFundsOutAmount: smallest non-zero floor for tests
         );
 
         rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
@@ -343,6 +346,7 @@ contract BridgeTest is Test {
             address(usdt0),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_IN,
                 currency: CommissionCurrency.TOKEN,
@@ -359,6 +363,7 @@ contract BridgeTest is Test {
             address(usdt0),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_IN,
                 currency: CommissionCurrency.NATIVE,
@@ -375,6 +380,7 @@ contract BridgeTest is Test {
             address(usdt0),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -391,6 +397,7 @@ contract BridgeTest is Test {
             address(usdt0),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.NATIVE,
@@ -475,23 +482,23 @@ contract BridgeTest is Test {
 
     function test_constructor_revertsOnZeroToken() public {
         vm.expectRevert(BridgeBase.InvalidTokenAddress.selector);
-        new Bridge(address(0), address(routeRegistry), payable(address(cm)), address(0), 1);
+        new Bridge(address(0), address(routeRegistry), payable(address(cm)), address(0), 1, 1);
     }
 
     function test_constructor_revertsOnZeroRouteRegistry() public {
         vm.expectRevert(IBridge.InvalidRouteRegistryAddress.selector);
-        new Bridge(address(usdt0), address(0), payable(address(cm)), address(0), 1);
+        new Bridge(address(usdt0), address(0), payable(address(cm)), address(0), 1, 1);
     }
 
     function test_constructor_revertsOnZeroCommissionManager() public {
         vm.expectRevert(IBridge.InvalidCommissionManagerAddress.selector);
-        new Bridge(address(usdt0), address(routeRegistry), payable(address(0)), address(0), 1);
+        new Bridge(address(usdt0), address(routeRegistry), payable(address(0)), address(0), 1, 1);
     }
 
     function test_constructor_storesInitialLZAdapter() public {
         address initialAdapter = makeAddr("initial-adapter");
         vm.prank(deployer);
-        Bridge b = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), initialAdapter, 1);
+        Bridge b = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), initialAdapter, 1, 1);
         assertEq(b.lzAdapter(), initialAdapter, "lzAdapter set in constructor");
     }
 
@@ -583,13 +590,13 @@ contract BridgeTest is Test {
 
     function test_constructor_storesMinFundsInAmount() public {
         vm.prank(deployer);
-        Bridge b = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1234);
+        Bridge b = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1234, 1);
         assertEq(b.minFundsInAmount(), 1234, "minFundsInAmount stored from constructor");
     }
 
     function test_constructor_revertsOnZeroMinFundsInAmount() public {
         vm.expectRevert(IBridge.InvalidMinFundsInAmount.selector);
-        new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 0);
+        new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 0, 1);
     }
 
     function test_setMinFundsInAmount_updatesAndEmits() public {
@@ -611,6 +618,106 @@ contract BridgeTest is Test {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         bridge.setMinFundsInAmount(1000);
+    }
+
+    // --- Minimum fundsOut amount (outbound mirror) ---
+
+    function test_constructor_storesMinFundsOutAmount() public {
+        vm.prank(deployer);
+        Bridge b = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 4321);
+        assertEq(b.minFundsOutAmount(), 4321, "minFundsOutAmount stored from constructor");
+    }
+
+    function test_constructor_revertsOnZeroMinFundsOutAmount() public {
+        vm.expectRevert(IBridge.InvalidMinFundsOutAmount.selector);
+        new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 0);
+    }
+
+    function test_setMinFundsOutAmount_updatesAndEmits() public {
+        vm.expectEmit(false, false, false, true, address(bridge));
+        emit MinFundsOutAmountUpdated(1, 2000);
+
+        vm.prank(multisig);
+        bridge.setMinFundsOutAmount(2000);
+        assertEq(bridge.minFundsOutAmount(), 2000);
+    }
+
+    function test_setMinFundsOutAmount_revertsOnZero() public {
+        vm.prank(multisig);
+        vm.expectRevert(IBridge.InvalidMinFundsOutAmount.selector);
+        bridge.setMinFundsOutAmount(0);
+    }
+
+    function test_setMinFundsOutAmount_revertsIfNotOwner() public {
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        bridge.setMinFundsOutAmount(2000);
+    }
+
+    /// @dev The floor is an on-chain backstop for a limit the TEE is not known
+    ///      to enforce: a dust release costs the bridge more to settle than it
+    ///      moves.
+    function test_fundsOut_revertsBelowMinFundsOutAmount() public {
+        _seedRGB(1000 ether);
+
+        vm.prank(multisig);
+        bridge.setMinFundsOutAmount(1 ether);
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, 1 ether - 1, 1 ether));
+        _releaseRGB(1 ether - 1, BURN_ID);
+    }
+
+    function test_fundsOut_acceptsExactlyMinFundsOutAmount() public {
+        _seedRGB(1000 ether);
+
+        vm.prank(multisig);
+        bridge.setMinFundsOutAmount(1 ether);
+
+        uint256 before = usdt0.balanceOf(recipient);
+        _releaseRGB(1 ether, BURN_ID);
+        assertEq(usdt0.balanceOf(recipient) - before, 1 ether, "release at the floor goes through");
+    }
+
+    /// @dev End-to-end mirror of the inbound flat-fee case: a `FUNDS_OUT` rule
+    ///      with a `baseFee` deducts percentage + flat from the release and
+    ///      forwards both to the CommissionManager pool.
+    function test_fundsOut_baseFeeRoutesToCMOnTopOfPercentage() public {
+        _seedRGB(1000 ether);
+
+        uint256 percent = 400; // 4%
+        uint256 baseFee = 1 ether;
+
+        // The flat fee must fit under the release floor.
+        vm.prank(multisig);
+        bridge.setMinFundsOutAmount(10 ether);
+
+        vm.prank(deployer);
+        cm.setCommissionRule(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(usdt0),
+            CommissionConfig({
+                stablePercent: percent,
+                baseFee: baseFee,
+                multiplier: 100,
+                side: CommissionSide.FUNDS_OUT,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        uint256 release = 100 ether;
+        uint256 expectedCommission = (release * percent) / 100 / 100 + baseFee;
+
+        uint256 recipientBefore = usdt0.balanceOf(recipient);
+        uint256 poolBefore = cm.tokenCommissionPool(address(usdt0));
+
+        _releaseRGB(release, BURN_ID);
+
+        assertEq(usdt0.balanceOf(recipient) - recipientBefore, release - expectedCommission, "recipient gets net");
+        assertEq(
+            cm.tokenCommissionPool(address(usdt0)) - poolBefore, expectedCommission, "pool holds percentage + flat"
+        );
     }
 
     // --- Zero amount ---
@@ -2209,6 +2316,47 @@ contract BridgeTest is Test {
         assertEq(rgbModule.fundsInRecords(opId), expectedNet, "record = net");
     }
 
+    // The flat `baseFee` rides the same path as the proportional part: it is
+    // deducted from the deposit, forwarded to the CommissionManager pool, and
+    // the settlement record is written against the resulting net.
+    function test_fundsIn_baseFeeRoutesToCMOnTopOfPercentage() public {
+        uint256 percent = 400; // 4%
+        uint256 baseFee = 1e18;
+
+        // The harness floor is 1 wei-unit, which no flat fee can sit under.
+        // Raise it to a realistic value first: at a 10e18 floor the combined fee
+        // is 0.4e18 + 1e18, comfortably below it.
+        vm.prank(bridge.owner());
+        bridge.setMinFundsInAmount(10e18);
+
+        vm.prank(deployer);
+        cm.setCommissionRule(
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            address(usdt0),
+            CommissionConfig({
+                stablePercent: percent,
+                baseFee: baseFee,
+                multiplier: 100,
+                side: CommissionSide.FUNDS_IN,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        uint256 expectedCommission = (AMOUNT * percent) / 100 / 100 + baseFee;
+        uint256 expectedNet = AMOUNT - expectedCommission;
+
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        assertEq(usdt0.balanceOf(address(bridge)), expectedNet, "bridge net");
+        assertEq(usdt0.balanceOf(address(cm)), expectedCommission, "cm pool holds percentage + flat");
+        assertEq(cm.tokenCommissionPool(address(usdt0)), expectedCommission, "cm recorded");
+        assertEq(rgbModule.fundsInRecords(opId), expectedNet, "record = net");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), expectedNet, "liquidity credited net");
+    }
+
     // A token already donated directly to the CommissionManager is NOT absorbed
     // as commission. Bridge measures the delta of its own transfer,
     // so the pool grows by exactly the real fee; the donation stays a stray balance.
@@ -2884,8 +3032,10 @@ contract BridgeTest is Test {
 
         // Misconfigure only the CM bridge guard so the route/RGB write happens
         // before commission forwarding fails in receiveTokenCommission().
+        // Deploy the stub BEFORE the prank — as a call argument it would consume it.
+        address wrongBridge = _wrongBridgeWithFloor();
         vm.prank(deployer);
-        cm.setBridgeAddress(makeAddr("wrong-bridge"));
+        cm.setBridgeAddress(wrongBridge);
 
         uint256 userBefore = usdt0.balanceOf(user);
         uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
@@ -3314,6 +3464,17 @@ contract BridgeTest is Test {
         }
     }
 
+    /// @dev A contract that is NOT the Bridge but still answers the deposit-floor
+    ///      query the CommissionManager makes while quoting. Pointing CM's
+    ///      `bridgeAddress` here isolates the failure to `receiveTokenCommission`
+    ///      (`OnlyBridge`) — a codeless address would instead fail earlier, at the
+    ///      quote, with `AmountFloorUnavailable`.
+    function _wrongBridgeWithFloor() internal returns (address) {
+        MockDepositFloor stub = new MockDepositFloor();
+        stub.setMinFundsInAmount(bridge.minFundsInAmount());
+        return address(stub);
+    }
+
     function _assertFundsInRevertPathLeavesStateUnchanged(uint256 amount, uint8 failureMode) internal {
         bytes memory expectedRevert;
         MockSettlementModule revertingModule;
@@ -3332,8 +3493,10 @@ contract BridgeTest is Test {
             expectedRevert = abi.encodeWithSelector(MockSettlementModule.MockModuleForcedRevert.selector);
         } else if (failureMode == 2) {
             _setFundsInTokenRule(400); // 4%, positive for the fuzzed amount range.
+            // Deploy the stub BEFORE the prank — as a call argument it would consume it.
+            address wrongBridge = _wrongBridgeWithFloor();
             vm.prank(deployer);
-            cm.setBridgeAddress(makeAddr("wrong-bridge-for-fuzz"));
+            cm.setBridgeAddress(wrongBridge);
             expectedRevert = abi.encodeWithSelector(ICommissionManager.OnlyBridge.selector);
         } else if (failureMode == 3) {
             _setFundsInNativeRule(100); // Positive native quote for the fuzzed amount range.
@@ -3456,6 +3619,7 @@ contract BridgeTest is Test {
     function test_hundredPercentRouteRuleCannotBeConfigured() public {
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 8_100,
+            baseFee: 0,
             multiplier: 90,
             side: CommissionSide.FUNDS_IN,
             currency: CommissionCurrency.TOKEN,
@@ -3614,7 +3778,7 @@ contract BridgeTest is Test {
 
         s.cm = new CommissionManager(predictedBridge, recipient);
         RouteRegistry feeRouteRegistry = new RouteRegistry(predictedBridge, deployer);
-        s.bridge = new Bridge(address(s.token), address(feeRouteRegistry), payable(address(s.cm)), address(0), 1);
+        s.bridge = new Bridge(address(s.token), address(feeRouteRegistry), payable(address(s.cm)), address(0), 1, 1);
 
         // Reuse the suite's RGB verifier (shares `btcRelay` + `_proof()`); a
         // fresh module is bound to this stack's route registry.
@@ -3651,6 +3815,7 @@ contract BridgeTest is Test {
                 address(s.token),
                 CommissionConfig({
                     stablePercent: stablePercent,
+                    baseFee: 0,
                     multiplier: multiplier,
                     side: CommissionSide.FUNDS_IN,
                     currency: CommissionCurrency.TOKEN,
@@ -3811,19 +3976,16 @@ contract BridgeTest is Test {
 
     // --- Received <= tokenCommission reverts InsufficientReceived ---
     //
-    // Fee = 9000 bps (90%) → received = 10% of AMOUNT = 10e18. The fee-shape
-    // guard caps the commission fraction at `stablePercent / multiplier^2`
-    // (stablePercent ≤ 9000, stablePercent < multiplier^2). Choosing
-    // multiplier = 95, stablePercent = 9000 yields a fraction 9000/9025 ≈ 99.7%,
-    // so the commission quote on the NOMINAL AMOUNT (~99.7e18) far exceeds the
-    // actual received (10e18) — configurable within the guard, so no boundary
-    // compromise is needed.
+    // Token transfer fee = 9000 bps (90%) → received = 10% of AMOUNT = 10e18.
+    // The commission is quoted on the NOMINAL amount, so the protocol maximum
+    // rate of 90% (`_MAX_FEE_BPS`) already puts the quote at 90e18 — far above
+    // the 10e18 that actually arrived, which is what this path must reject.
     function test_fundsIn_feeToken_revertsWhenFeeExceedsCommission() public {
         FeeStack memory s = _deployFeeStack(9000); // 90% transfer fee
-        _setFeeStackFundsInTokenRule(s, 9000, 95); // ~99.7% commission on nominal
+        _setFeeStackFundsInTokenRule(s, 9000, 100); // 90% commission on nominal — the ceiling
 
         uint256 received = AMOUNT - s.token.feeOn(AMOUNT);
-        uint256 tokenCommission = s.cm.calculateStableFee(AMOUNT, 9000, 95);
+        uint256 tokenCommission = s.cm.calculateStableFee(AMOUNT, 9000, 100);
 
         assertEq(received, AMOUNT / 10, "sanity: received == 10% of nominal");
         assertGt(tokenCommission, received, "sanity: commission exceeds actual received");

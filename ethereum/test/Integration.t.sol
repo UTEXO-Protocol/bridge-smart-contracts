@@ -193,7 +193,8 @@ contract IntegrationTest is Test {
             address(routeRegistry),
             payable(address(cm)),
             address(0),
-            1 // minFundsInAmount: smallest non-zero floor for tests
+            1, // minFundsInAmount: smallest non-zero floor for tests
+            1 // minFundsOutAmount: smallest non-zero floor for tests
         );
 
         rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
@@ -266,6 +267,7 @@ contract IntegrationTest is Test {
                 address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_IN_PERCENT,
+                    baseFee: 0,
                     multiplier: FUNDS_IN_MULT,
                     side: CommissionSide.FUNDS_IN,
                     currency: CommissionCurrency.TOKEN,
@@ -282,6 +284,7 @@ contract IntegrationTest is Test {
                 address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_OUT_PERCENT,
+                    baseFee: 0,
                     multiplier: FUNDS_OUT_MULT,
                     side: CommissionSide.FUNDS_OUT,
                     currency: CommissionCurrency.TOKEN,
@@ -446,6 +449,7 @@ contract IntegrationTest is Test {
                 address(token),
                 CommissionConfig({
                     stablePercent: FUNDS_IN_PERCENT,
+                    baseFee: 0,
                     multiplier: FUNDS_IN_MULT,
                     side: CommissionSide.FUNDS_IN,
                     currency: CommissionCurrency.NATIVE,
