@@ -71,7 +71,7 @@ Private keys are held inside Enclaves and cannot be extracted. Key persistence i
 
 ### Commission
 
-Each transfer deducts a service commission, configured per-route: source side (`FundsIn`) or destination side (`FundsOut`), in the bridged token or the native currency of the chain. On EVM the commission is held by the `CommissionManager` contract — kept separate from bridge liquidity — and withdrawal is controlled by federation governance through the timelock.
+Each transfer may deduct a per-route service commission consisting of a proportional component plus an optional flat `baseFee`: `fee = amount × percentageFee + baseFee`. `FundsIn` commission may be paid in the bridged token or native currency; `FundsOut` commission is token-only. The Bridge enforces separate non-zero `minFundsInAmount` and `minFundsOutAmount` floors, and a configured flat fee must leave a positive net amount at the applicable floor. On EVM the commission is held by the `CommissionManager` contract — kept separate from bridge liquidity — and withdrawal is controlled by federation governance through the timelock.
 
 ### Replay protection
 

@@ -35,6 +35,15 @@ import {Bridge} from "../../src/Bridge.sol";
 ///                               non-zero; retune later via federation
 ///                               governance with
 ///                               `Bridge.setMinFundsInAmount(newMinimum)`.
+///   MIN_FUNDS_OUT_AMOUNT      — Minimum accepted `fundsOut` release in token
+///                               smallest units. Required and must be non-zero;
+///                               retune later with
+///                               `Bridge.setMinFundsOutAmount(newMinimum)`.
+///                               Set it above the per-release settlement cost
+///                               (source-chain fee plus this chain's gas), and
+///                               at least above any flat `baseFee` the
+///                               CommissionManager charges on a release route —
+///                               `setCommissionRule` validates against it.
 ///
 /// Usage:
 ///   forge script script/deploy/DeployBridge.s.sol \
@@ -47,9 +56,12 @@ contract DeployBridge is Script {
         address commissionManager = vm.envAddress("COMMISSION_MANAGER");
         address lzAdapter = vm.envOr("LZ_ADAPTER", address(0));
         uint256 minFundsInAmount = vm.envUint("MIN_FUNDS_IN_AMOUNT");
+        uint256 minFundsOutAmount = vm.envUint("MIN_FUNDS_OUT_AMOUNT");
 
         vm.startBroadcast(pk);
-        bridge = new Bridge(usdt0, routeRegistry, payable(commissionManager), lzAdapter, minFundsInAmount);
+        bridge = new Bridge(
+            usdt0, routeRegistry, payable(commissionManager), lzAdapter, minFundsInAmount, minFundsOutAmount
+        );
         vm.stopBroadcast();
 
         console2.log("Bridge deployed at:  ", address(bridge));

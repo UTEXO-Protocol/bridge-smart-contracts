@@ -56,7 +56,7 @@ import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.so
 ///   ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD, INITIAL_ENCLAVE_SOURCE_CHAIN_ID,
 ///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD,
 ///   COMMISSION_RECIPIENT, TIMELOCK_DURATION, MIN_TIMELOCK,
-///   MIN_FUNDS_IN_AMOUNT,
+///   MIN_FUNDS_IN_AMOUNT, MIN_FUNDS_OUT_AMOUNT,
 ///   INITIAL_CHAIN_BURST_BPS, INITIAL_CHAIN_REFILL_BPS_PER_WINDOW,
 ///   GLOBAL_BURST_BPS, GLOBAL_REFILL_BPS_PER_WINDOW
 ///
@@ -114,6 +114,7 @@ contract DeployAll is Script {
         address ethUsdFeed = vm.envOr("ETH_USD_FEED", address(0));
         uint256 ethUsdHb = vm.envOr("ETH_USD_HEARTBEAT", uint256(0));
         uint256 minFundsIn = vm.envUint("MIN_FUNDS_IN_AMOUNT");
+        uint256 minFundsOut = vm.envUint("MIN_FUNDS_OUT_AMOUNT");
         uint256 minSourceConf = vm.envOr("MIN_SOURCE_CONFIRMATIONS", uint256(6));
         uint256 maxLatestConf = vm.envOr("MAX_LATEST_CONFIRMATIONS", uint256(1));
         uint256 minConfGap = vm.envOr("MIN_CONFIRMATION_GAP", uint256(5));
@@ -162,7 +163,7 @@ contract DeployAll is Script {
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
 
         // ---- 4. Bridge (nonce n+2) ---------------------------------------
-        bridge = new Bridge(usdt0, address(routeRegistry), payable(address(cm)), address(0), minFundsIn);
+        bridge = new Bridge(usdt0, address(routeRegistry), payable(address(cm)), address(0), minFundsIn, minFundsOut);
 
         // ---- 5. Route plugins (nonce n+3 .. n+7) -------------------------
         rgbVerifier = new RGBVerifier(btcRelay, minSourceConf, maxLatestConf, minConfGap);
