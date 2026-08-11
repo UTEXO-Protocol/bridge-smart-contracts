@@ -13,6 +13,7 @@ interface IBridge {
     error AmountBelowMinimum(uint256 amount, uint256 minimum);
     error InsufficientReceived(uint256 received, uint256 tokenCommission);
     error InvalidMinFundsInAmount();
+    error InvalidMinFundsOutAmount();
     error AddressTooLong(uint256 length, uint256 maxLength);
     error ProofTooLong(uint256 length, uint256 maxLength);
     error SettlementDataTooLong(uint256 length, uint256 maxLength);
@@ -58,6 +59,11 @@ interface IBridge {
     /// @param oldMinimum Previous minimum (constructor value before first update).
     /// @param newMinimum New minimum (in token smallest units; always non-zero).
     event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
+
+    /// @notice Emitted on every successful `setMinFundsOutAmount`.
+    /// @param oldMinimum Previous minimum (constructor value before first update).
+    /// @param newMinimum New minimum (in token smallest units; always non-zero).
+    event MinFundsOutAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
 
     /// @notice Emitted on `setOutflowLimit` (per-chain outflow token bucket).
     /// @param chainId             Source chain the limit applies to.
@@ -345,6 +351,21 @@ interface IBridge {
     /// @notice Current minimum accepted `fundsIn` deposit in token smallest
     ///         units. Always non-zero.
     function minFundsInAmount() external view returns (uint256);
+
+    /// @notice Updates the minimum accepted `fundsOut` release (token smallest
+    ///         units). Owner-only (MultisigProxy via the federation
+    ///         propose -> timelock -> execute flow). Must be non-zero; reverts
+    ///         `InvalidMinFundsOutAmount` otherwise.
+    function setMinFundsOutAmount(uint256 newMinimum) external;
+
+    /// @notice Current minimum accepted `fundsOut` release in token smallest
+    ///         units. Always non-zero.
+    /// @dev The outbound counterpart of `minFundsInAmount`. It bounds the flat
+    ///      `baseFee` a release route may charge, and independently caps how
+    ///      cheap an individual release can be — a swarm of dust releases costs
+    ///      the bridge Arbitrum gas and a per-operation source-chain fee that the
+    ///      released amount would not cover.
+    function minFundsOutAmount() external view returns (uint256);
 
     /// @notice Configure (or reconfigure) the per-chain outflow token bucket for
     ///         `chainId`. Owner-only (MultisigProxy timelock flow).

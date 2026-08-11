@@ -54,22 +54,12 @@ interface ICommissionManager {
     error StablePercentTooHigh();
     error MultiplierZero();
     error InvalidFeeShape(uint256 stablePercent, uint8 multiplier);
+    error FeeRateTooHigh(uint256 stablePercent, uint8 multiplier);
     error CommissionRoundsToZero(uint256 amount, uint256 stablePercent, uint8 multiplier);
     error ZeroNetAmount(uint256 amount, uint256 commission);
     error NativeCommissionNotAllowedOnFundsOut();
-
-    /// @notice The configured fee would consume a deposit sitting exactly on the
-    ///         Bridge's `minFundsInAmount` floor. Carries the total fee charged at
-    ///         the floor and the floor itself.
-    error FeeAboveDepositFloor(uint256 feeAtFloor, uint256 depositFloor);
-
-    /// @notice `baseFee` is currently only representable on the `FUNDS_IN` side —
-    ///         the release path has no minimum-amount floor to bound it against.
-    error BaseFeeNotAllowedOnFundsOut();
-
-    /// @notice The Bridge's `minFundsInAmount` could not be read (unset or
-    ///         non-contract `bridgeAddress`), so no fee can be validated or quoted.
-    error DepositFloorUnavailable();
+    error FeeAboveAmountFloor(uint256 feeAtFloor, uint256 amountFloor);
+    error AmountFloorUnavailable();
     error TokenDecimalsUnavailable();
     error BalanceBelowRecordedPool();
     error NothingReceived();
@@ -176,10 +166,15 @@ interface ICommissionManager {
         view
         returns (uint256);
 
-    /// @notice The Bridge's current `minFundsInAmount`. Every configured fee must
-    ///         leave a positive net for a deposit sitting exactly on this floor;
-    ///         it is the bound `baseFee` is validated and quoted against.
+    /// @notice The Bridge's current `minFundsInAmount`. Every configured
+    ///         `FUNDS_IN` fee must leave a positive net for a deposit sitting
+    ///         exactly on this floor; it is the bound an inbound `baseFee` is
+    ///         validated and quoted against.
     function depositFloor() external view returns (uint256);
+
+    /// @notice The Bridge's current `minFundsOutAmount` — the same bound for the
+    ///         release side.
+    function releaseFloor() external view returns (uint256);
 
     /// @notice Convert a USD-denominated token fee (stablecoin, 1 token ≈ $1) to
     ///         native wei using the configured ETH/USD Chainlink feed. Reverts

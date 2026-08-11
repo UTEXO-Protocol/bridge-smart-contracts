@@ -223,6 +223,14 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     ///      propose -> timelock -> execute flow without redeploying the Bridge.
     uint256 public override minFundsInAmount;
 
+    /// @inheritdoc IBridge
+    /// @dev Always non-zero (validated at the constructor and setter). The
+    ///      outbound mirror of `minFundsInAmount`, and the bound the
+    ///      CommissionManager validates a `FUNDS_OUT` flat `baseFee` against.
+    ///      Mutable through the same `MultisigProxy` propose -> timelock ->
+    ///      execute flow.
+    uint256 public override minFundsOutAmount;
+
     // =========================================================================
     // Modifiers
     // =========================================================================
@@ -250,21 +258,27 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @param minFundsInAmount_  Initial minimum accepted `fundsIn` deposit in
     ///                           token smallest units. Must be non-zero; it can
     ///                           be retuned later via `setMinFundsInAmount`.
+    /// @param minFundsOutAmount_ Initial minimum accepted `fundsOut` release in
+    ///                           token smallest units. Must be non-zero; it can
+    ///                           be retuned later via `setMinFundsOutAmount`.
     constructor(
         address usdt0_,
         address routeRegistry_,
         address payable commissionManager_,
         address lzAdapter_,
-        uint256 minFundsInAmount_
+        uint256 minFundsInAmount_,
+        uint256 minFundsOutAmount_
     ) BridgeBase(usdt0_) {
         if (routeRegistry_ == address(0)) revert InvalidRouteRegistryAddress();
         if (commissionManager_ == address(0)) revert InvalidCommissionManagerAddress();
         if (minFundsInAmount_ == 0) revert InvalidMinFundsInAmount();
+        if (minFundsOutAmount_ == 0) revert InvalidMinFundsOutAmount();
 
         routeRegistry = routeRegistry_;
         commissionManager = ICommissionManager(commissionManager_);
         lzAdapter = lzAdapter_;
         minFundsInAmount = minFundsInAmount_;
+        minFundsOutAmount = minFundsOutAmount_;
     }
 
     // =========================================================================
@@ -313,6 +327,17 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 old = minFundsInAmount;
         minFundsInAmount = newMinimum;
         emit MinFundsInAmountUpdated(old, newMinimum);
+    }
+
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`; federation gates this on its M-of-N
+    ///      timelock flow (generic `proposeAdminExecute` -> execute). Must be
+    ///      non-zero
+    function setMinFundsOutAmount(uint256 newMinimum) external override onlyOwner {
+        if (newMinimum == 0) revert InvalidMinFundsOutAmount();
+        uint256 old = minFundsOutAmount;
+        minFundsOutAmount = newMinimum;
+        emit MinFundsOutAmountUpdated(old, newMinimum);
     }
 
     /// @inheritdoc IBridge
@@ -700,7 +725,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // =========================================================================
 
     function _validateFundsOutParams(FundsOutParams calldata params) private view {
-        if (params.amount == 0) revert ZeroAmount();
+        if (params.amount == 0) revert ZeroAmount();        
+        if (params.amount < minFundsOutAmount) revert AmountBelowMinimum(params.amount, minFundsOutAmount);
         if (params.recipient == address(0)) revert InvalidRecipientAddress();
         if (params.sourceChainId == 0) revert InvalidSourceChainId();
         if (params.destinationChainId == 0) revert InvalidDestinationChainId();

@@ -17,11 +17,12 @@ import {
     ICommissionManager
 } from "./interfaces/ICommissionManager.sol";
 
-/// @notice Minimal view of the Bridge's inbound dust floor. Declared locally
+/// @notice Minimal view of the Bridge's per-side dust floors. Declared locally
 ///         rather than importing the full `IBridge` so the commission layer
-///         depends on exactly the one value it needs.
-interface IBridgeDepositFloor {
+///         depends on exactly the two values it needs.
+interface IBridgeAmountFloors {
     function minFundsInAmount() external view returns (uint256);
+    function minFundsOutAmount() external view returns (uint256);
 }
 
 /**
@@ -38,10 +39,10 @@ interface IBridgeDepositFloor {
  *      **Fee shape:** `fee = amount * stablePercent / multiplier^2 + baseFee` — a proportional part
  *      plus a flat part, both per-route configurable and either optionally zero. `baseFee` covers a
  *      per-operation cost that does not scale with the amount (the Bitcoin transaction fee on the RGB
- *      leg). It is expressed in the token's smallest units and is only accepted on the `FUNDS_IN`
- *      side, where `Bridge.minFundsInAmount` bounds it: every configured rule must leave a positive
- *      net for a deposit sitting exactly on that floor, re-verified against the live floor on every
- *      quote (see `_requireFeeFitsDepositFloor`).
+ *      leg). It is expressed in the token's smallest units and is bounded by its side's Bridge dust
+ *      floor — `minFundsInAmount` for `FUNDS_IN`, `minFundsOutAmount` for `FUNDS_OUT`: every
+ *      configured rule must leave a positive net for an operation sitting exactly on that floor,
+ *      re-verified against the live floor on every quote (see `_requireFeeFitsAmountFloor`).
  *
  *      **Side (`CommissionSide`):** For a given route config, commission applies only to **either**
  *      `FUNDS_IN` **or** `FUNDS_OUT`, matching `calculateFundsInCommission` vs `calculateFundsOutCommission`.
@@ -82,8 +83,25 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     /// @notice Default `currency` for routes without an override.
     CommissionCurrency public globalCurrency = CommissionCurrency.TOKEN;
 
-    /// @notice Maximum allowed `stablePercent` (9000 = 90%).
+    /// @notice Absolute bound on the raw `stablePercent` numerator. Kept as a
+    ///         sanity bound (and as the overflow guard for the rate comparison
+    ///         in `_validateConfig`); the ceiling that actually governs what a
+    ///         route can charge is `_MAX_FEE_BPS`.
     uint256 private constant _MAX_STABLE_PERCENT = 9000;
+
+    /// @notice Basis-point denominator for the effective-rate ceiling.
+    uint256 private constant _BPS_DENOMINATOR = 10_000;
+
+    /// @notice Hard ceiling on the EFFECTIVE proportional rate: 9000 bps = 90%.
+    /// @dev `stablePercent` alone does not express the rate — the charged
+    ///      fraction is `stablePercent / multiplier^2`. Bounding the numerator
+    ///      therefore caps the rate only at the conventional `multiplier == 100`;
+    ///      with any smaller multiplier the same numerator buys a far larger
+    ///      rate (`stablePercent = 99, multiplier = 10` is 99%, and
+    ///      `8999 / 95^2` is 99.7%), leaving only the `InvalidFeeShape` "below
+    ///      100%" bound in force. The ceiling is enforced on the rate itself so
+    ///      it holds for every representable `multiplier`.
+    uint256 private constant _MAX_FEE_BPS = 9_000;
 
     /// @notice Per-route overrides; key = `buildRouteKey(sourceChainId, destChainId, token)`.
     mapping(bytes32 => CommissionConfig) public commissionRules;
@@ -184,7 +202,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         // current `minFundsInAmount`. Re-read on every quote rather than trusted
         // from configuration time, because `Bridge.setMinFundsInAmount` can lower
         // the floor after a rule was validated against a higher one.
-        _requireFeeFitsDepositFloor(config);
+        _requireFeeFitsAmountFloor(config);
 
         if (config.currency == CommissionCurrency.TOKEN) {
             // TOKEN commission: deduct from amount
@@ -233,14 +251,14 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             return (0, 0, amount);
         }
 
-        // Total fee. `baseFee` is rejected at configuration time on this side
-        // (`BaseFeeNotAllowedOnFundsOut`), so the flat term is always zero here;
-        // the expression is written uniformly with the inbound path so enabling
-        // outbound `baseFee` later is a validator change only. No deposit-floor
-        // check either: `minFundsInAmount` bounds deposits, and the release path
-        // has no equivalent floor to validate a flat fee against.
+        // Total fee: proportional part plus the flat `baseFee`, symmetric with
+        // the inbound path. The flat term is bounded here by
+        // `Bridge.minFundsOutAmount`, the release-side mirror of the deposit
+        // floor, and re-verified against the live value on every quote for the
+        // same reason: the floor can be lowered after a rule was accepted.
         uint256 totalFee = calculateStableFee(amount, config.stablePercent, config.multiplier) + config.baseFee;
         _requireNonZeroConfiguredCommission(amount, totalFee, config);
+        _requireFeeFitsAmountFloor(config);
 
         if (config.currency == CommissionCurrency.TOKEN) {
             if (totalFee >= amount) revert ZeroNetAmount(amount, totalFee);
@@ -292,49 +310,61 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
     /// @inheritdoc ICommissionManager
     function depositFloor() external view returns (uint256) {
-        return _depositFloor();
+        return _amountFloor(CommissionSide.FUNDS_IN);
     }
 
-    /// @dev Reads the Bridge's inbound dust floor. Fails closed: a
-    ///      `bridgeAddress` that is not a live Bridge, or a zero floor (which the
-    ///      Bridge itself rejects at construction and in `setMinFundsInAmount`),
-    ///      leaves no sound bound for a flat fee, so no quote may proceed.
-    function _depositFloor() internal view returns (uint256 floor) {
+    /// @inheritdoc ICommissionManager
+    function releaseFloor() external view returns (uint256) {
+        return _amountFloor(CommissionSide.FUNDS_OUT);
+    }
+
+    /// @dev Reads the Bridge dust floor governing `side`. Fails closed: a
+    ///      `bridgeAddress` that is not a live Bridge, or a zero floor .
+    function _amountFloor(CommissionSide side) internal view returns (uint256 floor) {
         address bridge = bridgeAddress;
         // Explicit code check first: Solidity's `extcodesize` guard on a
-        // high-level call to a codeless address reverts WITHOUT data and is not
-        // catchable by the `try/catch` below, which would surface as an opaque
-        // bare revert instead of a named error.
-        if (bridge.code.length == 0) revert DepositFloorUnavailable();
-        try IBridgeDepositFloor(bridge).minFundsInAmount() returns (uint256 value) {
-            floor = value;
-        } catch {
-            revert DepositFloorUnavailable();
+        // high-level call to a codeless address reverts WITHOUT data.
+        if (bridge.code.length == 0) revert AmountFloorUnavailable();
+
+        if (side == CommissionSide.FUNDS_IN) {
+            try IBridgeAmountFloors(bridge).minFundsInAmount() returns (uint256 value) {
+                floor = value;
+            } catch {
+                revert AmountFloorUnavailable();
+            }
+        } else {
+            try IBridgeAmountFloors(bridge).minFundsOutAmount() returns (uint256 value) {
+                floor = value;
+            } catch {
+                revert AmountFloorUnavailable();
+            }
         }
-        if (floor == 0) revert DepositFloorUnavailable();
+
+        if (floor == 0) revert AmountFloorUnavailable();
     }
 
-    /// @dev Enforces that the effective rule still leaves a positive net for a
-    ///      deposit sitting exactly on the floor.
+    /// @dev Enforces that the effective rule still leaves a positive net for an
+    ///      operation sitting exactly on its side's floor — `minFundsInAmount`
+    ///      for a deposit, `minFundsOutAmount` for a release.
     ///
     ///      Checking at the floor is both necessary and sufficient: net is
     ///      `amount * (1 - stablePercent/multiplier^2) - baseFee`, which is
     ///      strictly increasing in `amount` because the configured proportional
     ///      rate is below 100% (`InvalidFeeShape`). So if the floor clears, every
-    ///      larger deposit clears too — and `baseFee < depositFloor` alone would
-    ///      NOT be sufficient, since the proportional part also consumes part of
-    ///      that floor.
-    function _requireFeeFitsDepositFloor(CommissionConfig memory config) private view {
+    ///      larger operation clears too — and `baseFee < floor` alone would NOT
+    ///      be sufficient, since the proportional part also consumes part of that
+    ///      floor.
+    function _requireFeeFitsAmountFloor(CommissionConfig memory config) private view {
         // Only a FLAT fee needs this bound. A purely proportional fee is already
         // held below 100% by `InvalidFeeShape`, so it leaves a positive net at
         // every amount on its own. Skipping the read here keeps the Bridge
         // dependency — and its failure mode — off the quote path of every route
-        // that charges no flat fee, which is every route that exists today.
+        // that charges no flat fee.
         if (config.baseFee == 0) return;
 
-        uint256 floor = _depositFloor();
+        uint256 floor = _amountFloor(config.side);
         uint256 feeAtFloor = calculateStableFee(floor, config.stablePercent, config.multiplier) + config.baseFee;
-        if (feeAtFloor >= floor) revert FeeAboveDepositFloor(feeAtFloor, floor);
+        if (feeAtFloor >= floor) revert FeeAboveAmountFloor(feeAtFloor, floor);
     }
 
     /// @inheritdoc ICommissionManager
@@ -453,30 +483,41 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (stablePercent >= uint256(multiplier) * uint256(multiplier)) {
             revert InvalidFeeShape(stablePercent, multiplier);
         }
+        // Protocol ceiling on the EFFECTIVE rate, checked after the "below 100%"
+        // shape bound so that an over-100% configuration keeps reporting
+        // `InvalidFeeShape` rather than being reclassified here.
+        //
+        // Cross-multiplied instead of computing `stablePercent * 10_000 /
+        // multiplier^2`, so a rate just above the ceiling cannot be truncated
+        // down onto it. Overflow-free: `stablePercent` is already bounded by
+        // `_MAX_STABLE_PERCENT`, and `multiplier` is uint8.
+        //
+        // At the conventional `multiplier == 100` this reduces to exactly
+        // `stablePercent <= 9000`, so no existing rule shape changes meaning.
+        if (stablePercent * _BPS_DENOMINATOR > _MAX_FEE_BPS * uint256(multiplier) * uint256(multiplier)) {
+            revert FeeRateTooHigh(stablePercent, multiplier);
+        }
         // NATIVE on FUNDS_OUT is unrepresentable: a release has no payer for a
         // native fee
         if (currency == CommissionCurrency.NATIVE && side == CommissionSide.FUNDS_OUT) {
             revert NativeCommissionNotAllowedOnFundsOut();
         }
-        // A flat fee is only bounded on the inbound side, where
-        // `minFundsInAmount` guarantees a minimum amount to charge it against.
-        // The release path has no such floor: a `baseFee` exceeding a small
-        // release would revert its quote, and because `burnId` is derived from
-        // the release intent that exact release could then never execute.
-        if (baseFee != 0 && side == CommissionSide.FUNDS_OUT) revert BaseFeeNotAllowedOnFundsOut();
-
-        if (side == CommissionSide.FUNDS_IN) {
-            _requireFeeFitsDepositFloor(
-                CommissionConfig({
-                    stablePercent: stablePercent,
-                    baseFee: baseFee,
-                    multiplier: multiplier,
-                    side: side,
-                    currency: currency,
-                    isSet: true
-                })
-            );
-        }
+        // A flat fee is bounded by its side's Bridge floor — `minFundsInAmount`
+        // for deposits, `minFundsOutAmount` for releases — each of which
+        // guarantees a minimum amount to charge it against. Without that bound a
+        // `baseFee` exceeding a small operation would revert its quote, and on
+        // the release side, because `burnId` is derived from the release intent,
+        // that exact release could then never execute.
+        _requireFeeFitsAmountFloor(
+            CommissionConfig({
+                stablePercent: stablePercent,
+                baseFee: baseFee,
+                multiplier: multiplier,
+                side: side,
+                currency: currency,
+                isSet: true
+            })
+        );
     }
 
     /// @inheritdoc ICommissionManager
