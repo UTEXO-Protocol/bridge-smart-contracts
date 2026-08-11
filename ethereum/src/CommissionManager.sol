@@ -17,6 +17,13 @@ import {
     ICommissionManager
 } from "./interfaces/ICommissionManager.sol";
 
+/// @notice Minimal view of the Bridge's inbound dust floor. Declared locally
+///         rather than importing the full `IBridge` so the commission layer
+///         depends on exactly the one value it needs.
+interface IBridgeDepositFloor {
+    function minFundsInAmount() external view returns (uint256);
+}
+
 /**
  * @title CommissionManager
  * @author UTEXO bridge stack
@@ -27,6 +34,14 @@ import {
  *      numeric ids by the Utexo backend in a namespace reserved above the EVM range (see README).
  *      Routes are **directional** (swapping source and destination yields a different key), so
  *      independent rules can apply to each leg of a round trip (e.g. ETH→RGB vs RGB→ETH).
+ *
+ *      **Fee shape:** `fee = amount * stablePercent / multiplier^2 + baseFee` — a proportional part
+ *      plus a flat part, both per-route configurable and either optionally zero. `baseFee` covers a
+ *      per-operation cost that does not scale with the amount (the Bitcoin transaction fee on the RGB
+ *      leg). It is expressed in the token's smallest units and is only accepted on the `FUNDS_IN`
+ *      side, where `Bridge.minFundsInAmount` bounds it: every configured rule must leave a positive
+ *      net for a deposit sitting exactly on that floor, re-verified against the live floor on every
+ *      quote (see `_requireFeeFitsDepositFloor`).
  *
  *      **Side (`CommissionSide`):** For a given route config, commission applies only to **either**
  *      `FUNDS_IN` **or** `FUNDS_OUT`, matching `calculateFundsInCommission` vs `calculateFundsOutCommission`.
@@ -57,6 +72,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
     /// @notice Default `stablePercent` when no per-route rule exists (×100; 0 = no % fee until configured).
     uint256 public globalStablePercent = 0;
+    /// @notice Default flat `baseFee` in token smallest units (0 = no flat fee
+    ///         until configured). Added on top of the proportional part.
+    uint256 public globalBaseFee = 0;
     /// @notice Default `multiplier` for `calculateStableFee` (typically 100).
     uint8 public globalMultiplier = 100;
     /// @notice Default `side` for routes without an override.
@@ -158,23 +176,29 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             return (0, 0, amount);
         }
 
-        // Calculate stable fee in token units
-        uint256 stableFee = calculateStableFee(amount, config.stablePercent, config.multiplier);
-        _requireNonZeroConfiguredCommission(amount, stableFee, config);
+        // Total fee in token units: proportional part plus the flat `baseFee`.
+        uint256 totalFee = calculateStableFee(amount, config.stablePercent, config.multiplier) + config.baseFee;
+        _requireNonZeroConfiguredCommission(amount, totalFee, config);
+        // Live floor check. `baseFee` does not shrink with the amount, so a rule
+        // is only sound while it still leaves a positive net at the Bridge's
+        // current `minFundsInAmount`. Re-read on every quote rather than trusted
+        // from configuration time, because `Bridge.setMinFundsInAmount` can lower
+        // the floor after a rule was validated against a higher one.
+        _requireFeeFitsDepositFloor(config);
 
         if (config.currency == CommissionCurrency.TOKEN) {
             // TOKEN commission: deduct from amount
-            if (stableFee >= amount) revert ZeroNetAmount(amount, stableFee);
-            tokenCommission = stableFee;
+            if (totalFee >= amount) revert ZeroNetAmount(amount, totalFee);
+            tokenCommission = totalFee;
             nativeCommission = 0;
             netAmount = amount - tokenCommission;
         } else {
             // NATIVE commission: user pays in ETH/BNB via msg.value
             tokenCommission = 0;
-            if (stableFee == 0) {
+            if (totalFee == 0) {
                 nativeCommission = 0;
             } else {
-                nativeCommission = convertTokenFeeToNative(stableFee, _tokenDecimals(token));
+                nativeCommission = convertTokenFeeToNative(totalFee, _tokenDecimals(token));
                 if (nativeCommission == 0) {
                     revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
                 }
@@ -209,22 +233,27 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             return (0, 0, amount);
         }
 
-        // Calculate stable fee
-        uint256 stableFee = calculateStableFee(amount, config.stablePercent, config.multiplier);
-        _requireNonZeroConfiguredCommission(amount, stableFee, config);
+        // Total fee. `baseFee` is rejected at configuration time on this side
+        // (`BaseFeeNotAllowedOnFundsOut`), so the flat term is always zero here;
+        // the expression is written uniformly with the inbound path so enabling
+        // outbound `baseFee` later is a validator change only. No deposit-floor
+        // check either: `minFundsInAmount` bounds deposits, and the release path
+        // has no equivalent floor to validate a flat fee against.
+        uint256 totalFee = calculateStableFee(amount, config.stablePercent, config.multiplier) + config.baseFee;
+        _requireNonZeroConfiguredCommission(amount, totalFee, config);
 
         if (config.currency == CommissionCurrency.TOKEN) {
-            if (stableFee >= amount) revert ZeroNetAmount(amount, stableFee);
-            tokenCommission = stableFee;
+            if (totalFee >= amount) revert ZeroNetAmount(amount, totalFee);
+            tokenCommission = totalFee;
             nativeCommission = 0;
             netAmount = amount - tokenCommission;
         } else {
             // NATIVE commission for fundsOut: user pays in native (per blueprint)
             tokenCommission = 0;
-            if (stableFee == 0) {
+            if (totalFee == 0) {
                 nativeCommission = 0;
             } else {
-                nativeCommission = convertTokenFeeToNative(stableFee, _tokenDecimals(token));
+                nativeCommission = convertTokenFeeToNative(totalFee, _tokenDecimals(token));
                 if (nativeCommission == 0) {
                     revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
                 }
@@ -246,6 +275,66 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         returns (uint256)
     {
         return (amount * stablePercent) / multiplier / multiplier;
+    }
+
+    /// @inheritdoc ICommissionManager
+    /// @dev Convenience view for the backend: resolves the effective rule and
+    ///      returns the full `proportional + flat` fee without the side/currency
+    ///      branching the `calculate*Commission` entrypoints apply.
+    function calculateTotalFee(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
+        external
+        view
+        returns (uint256)
+    {
+        CommissionConfig memory config = getEffectiveConfig(buildRouteKey(sourceChainId, destChainId, token));
+        return calculateStableFee(amount, config.stablePercent, config.multiplier) + config.baseFee;
+    }
+
+    /// @inheritdoc ICommissionManager
+    function depositFloor() external view returns (uint256) {
+        return _depositFloor();
+    }
+
+    /// @dev Reads the Bridge's inbound dust floor. Fails closed: a
+    ///      `bridgeAddress` that is not a live Bridge, or a zero floor (which the
+    ///      Bridge itself rejects at construction and in `setMinFundsInAmount`),
+    ///      leaves no sound bound for a flat fee, so no quote may proceed.
+    function _depositFloor() internal view returns (uint256 floor) {
+        address bridge = bridgeAddress;
+        // Explicit code check first: Solidity's `extcodesize` guard on a
+        // high-level call to a codeless address reverts WITHOUT data and is not
+        // catchable by the `try/catch` below, which would surface as an opaque
+        // bare revert instead of a named error.
+        if (bridge.code.length == 0) revert DepositFloorUnavailable();
+        try IBridgeDepositFloor(bridge).minFundsInAmount() returns (uint256 value) {
+            floor = value;
+        } catch {
+            revert DepositFloorUnavailable();
+        }
+        if (floor == 0) revert DepositFloorUnavailable();
+    }
+
+    /// @dev Enforces that the effective rule still leaves a positive net for a
+    ///      deposit sitting exactly on the floor.
+    ///
+    ///      Checking at the floor is both necessary and sufficient: net is
+    ///      `amount * (1 - stablePercent/multiplier^2) - baseFee`, which is
+    ///      strictly increasing in `amount` because the configured proportional
+    ///      rate is below 100% (`InvalidFeeShape`). So if the floor clears, every
+    ///      larger deposit clears too — and `baseFee < depositFloor` alone would
+    ///      NOT be sufficient, since the proportional part also consumes part of
+    ///      that floor.
+    function _requireFeeFitsDepositFloor(CommissionConfig memory config) private view {
+        // Only a FLAT fee needs this bound. A purely proportional fee is already
+        // held below 100% by `InvalidFeeShape`, so it leaves a positive net at
+        // every amount on its own. Skipping the read here keeps the Bridge
+        // dependency — and its failure mode — off the quote path of every route
+        // that charges no flat fee, which is every route that exists today.
+        if (config.baseFee == 0) return;
+
+        uint256 floor = _depositFloor();
+        uint256 feeAtFloor = calculateStableFee(floor, config.stablePercent, config.multiplier) + config.baseFee;
+        if (feeAtFloor >= floor) revert FeeAboveDepositFloor(feeAtFloor, floor);
     }
 
     /// @inheritdoc ICommissionManager
@@ -324,10 +413,35 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
      */
     function setGlobalDefaults(
         uint256 stablePercent,
+        uint256 baseFee,
         uint8 multiplier,
         CommissionSide side,
         CommissionCurrency currency
     ) external onlyOwner {
+        _validateConfig(stablePercent, baseFee, multiplier, side, currency);
+
+        globalStablePercent = stablePercent;
+        globalBaseFee = baseFee;
+        globalMultiplier = multiplier;
+        globalSide = side;
+        globalCurrency = currency;
+
+        emit GlobalDefaultsUpdated(stablePercent, baseFee, multiplier, side, currency);
+    }
+
+    /// @dev Shared shape validation for both the global defaults and a per-route
+    ///      override. Fails fast at configuration time so a malformed rule
+    ///      reverts for governance here instead of silently bricking every quote
+    ///      on the route later. The deposit-floor part is re-checked on every
+    ///      quote (`_requireFeeFitsDepositFloor`), because the floor can move
+    ///      after a rule was accepted.
+    function _validateConfig(
+        uint256 stablePercent,
+        uint256 baseFee,
+        uint8 multiplier,
+        CommissionSide side,
+        CommissionCurrency currency
+    ) private view {
         if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (multiplier == 0) revert MultiplierZero();
         // Joint invariant: the fee fraction is `stablePercent / multiplier^2`.
@@ -344,13 +458,25 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (currency == CommissionCurrency.NATIVE && side == CommissionSide.FUNDS_OUT) {
             revert NativeCommissionNotAllowedOnFundsOut();
         }
+        // A flat fee is only bounded on the inbound side, where
+        // `minFundsInAmount` guarantees a minimum amount to charge it against.
+        // The release path has no such floor: a `baseFee` exceeding a small
+        // release would revert its quote, and because `burnId` is derived from
+        // the release intent that exact release could then never execute.
+        if (baseFee != 0 && side == CommissionSide.FUNDS_OUT) revert BaseFeeNotAllowedOnFundsOut();
 
-        globalStablePercent = stablePercent;
-        globalMultiplier = multiplier;
-        globalSide = side;
-        globalCurrency = currency;
-
-        emit GlobalDefaultsUpdated(stablePercent, multiplier, side, currency);
+        if (side == CommissionSide.FUNDS_IN) {
+            _requireFeeFitsDepositFloor(
+                CommissionConfig({
+                    stablePercent: stablePercent,
+                    baseFee: baseFee,
+                    multiplier: multiplier,
+                    side: side,
+                    currency: currency,
+                    isSet: true
+                })
+            );
+        }
     }
 
     /// @inheritdoc ICommissionManager
@@ -414,23 +540,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         CommissionConfig calldata config
     ) external onlyOwner {
         if (token == address(0)) revert InvalidToken();
-        // Validate config
-        if (config.stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
-        if (config.multiplier == 0) revert MultiplierZero();
-        // Joint invariant: the fee fraction is `stablePercent / multiplier^2`.
-        // The configured fee must be strictly below 100%. Equality would make
-        // TOKEN commission consume the entire amount and create a zero-net
-        // settlement; greater values would underflow. Widen to uint256 before
-        // squaring — `multiplier` is uint8 and the common `100 * 100` would
-        // itself overflow uint8.
-        if (config.stablePercent >= uint256(config.multiplier) * uint256(config.multiplier)) {
-            revert InvalidFeeShape(config.stablePercent, config.multiplier);
-        }
-        // NATIVE on FUNDS_OUT is unrepresentable: a release has no payer for a
-        // native fee
-        if (config.currency == CommissionCurrency.NATIVE && config.side == CommissionSide.FUNDS_OUT) {
-            revert NativeCommissionNotAllowedOnFundsOut();
-        }
+        _validateConfig(config.stablePercent, config.baseFee, config.multiplier, config.side, config.currency);
 
         // Build route key
         bytes32 key = buildRouteKey(sourceChainId, destChainId, token);
@@ -438,7 +548,10 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         commissionRules[key] = config;
         commissionRules[key].isSet = true;
 
-        emit CommissionRuleUpdated(sourceChainId, destChainId, token, config);
+        // Emit what was STORED, not the caller's struct: `isSet` is forced true
+        // above, so echoing the argument would let a rule written with
+        // `isSet: false` be logged as unset while storage says otherwise.
+        emit CommissionRuleUpdated(sourceChainId, destChainId, token, commissionRules[key]);
     }
 
     /**
@@ -481,6 +594,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         // Fall back to global defaults
         return CommissionConfig({
             stablePercent: globalStablePercent,
+            baseFee: globalBaseFee,
             multiplier: globalMultiplier,
             side: globalSide,
             currency: globalCurrency,
@@ -488,16 +602,18 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         });
     }
 
-    /// @dev A deliberately disabled fee (`stablePercent == 0`) is valid. Once
-    ///      governance enables a fee, however, every operation governed by that
-    ///      rule must pay at least one smallest unit. This runtime check couples
-    ///      the effective per-route/global rule to the actual transfer amount,
-    ///      so later configuration changes cannot reopen commission-free dust.
-    function _requireNonZeroConfiguredCommission(uint256 amount, uint256 stableFee, CommissionConfig memory config)
+    /// @dev A deliberately disabled fee (`stablePercent == 0 && baseFee == 0`) is
+    ///      valid. Once governance enables a fee, however, every operation
+    ///      governed by that rule must pay at least one smallest unit. This
+    ///      runtime check couples the effective per-route/global rule to the
+    ///      actual transfer amount, so later configuration changes cannot reopen
+    ///      commission-free dust. A non-zero `baseFee` satisfies it by
+    ///      construction — the flat term never rounds away.
+    function _requireNonZeroConfiguredCommission(uint256 amount, uint256 totalFee, CommissionConfig memory config)
         private
         pure
     {
-        if (config.stablePercent != 0 && stableFee == 0) {
+        if ((config.stablePercent != 0 || config.baseFee != 0) && totalFee == 0) {
             revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
         }
     }
