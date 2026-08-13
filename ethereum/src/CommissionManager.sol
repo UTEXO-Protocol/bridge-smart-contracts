@@ -662,6 +662,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     /**
      * @notice Returns current global defaults (used when no per-route override exists).
      * @return stablePercent Global percent × 100.
+     * @return baseFee Global flat fee in token smallest units.
      * @return multiplier Global multiplier.
      * @return side Global `CommissionSide`.
      * @return currency Global `CommissionCurrency`.
@@ -669,9 +670,15 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     function getGlobalDefaults()
         external
         view
-        returns (uint256 stablePercent, uint8 multiplier, CommissionSide side, CommissionCurrency currency)
+        returns (
+            uint256 stablePercent,
+            uint256 baseFee,
+            uint8 multiplier,
+            CommissionSide side,
+            CommissionCurrency currency
+        )
     {
-        return (globalStablePercent, globalMultiplier, globalSide, globalCurrency);
+        return (globalStablePercent, globalBaseFee, globalMultiplier, globalSide, globalCurrency);
     }
 
     /**

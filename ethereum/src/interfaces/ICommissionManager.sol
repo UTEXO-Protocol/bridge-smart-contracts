@@ -228,7 +228,13 @@ interface ICommissionManager {
     function getGlobalDefaults()
         external
         view
-        returns (uint256 stablePercent, uint8 multiplier, CommissionSide side, CommissionCurrency currency);
+        returns (
+            uint256 stablePercent,
+            uint256 baseFee,
+            uint8 multiplier,
+            CommissionSide side,
+            CommissionCurrency currency
+        );
 
     function getCommissionRule(uint256 sourceChainId, uint256 destChainId, address token)
         external

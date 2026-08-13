@@ -196,8 +196,9 @@ contract CommissionManagerTest is Test {
     // --- Global defaults ---
 
     function test_getGlobalDefaults_initial() public view {
-        (uint256 sp, uint8 m, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
+        (uint256 sp, uint256 baseFee, uint8 m, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
         assertEq(sp, 0);
+        assertEq(baseFee, 0);
         assertEq(m, 100);
         assertEq(uint8(side), uint8(CommissionSide.FUNDS_IN));
         assertEq(uint8(cur), uint8(CommissionCurrency.TOKEN));
@@ -208,11 +209,12 @@ contract CommissionManagerTest is Test {
         // deposit). NATIVE + FUNDS_OUT is rejected by the setter and is covered
         // by a dedicated revert test.
         vm.expectEmit(true, true, true, true);
-        emit GlobalDefaultsUpdated(200, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        emit GlobalDefaultsUpdated(200, 50_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
         vm.prank(owner);
-        cm.setGlobalDefaults(200, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
-        (uint256 sp, uint8 m, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
+        cm.setGlobalDefaults(200, 50_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        (uint256 sp, uint256 baseFee, uint8 m, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
         assertEq(sp, 200);
+        assertEq(baseFee, 50_000);
         assertEq(m, 100);
         assertEq(uint8(side), uint8(CommissionSide.FUNDS_IN));
         assertEq(uint8(cur), uint8(CommissionCurrency.NATIVE));
@@ -236,7 +238,7 @@ contract CommissionManagerTest is Test {
         assertEq(cm.globalStablePercent(), 100);
         vm.prank(owner);
         cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
-        (uint256 sp,,,) = cm.getGlobalDefaults();
+        (uint256 sp,,,,) = cm.getGlobalDefaults();
         assertEq(sp, 0);
     }
 
@@ -257,7 +259,7 @@ contract CommissionManagerTest is Test {
     function test_setGlobalDefaults_acceptsNativeFundsIn() public {
         vm.prank(owner);
         cm.setGlobalDefaults(100, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
-        (,, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
+        (,,, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
         assertEq(uint8(side), uint8(CommissionSide.FUNDS_IN));
         assertEq(uint8(cur), uint8(CommissionCurrency.NATIVE));
     }
@@ -538,7 +540,7 @@ contract CommissionManagerTest is Test {
     function test_setGlobalDefaults_acceptsHighPercentWithDefaultMultiplier() public {
         vm.prank(owner);
         cm.setGlobalDefaults(9000, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
-        (uint256 sp, uint8 m,,) = cm.getGlobalDefaults();
+        (uint256 sp,, uint8 m,,) = cm.getGlobalDefaults();
         assertEq(sp, 9000);
         assertEq(m, 100);
     }

@@ -725,7 +725,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // =========================================================================
 
     function _validateFundsOutParams(FundsOutParams calldata params) private view {
-        if (params.amount == 0) revert ZeroAmount();        
+        if (params.amount == 0) revert ZeroAmount();
         if (params.amount < minFundsOutAmount) revert AmountBelowMinimum(params.amount, minFundsOutAmount);
         if (params.recipient == address(0)) revert InvalidRecipientAddress();
         if (params.sourceChainId == 0) revert InvalidSourceChainId();
