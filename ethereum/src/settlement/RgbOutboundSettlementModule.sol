@@ -8,15 +8,10 @@ import {RgbSettlementModule} from "./RgbSettlementModule.sol";
 /// @title RgbOutboundSettlementModule
 /// @notice `ISettlementModule` for rebalance routes whose DEBIT side is an RGB
 ///         network but whose CREDIT side is NOT an RGB network, so no RGB
-///         bookkeeping is needed on credit — e.g. `(RGB, Arch)`: liquidity
-///         migrates toward Arch, nothing is minted on an RGB network, so the
-///         credit writes no record and emits no `FundsIn`.
-///
-///         Routes where BOTH sides are RGB networks (e.g. mint/burn ↔ pool) do
-///         NOT use this module: they use the canonical `RgbSettlementModule`,
-///         whose credit hook writes the destination-network record (tagged via
-///         `fundsInRecordChainIds`) so a later release from that network can
-///         reference it.
+///         bookkeeping is needed on credit — e.g. `(RGB, Arch)` or
+///         `(RGB mint/burn, RGB pool)`: liquidity migrates to a destination
+///         which must not create a mint/burn ledger record, so the credit writes
+///         nothing and emits no RGB-specific `FundsIn`.
 ///
 /// @dev The debit-side check must read the SAME `fundsInRecords` ledger the
 ///      canonical `RgbSettlementModule` of that RGB network writes — a burn
