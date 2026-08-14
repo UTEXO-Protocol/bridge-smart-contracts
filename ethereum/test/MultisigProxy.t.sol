@@ -3482,31 +3482,26 @@ contract MultisigProxyTest is Test {
         proxy.executeProposal(id, abi.encode(newFed, 2));
     }
 
-    /// @dev An enclave rotation for chain C must be disjoint from other enclave
-    ///      chains (here chain B).
-    function test_perSourceChain_enclaveRotationRejectsOtherChainOverlap() public {
+    /// @dev Different source chains may intentionally reuse the same enclave
+    ///      keys. Each set remains internally unique and signatures stay bound
+    ///      to their sourceChainId-specific digest and nonce lane.
+    function test_perSourceChain_enclaveSetsMayReuseSameSigners() public {
         uint256 chainB = 8_000_003;
         address[] memory sB = _encSetFor(chainB, 3);
         _govUpdateEnclave(chainB, sB, 2);
 
         uint256 chainC = 8_000_004;
-        address[] memory sC = _encSetFor(chainC, 3);
-        sC[1] = sB[2]; // inject overlap with chainB
+        _govUpdateEnclave(chainC, sB, 2);
 
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = vm.getBlockTimestamp() + TIMELOCK + 1 days;
-        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(domainSep, chainC, sC, 2, nonce, deadline);
-        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-        bytes32 id = proxy.proposeUpdateEnclaveSigners(chainC, sC, 2, nonce, deadline, bitmap, sigs);
-        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
-
-        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.SignerSetsOverlap.selector, sB[2]));
-        proxy.executeProposal(id, abi.encode(chainC, sC, 2));
+        address[] memory gotB = proxy.getEnclaveSigners(chainB);
+        address[] memory gotC = proxy.getEnclaveSigners(chainC);
+        assertEq(gotB, sB, "chain B signer set");
+        assertEq(gotC, sB, "chain C reuses signer set");
+        assertEq(proxy.enclaveThreshold(chainB), 2, "chain B threshold");
+        assertEq(proxy.enclaveThreshold(chainC), 2, "chain C threshold");
     }
 
-    /// @dev A partial rotation may keep some of the chain's own keys — the
-    ///      disjoint check self-excludes the chain being rotated.
+    /// @dev A partial rotation may keep some of the chain's own keys.
     function test_perSourceChain_partialRotationSelfExclusionAllowed() public {
         address[] memory newRgb = new address[](2);
         newRgb[0] = encA1; // keep an existing RGB signer
