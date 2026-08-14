@@ -53,8 +53,9 @@ contract MultisigProxy is IMultisigProxy {
     ///         not registered — used as the existence guard on the release path.
     mapping(uint256 sourceChainId => uint256) public enclaveThreshold;
 
-    /// @notice Registered enclave source chains, for enumeration and the
-    ///         cross-set disjointness checks. Bounded by `MAX_ENCLAVE_SOURCE_CHAINS`.
+    /// @notice Registered enclave source chains, for enumeration and for
+    ///         checking federation candidates against every enclave set.
+    ///         Bounded by `MAX_ENCLAVE_SOURCE_CHAINS`.
     uint256[] private _enclaveSourceChains;
 
     address[] private _federationSigners;
@@ -112,8 +113,8 @@ contract MultisigProxy is IMultisigProxy {
     uint256 public constant MAX_SIGNERS = 20;
 
     /// @notice Hard upper bound on the number of registered enclave source
-    ///         chains. Bounds the cross-set disjointness loop (run on every
-    ///         signer rotation), keeping governance updates gas-predictable.
+    ///         chains. Bounds the disjointness loop run on federation signer
+    ///         rotations, keeping governance updates gas-predictable.
     uint256 public constant MAX_ENCLAVE_SOURCE_CHAINS = 32;
 
     /// @notice Length of a Solidity function selector (`bytes4`) in bytes. Used
@@ -563,9 +564,7 @@ contract MultisigProxy is IMultisigProxy {
     ) external returns (bytes32) {
         // Validate the proposed set up front so a malformed rotation reverts
         // here instead of consuming a nonce + timelock slot and failing only at
-        // execution. Disjointness is intentionally left to execute time: it
-        // depends on the live federation and other enclave sets, which may
-        // change before then.
+        // execution.
         if (sourceChainId == 0) revert UnknownSourceChain(0);
         if (newSigners.length == 0) revert NoSigners();
         _requireValidThreshold(newThreshold, newSigners.length);
@@ -1071,11 +1070,9 @@ contract MultisigProxy is IMultisigProxy {
             if (newSigners.length == 0) revert NoSigners();
             _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
-            // Keep every trust domain independent: disjoint from the federation
-            // and from every *other* enclave source chain (skip this chain, so a
-            // partial rotation that keeps some of its own keys is allowed).
+            // Enclave keys may be reused by different source chains, but the
+            // enclave and federation trust domains must remain disjoint.
             _requireDisjoint(newSigners, _federationSigners);
-            _requireDisjointFromAllEnclaveSets(newSigners, sourceChainId);
 
             // Register a brand-new source chain (bounded); existing ones just
             // overwrite their set/threshold.
@@ -1094,7 +1091,7 @@ contract MultisigProxy is IMultisigProxy {
             _requireValidThreshold(newThreshold, newSigners.length);
             _validateSigners(newSigners);
             // Federation must stay disjoint from every enclave source-chain set.
-            _requireDisjointFromAllEnclaveSets(newSigners, 0);
+            _requireDisjointFromAllEnclaveSets(newSigners);
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
             emit FederationSignersUpdated(newSigners, newThreshold);
@@ -1284,15 +1281,13 @@ contract MultisigProxy is IMultisigProxy {
         }
     }
 
-    /// @dev Reverts if `candidate` overlaps any registered enclave source-chain
-    ///      set, skipping `exceptSourceChain` (pass `0` to skip none). Used to
-    ///      keep every enclave set disjoint from the others and from the
-    ///      federation. Cost is bounded by `MAX_ENCLAVE_SOURCE_CHAINS` *
-    ///      `MAX_SIGNERS` * candidate length.
-    function _requireDisjointFromAllEnclaveSets(address[] memory candidate, uint256 exceptSourceChain) private view {
+    /// @dev Reverts if a federation candidate overlaps any registered enclave
+    ///      source-chain set. Enclave sets may reuse keys across chains, but no
+    ///      such key may enter the federation trust domain. Cost is bounded by
+    ///      `MAX_ENCLAVE_SOURCE_CHAINS` * `MAX_SIGNERS` * candidate length.
+    function _requireDisjointFromAllEnclaveSets(address[] memory candidate) private view {
         uint256[] memory chains = _enclaveSourceChains;
         for (uint256 i = 0; i < chains.length; i++) {
-            if (chains[i] == exceptSourceChain) continue;
             _requireDisjoint(candidate, _enclaveSigners[chains[i]]);
         }
     }
