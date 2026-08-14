@@ -11,6 +11,7 @@ import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
 import {NullVerifier} from "../../src/verifiers/NullVerifier.sol";
 import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol";
 import {RgbOutboundSettlementModule} from "../../src/settlement/RgbOutboundSettlementModule.sol";
+import {RgbPoolSettlementModule} from "../../src/settlement/RgbPoolSettlementModule.sol";
 import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.sol";
 
 /// @title DeployAll
@@ -29,9 +30,12 @@ import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.so
 ///   n + 5  → NullVerifier       (explicit no-proof verifier for operational /
 ///                                 non-RGB-source routes, e.g. Arch → RGB)
 ///   n + 6  → RgbOutboundSettlementModule (debit-RGB / non-RGB-credit routes,
-///                                 e.g. RGB → Arch; wraps RgbSettlementModule)
-///   n + 7  → NullSettlementModule (stateless routes such as EVM ↔ Concordium)
-///   n + 8  → MultisigProxy
+///                                 e.g. RGB mint/burn → RGB pool; wraps
+///                                 RgbSettlementModule)
+///   n + 7  → RgbPoolSettlementModule (pool credits write nothing; pool
+///                                 releases read mint/burn records)
+///   n + 8  → NullSettlementModule (stateless routes such as EVM ↔ Concordium)
+///   n + 9  → MultisigProxy
 ///          → Bridge.setOutflowLimit for INITIAL_ENCLAVE_SOURCE_CHAIN_ID
 ///          → Bridge.setGlobalOutflowLimit
 ///          → (optional) CommissionManager config txs, each present only when
@@ -84,6 +88,8 @@ import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.so
 ///     --rpc-url $RPC_URL --broadcast --verify
 contract DeployAll is Script {
     uint256 private constant MAX_OUTFLOW_POLICY_BPS = 2_000;
+    uint256 private constant RGB_MINT_BURN_CHAIN_ID = 96;
+    uint256 private constant RGB_POOL_CHAIN_ID = 97;
 
     function run()
         external
@@ -95,6 +101,7 @@ contract DeployAll is Script {
             RgbSettlementModule rgbModule,
             NullVerifier nullVerifier,
             RgbOutboundSettlementModule outboundModule,
+            RgbPoolSettlementModule poolModule,
             NullSettlementModule nullModule,
             MultisigProxy proxy
         )
@@ -165,23 +172,28 @@ contract DeployAll is Script {
         // ---- 4. Bridge (nonce n+2) ---------------------------------------
         bridge = new Bridge(usdt0, address(routeRegistry), payable(address(cm)), address(0), minFundsIn, minFundsOut);
 
-        // ---- 5. Route plugins (nonce n+3 .. n+7) -------------------------
+        // ---- 5. Route plugins (nonce n+3 .. n+8) -------------------------
         rgbVerifier = new RGBVerifier(btcRelay, minSourceConf, maxLatestConf, minConfGap);
         rgbModule = new RgbSettlementModule(address(routeRegistry));
         // NullVerifier: explicit no-proof verifier for operational / non-RGB-
         // source routes (e.g. Arch → RGB, Pool → MintBurn). One instance serves
         // every such route. Federation wires it per route via `proposeSetRoute`.
         nullVerifier = new NullVerifier();
-        // RgbOutboundSettlementModule: for debit-RGB / non-RGB-credit routes
-        // (e.g. RGB → Arch) — reads the canonical RGB ledger (amount + network
-        // tag), writes nothing on credit. Routes with an RGB credit side use the
-        // canonical `rgbModule` instead.
+        // RgbOutboundSettlementModule: reads the canonical RGB ledger on debit
+        // and writes nothing on credit. For the production topology this is the
+        // 96 (mint/burn) -> 97 (pool) rebalance module.
         outboundModule = new RgbOutboundSettlementModule(address(routeRegistry), address(rgbModule));
+        // Pool deposits intentionally do not create mint/burn records or emit
+        // the RGB-specific FundsIn event. Pool releases still have to cite
+        // canonical Bridge operation ids recorded for network 96.
+        poolModule = new RgbPoolSettlementModule(
+            address(routeRegistry), address(rgbModule), RGB_POOL_CHAIN_ID, RGB_MINT_BURN_CHAIN_ID
+        );
         // Stateless routes whose settlement/finality is handled by the TEE or
         // an external delivery layer still use an explicit non-zero module.
         nullModule = new NullSettlementModule();
 
-        // ---- 6. MultisigProxy (nonce n+8) --------------------------------
+        // ---- 6. MultisigProxy (nonce n+9) --------------------------------
         proxy = new MultisigProxy(
             address(bridge), address(cm), enc, encThr, initialSrcChain, fed, fedThr, timelock, minTimelock
         );
@@ -228,6 +240,9 @@ contract DeployAll is Script {
         console2.log("RgbSettlementModule deployed at:", address(rgbModule));
         console2.log("NullVerifier deployed at:       ", address(nullVerifier));
         console2.log("RgbOutboundSettlementModule at: ", address(outboundModule));
+        console2.log("RgbPoolSettlementModule at:     ", address(poolModule));
+        console2.log("  pool chain id:                ", poolModule.poolChainId());
+        console2.log("  backing record chain id:      ", poolModule.backingRecordChainId());
         console2.log("NullSettlementModule at:        ", address(nullModule));
         console2.log("MultisigProxy deployed at:      ", address(proxy));
         console2.log("Initial chain bucket burst bps: ", initialChainBurstBps);
@@ -262,6 +277,13 @@ contract DeployAll is Script {
         );
         require(
             address(outboundModule.rgbModule()) == address(rgbModule), "RgbOutboundSettlementModule.rgbModule mismatch"
+        );
+        require(poolModule.routeRegistry() == address(routeRegistry), "RgbPoolSettlementModule.routeRegistry mismatch");
+        require(address(poolModule.rgbModule()) == address(rgbModule), "RgbPoolSettlementModule.rgbModule mismatch");
+        require(
+            poolModule.poolChainId() == RGB_POOL_CHAIN_ID
+                && poolModule.backingRecordChainId() == RGB_MINT_BURN_CHAIN_ID,
+            "RgbPoolSettlementModule chain ids mismatch"
         );
         require(bridge.routeRegistry() == address(routeRegistry), "Bridge.routeRegistry mismatch");
         require(cm.bridgeAddress() == address(bridge), "CM.bridgeAddress mismatch");
@@ -307,6 +329,13 @@ contract DeployAll is Script {
         console2.log("  MultisigProxy.proposeSetRoute(src, dst, true, verifier, module)");
         console2.log("for each supported (sourceChainId, destChainId) pair");
         console2.log("before any fundsIn / fundsOut traffic is accepted.");
+        console2.log("Production RGB settlement modules:");
+        console2.log("  42161 -> 96: RgbSettlementModule");
+        console2.log("  96 -> 42161: RgbSettlementModule");
+        console2.log("  42161 -> 97: RgbPoolSettlementModule");
+        console2.log("  97 -> 42161: RgbPoolSettlementModule");
+        console2.log("  96 -> 97: RgbOutboundSettlementModule");
+        console2.log("  97 -> 96: RgbSettlementModule");
         console2.log("For every additional fundsOut source chain, federation must also");
         console2.log("install setOutflowLimit(chainId, burstBps, refillBpsPerWindow)");
         console2.log("before enabling traffic for that chain.");
