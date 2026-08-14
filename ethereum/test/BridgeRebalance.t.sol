@@ -12,6 +12,7 @@ import {RGBVerifier} from "../src/verifiers/RGBVerifier.sol";
 import {NullVerifier} from "../src/verifiers/NullVerifier.sol";
 import {RgbSettlementModule} from "../src/settlement/RgbSettlementModule.sol";
 import {RgbOutboundSettlementModule} from "../src/settlement/RgbOutboundSettlementModule.sol";
+import {RgbPoolSettlementModule} from "../src/settlement/RgbPoolSettlementModule.sol";
 import {NullSettlementModule} from "../src/settlement/NullSettlementModule.sol";
 import {BridgeBase} from "../src/BridgeBase.sol";
 import {OutflowRateLimiter} from "../src/libraries/OutflowRateLimiter.sol";
@@ -56,16 +57,20 @@ contract BridgeRebalanceTest is Test {
     NullVerifier nullVerifier;
     RgbSettlementModule rgbModule;
     RgbOutboundSettlementModule outboundModule;
+    RgbPoolSettlementModule poolModule;
     NullSettlementModule nullModule;
 
     address deployer = makeAddr("deployer");
     address user = makeAddr("user");
+    address recipient = makeAddr("recipient");
     address multisig = makeAddr("multisig");
 
     uint256 constant SOURCE_CHAIN_ID = 31337; // foundry block.chainid
     uint256 constant RGB_CHAIN_ID = 1_000_001; // RGB pool network
     uint256 constant ARCH_CHAIN_ID = 1_000_002; // backend-assigned for Arch
     uint256 constant RGB_MINTBURN_CHAIN_ID = 1_000_003; // RGB mint/burn network (variant C: same module)
+    uint256 constant PRODUCTION_RGB_MINT_BURN_CHAIN_ID = 96;
+    uint256 constant PRODUCTION_RGB_POOL_CHAIN_ID = 97;
     string constant RGB_DST_ADDR = "rgb:asset1qp0y3mq6h5k8d9f2e4j7n6c3w/utxo1abc123";
     string constant ARCH_DST_ADDR = "arch:bridge-wallet";
     string constant RGB_SRC_ADDR = "rgb:burner/utxo1burn";
@@ -85,6 +90,9 @@ contract BridgeRebalanceTest is Test {
     uint256 constant LATEST_HEIGHT = 850_005;
     bytes32 constant LATEST_COMMIT = keccak256("test-btc-latest-commitment");
     uint256 constant LATEST_CONFIRMATIONS = 1;
+    bytes32 constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
+        "UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)"
+    );
 
     // Seed deposit ids (captured in setUp): RGB-pool and RGB-mint/burn deposits.
     bytes32 rgbSeedOpId;
@@ -109,6 +117,9 @@ contract BridgeRebalanceTest is Test {
         nullVerifier = new NullVerifier();
         rgbModule = new RgbSettlementModule(address(routeRegistry));
         outboundModule = new RgbOutboundSettlementModule(address(routeRegistry), address(rgbModule));
+        poolModule = new RgbPoolSettlementModule(
+            address(routeRegistry), address(rgbModule), PRODUCTION_RGB_POOL_CHAIN_ID, PRODUCTION_RGB_MINT_BURN_CHAIN_ID
+        );
         nullModule = new NullSettlementModule();
 
         // Deposit routes.
@@ -127,6 +138,40 @@ contract BridgeRebalanceTest is Test {
         // Pool → MintBurn (scenario A): operational, no external burn → NullVerifier.
         routeRegistry.setRoute(RGB_CHAIN_ID, RGB_MINTBURN_CHAIN_ID, true, address(nullVerifier), address(rgbModule));
 
+        // Production topology:
+        //   42161-like EVM <-> 96 (mint/burn) — canonical ledger + RGB event
+        //   42161-like EVM <-> 97 (pool)      — no pool record / RGB event;
+        //                                      pool releases read 96's ledger
+        //   96 -> 97 rebalance               — check 96, write nothing for 97
+        //   97 -> 96 rebalance               — accounting-only pool debit,
+        //                                      canonical write + RGB event for 96
+        routeRegistry.setRoute(
+            SOURCE_CHAIN_ID, PRODUCTION_RGB_MINT_BURN_CHAIN_ID, true, address(rgbVerifier), address(rgbModule)
+        );
+        routeRegistry.setRoute(
+            PRODUCTION_RGB_MINT_BURN_CHAIN_ID, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule)
+        );
+        routeRegistry.setRoute(
+            SOURCE_CHAIN_ID, PRODUCTION_RGB_POOL_CHAIN_ID, true, address(nullVerifier), address(poolModule)
+        );
+        routeRegistry.setRoute(
+            PRODUCTION_RGB_POOL_CHAIN_ID, SOURCE_CHAIN_ID, true, address(nullVerifier), address(poolModule)
+        );
+        routeRegistry.setRoute(
+            PRODUCTION_RGB_MINT_BURN_CHAIN_ID,
+            PRODUCTION_RGB_POOL_CHAIN_ID,
+            true,
+            address(rgbVerifier),
+            address(outboundModule)
+        );
+        routeRegistry.setRoute(
+            PRODUCTION_RGB_POOL_CHAIN_ID,
+            PRODUCTION_RGB_MINT_BURN_CHAIN_ID,
+            true,
+            address(nullVerifier),
+            address(rgbModule)
+        );
+
         bridge.transferOwnership(multisig);
         vm.stopPrank();
 
@@ -140,6 +185,8 @@ contract BridgeRebalanceTest is Test {
         bridge.setOutflowLimit(RGB_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
         bridge.setOutflowLimit(ARCH_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
         bridge.setOutflowLimit(RGB_MINTBURN_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
+        bridge.setOutflowLimit(PRODUCTION_RGB_MINT_BURN_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
+        bridge.setOutflowLimit(PRODUCTION_RGB_POOL_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
         bridge.setGlobalOutflowLimit(MAX_BURST_BPS, MAX_REFILL_BPS);
         vm.stopPrank();
 
@@ -320,9 +367,178 @@ contract BridgeRebalanceTest is Test {
         bridge.rebalanceLiquidity(p);
     }
 
+    function _productionMintBurnToPoolParams(uint256 amount, bytes32 referencedOpId)
+        internal
+        view
+        returns (IBridge.RebalanceParams memory p)
+    {
+        p = IBridge.RebalanceParams({
+            amount: amount,
+            burnId: 0,
+            sourceChainId: PRODUCTION_RGB_MINT_BURN_CHAIN_ID,
+            destinationChainId: PRODUCTION_RGB_POOL_CHAIN_ID,
+            sourceAddress: RGB_SRC_ADDR,
+            destinationAddress: RGB_DST_ADDR,
+            proof: _proof(),
+            settlementDataOut: _settlement(referencedOpId),
+            settlementDataIn: ""
+        });
+        p.burnId = _deriveRebalanceBurnId(p);
+    }
+
+    function _productionPoolToMintBurnParams(uint256 amount, uint256 rgbOpId)
+        internal
+        view
+        returns (IBridge.RebalanceParams memory p)
+    {
+        p = IBridge.RebalanceParams({
+            amount: amount,
+            burnId: 0,
+            sourceChainId: PRODUCTION_RGB_POOL_CHAIN_ID,
+            destinationChainId: PRODUCTION_RGB_MINT_BURN_CHAIN_ID,
+            sourceAddress: RGB_SRC_ADDR,
+            destinationAddress: RGB_DST_ADDR,
+            proof: "",
+            settlementDataOut: _emptySettlement(),
+            settlementDataIn: abi.encode(rgbOpId)
+        });
+        p.burnId = _deriveRebalanceBurnId(p);
+    }
+
+    function _deriveFundsOutBurnId(
+        address recipient_,
+        uint256 amount,
+        uint256 sourceChainId,
+        bytes memory proof,
+        bytes memory settlementData
+    ) internal view returns (uint256) {
+        return uint256(
+            keccak256(
+                abi.encode(
+                    FUNDS_OUT_BURN_ID_TYPEHASH,
+                    address(bridge),
+                    block.chainid,
+                    address(usdt0),
+                    recipient_,
+                    amount,
+                    sourceChainId,
+                    SOURCE_CHAIN_ID,
+                    keccak256(bytes(RGB_SRC_ADDR)),
+                    keccak256(proof),
+                    keccak256(settlementData)
+                )
+            )
+        );
+    }
+
+    function _countBridgeLogs(Vm.Log[] memory logs, bytes32 topic0) internal view returns (uint256 count) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(bridge) && logs[i].topics[0] == topic0) count++;
+        }
+    }
+
     // ========================================================================
     // Success paths
     // ========================================================================
+
+    function test_productionTopology_poolFundsInEmitsOnlyBridgeFundsInAndWritesNoRecord() public {
+        usdt0.mint(user, AMOUNT);
+
+        vm.recordLogs();
+        vm.prank(user);
+        bytes32 operationId = bridge.fundsIn(AMOUNT, PRODUCTION_RGB_POOL_CHAIN_ID, RGB_DST_ADDR, "");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(rgbModule.fundsInRecords(operationId), 0, "pool deposit creates no mint/burn record");
+        assertEq(
+            _countBridgeLogs(logs, keccak256("FundsIn(address,uint256,uint256)")),
+            0,
+            "pool deposit emits no RGB FundsIn"
+        );
+        assertEq(
+            _countBridgeLogs(
+                logs,
+                keccak256(
+                    "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,string)"
+                )
+            ),
+            1,
+            "pool deposit emits one canonical BridgeFundsIn"
+        );
+    }
+
+    function test_productionTopology_poolFundsOutReadsMintBurnLedger() public {
+        usdt0.mint(user, AMOUNT * 11);
+
+        vm.prank(user);
+        bytes32 backingOperationId =
+            bridge.fundsIn(AMOUNT, PRODUCTION_RGB_MINT_BURN_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 1_000));
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT * 10, PRODUCTION_RGB_POOL_CHAIN_ID, RGB_DST_ADDR, "");
+
+        bytes memory settlementData = _settlement(backingOperationId);
+        bytes memory proof = "";
+        uint256 burnId = _deriveFundsOutBurnId(recipient, AMOUNT, PRODUCTION_RGB_POOL_CHAIN_ID, proof, settlementData);
+
+        vm.prank(multisig);
+        bridge.fundsOut(
+            IBridge.FundsOutParams({
+                recipient: recipient,
+                amount: AMOUNT,
+                burnId: burnId,
+                sourceChainId: PRODUCTION_RGB_POOL_CHAIN_ID,
+                destinationChainId: SOURCE_CHAIN_ID,
+                sourceAddress: RGB_SRC_ADDR,
+                proof: proof,
+                settlementData: settlementData
+            })
+        );
+
+        assertEq(usdt0.balanceOf(recipient), AMOUNT, "pool-backed fundsOut releases tokens");
+        assertEq(rgbModule.fundsInRecords(backingOperationId), AMOUNT, "backing record remains permanent");
+    }
+
+    function test_productionTopology_mintBurnToPoolRebalanceWritesNoPoolRecordOrFundsInEvent() public {
+        usdt0.mint(user, AMOUNT * 10);
+        vm.prank(user);
+        bytes32 backingOperationId =
+            bridge.fundsIn(AMOUNT, PRODUCTION_RGB_MINT_BURN_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 2_000));
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT * 9, PRODUCTION_RGB_MINT_BURN_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 2_001));
+
+        IBridge.RebalanceParams memory p = _productionMintBurnToPoolParams(AMOUNT, backingOperationId);
+        bytes32 rebalanceOperationId = _deriveRebalanceOpId(p);
+
+        vm.recordLogs();
+        _rebalance(p);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(rgbModule.fundsInRecords(rebalanceOperationId), 0, "pool credit writes no canonical record");
+        assertEq(
+            _countBridgeLogs(logs, keccak256("FundsIn(address,uint256,uint256)")), 0, "pool credit emits no RGB FundsIn"
+        );
+    }
+
+    function test_productionTopology_poolToMintBurnRebalanceWritesCanonicalRecordAndFundsInEvent() public {
+        usdt0.mint(user, AMOUNT * 10);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT * 10, PRODUCTION_RGB_POOL_CHAIN_ID, RGB_DST_ADDR, "");
+
+        uint256 rgbOpId = RGB_OP_ID + 3_000;
+        IBridge.RebalanceParams memory p = _productionPoolToMintBurnParams(AMOUNT, rgbOpId);
+        bytes32 rebalanceOperationId = _deriveRebalanceOpId(p);
+
+        vm.expectEmit(true, true, false, true);
+        emit FundsIn(multisig, rgbOpId, AMOUNT);
+        _rebalance(p);
+
+        assertEq(rgbModule.fundsInRecords(rebalanceOperationId), AMOUNT, "mint/burn credit creates record");
+        assertEq(
+            rgbModule.fundsInRecordChainIds(rebalanceOperationId),
+            PRODUCTION_RGB_MINT_BURN_CHAIN_ID,
+            "mint/burn record has network 96 tag"
+        );
+    }
 
     function test_rebalance_archToRgb_movesBucketsAndWritesRecord() public {
         uint256 srcBefore = bridge.lockedLiquidity(ARCH_CHAIN_ID);
