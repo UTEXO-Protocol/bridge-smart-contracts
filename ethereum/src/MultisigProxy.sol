@@ -61,6 +61,10 @@ contract MultisigProxy is IMultisigProxy {
     address[] private _federationSigners;
     uint256 public federationThreshold;
 
+    /// @notice Monotonic version of the federation signer set. Every proposal
+    ///         snapshots this value and becomes unexecutable after a rotation.
+    uint256 public federationSignerSetVersion;
+
     /// @notice Per-source-chain nonce for the typed TEE methods (`fundsOutCall`
     ///         / `lzFundsOutCall`). Each source chain has its own lane, so the
     ///         TEE operating one network cannot invalidate another network's
@@ -141,6 +145,10 @@ contract MultisigProxy is IMultisigProxy {
     bytes4 private constant _SEL_FUNDS_OUT = IBridge.fundsOut.selector;
     bytes4 private constant _SEL_REBALANCE_LIQUIDITY = IBridge.rebalanceLiquidity.selector;
 
+    /// @notice Ownership transfer is reserved for the typed managed-target
+    ///         operation and rejected from every generic raw-call lane.
+    bytes4 private constant _SEL_TRANSFER_OWNERSHIP = bytes4(keccak256("transferOwnership(address)"));
+
     uint256 private immutable _cachedChainId;
     bytes32 private immutable _cachedDomainSeparator;
 
@@ -171,6 +179,8 @@ contract MultisigProxy is IMultisigProxy {
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_TRANSFER_MANAGED_OWNERSHIP_TYPEHASH =
+        keccak256("ProposeTransferManagedOwnership(address target,address newOwner,uint256 nonce,uint256 deadline)");
 
     // Federation propose — CommissionManager side
     bytes32 private constant _PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH = keccak256(
@@ -254,6 +264,7 @@ contract MultisigProxy is IMultisigProxy {
         _enclaveSourceChains.push(initialEnclaveSourceChain_);
         _federationSigners = federationSigners_;
         federationThreshold = federationThreshold_;
+        federationSignerSetVersion = 1;
         timelockDuration = timelockDuration_;
         MIN_TIMELOCK = minTimelock_;
 
@@ -896,6 +907,32 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     /// @inheritdoc IMultisigProxy
+    function proposeTransferManagedOwnership(
+        address target,
+        address newOwner,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        _requireManagedOwnershipTarget(target);
+        if (newOwner == address(0)) revert ZeroNewOwner();
+
+        bytes32 structHash =
+            keccak256(abi.encode(_PROPOSE_TRANSFER_MANAGED_OWNERSHIP_TYPEHASH, target, newOwner, nonce, deadline));
+
+        return _propose(
+            OperationType.TransferManagedOwnership,
+            abi.encode(target, newOwner),
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
     /// @dev Planned inflow-only pause: freezes deposits while leaving
     ///      withdrawals open (e.g. to migrate liquidity during an upgrade).
     ///      Runs through the timelocked propose -> execute path, so the
@@ -956,6 +993,9 @@ contract MultisigProxy is IMultisigProxy {
     function executeProposal(bytes32 proposalId, bytes calldata opData) external {
         Proposal storage p = _proposals[proposalId];
         if (p.status != ProposalStatus.Pending) revert NotPending();
+        if (p.federationVersion != federationSignerSetVersion) {
+            revert StaleFederationProposal(p.federationVersion, federationSignerSetVersion);
+        }
         // Enforce the timelock that was in force when the proposal was created,
         // not the current one — a later SetTimelockDuration cannot reschedule.
         if (block.timestamp < p.proposedAt + p.timelockSnapshot) revert TimelockActive();
@@ -1045,6 +1085,7 @@ contract MultisigProxy is IMultisigProxy {
             proposedAt: block.timestamp,
             deadline: deadline,
             timelockSnapshot: timelockDuration,
+            federationVersion: federationSignerSetVersion,
             opType: opType,
             status: ProposalStatus.Pending
         });
@@ -1094,7 +1135,9 @@ contract MultisigProxy is IMultisigProxy {
             _requireDisjointFromAllEnclaveSets(newSigners);
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
+            federationSignerSetVersion++;
             emit FederationSignersUpdated(newSigners, newThreshold);
+            emit FederationSignerSetVersionUpdated(federationSignerSetVersion);
         } else if (opType == OperationType.UpdateBridge) {
             address newBridge = abi.decode(opData, (address));
             if (newBridge == address(0)) revert ZeroBridge();
@@ -1117,9 +1160,9 @@ contract MultisigProxy is IMultisigProxy {
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.AdminExecuteRouteRegistry) {
             // opData = raw RouteRegistry callData. Registry resolved from Bridge
-            // (single source of truth), same as SetRoute. Enables ownership
-            // migration (transferOwnership / acceptOwnership) for the Ownable2Step
-            // RouteRegistry.
+            // (single source of truth), same as SetRoute. `acceptOwnership`
+            // remains available for Ownable2Step handoffs; initiating a transfer
+            // is reserved for the typed managed-ownership operation.
             _requireAllowedGenericSelector(_firstSelector(opData));
             address registry = IBridge(bridge).routeRegistry();
             if (registry == address(0)) revert ZeroTarget();
@@ -1190,6 +1233,13 @@ contract MultisigProxy is IMultisigProxy {
         } else if (opType == OperationType.UnpauseInflow) {
             (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("unpauseInflow()"));
             _propagateRevert(ok, ret);
+        } else if (opType == OperationType.TransferManagedOwnership) {
+            (address target, address newOwner) = abi.decode(opData, (address, address));
+            _requireManagedOwnershipTarget(target);
+            if (newOwner == address(0)) revert ZeroNewOwner();
+            (bool ok, bytes memory ret) = target.call(abi.encodeWithSelector(_SEL_TRANSFER_OWNERSHIP, newOwner));
+            _propagateRevert(ok, ret);
+            emit ManagedOwnershipTransferStarted(target, newOwner);
         } else {
             revert UnknownOperationType();
         }
@@ -1368,5 +1418,19 @@ contract MultisigProxy is IMultisigProxy {
     function _requireAllowedGenericSelector(bytes4 selector) private pure {
         _requireNotCommissionWithdrawSelector(selector);
         _requireNotBridgeReleaseSelector(selector);
+        if (selector == _SEL_TRANSFER_OWNERSHIP) revert ForbiddenOwnershipSelector(selector);
+    }
+
+    /// @dev Restricts typed ownership migration to the proxy's current managed
+    ///      targets. Rechecked at execution so a target rotation cannot redirect
+    ///      or preserve authority for an address no longer governed here.
+    function _requireManagedOwnershipTarget(address target) private view {
+        if (target == address(0)) revert InvalidManagedOwnershipTarget(target);
+        if (target == bridge || target == commissionManager || target == lzAdapter) return;
+
+        address registry = IBridge(bridge).routeRegistry();
+        if (target == registry && registry != address(0)) return;
+
+        revert InvalidManagedOwnershipTarget(target);
     }
 }
