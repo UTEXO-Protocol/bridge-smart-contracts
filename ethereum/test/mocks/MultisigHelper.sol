@@ -52,6 +52,9 @@ library MultisigHelper {
     bytes32 internal constant PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
 
+    bytes32 internal constant PROPOSE_TRANSFER_MANAGED_OWNERSHIP_TYPEHASH =
+        keccak256("ProposeTransferManagedOwnership(address target,address newOwner,uint256 nonce,uint256 deadline)");
+
     bytes32 internal constant CANCEL_PROPOSAL_TYPEHASH =
         keccak256("CancelProposal(bytes32 proposalId,uint256 nonce,uint256 deadline)");
 
@@ -317,6 +320,19 @@ library MultisigHelper {
     {
         return toTypedDataHash(
             domainSep, keccak256(abi.encode(PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH, newDuration, nonce, deadline))
+        );
+    }
+
+    function digestProposeTransferManagedOwnership(
+        bytes32 domainSep,
+        address target,
+        address newOwner,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(
+            domainSep,
+            keccak256(abi.encode(PROPOSE_TRANSFER_MANAGED_OWNERSHIP_TYPEHASH, target, newOwner, nonce, deadline))
         );
     }
 
