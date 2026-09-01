@@ -372,13 +372,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @inheritdoc IBridge
     function availableOutflow(uint256 chainId) external view override returns (uint256) {
         uint256 shares = OutflowRateLimiter.currentState(chainBuckets[chainId]).tokens;
-        return _fromShares(shares, _chainReference(chainId));
+        return _fromShares(shares, lockedLiquidity[chainId]);
     }
 
     /// @inheritdoc IBridge
     function availableGlobalOutflow() external view override returns (uint256) {
         uint256 shares = OutflowRateLimiter.currentState(globalBucket).tokens;
-        return _fromShares(shares, _globalReference());
+        return _fromShares(shares, totalLockedLiquidity);
     }
 
     /// @inheritdoc IBridge
@@ -395,27 +395,30 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
     /// @inheritdoc IBridge
     function chainOutflowReference(uint256 chainId) external view override returns (uint256) {
-        return _chainReference(chainId);
+        return lockedLiquidity[chainId];
     }
 
     /// @inheritdoc IBridge
     function globalOutflowReference() external view override returns (uint256) {
-        return _globalReference();
+        return totalLockedLiquidity;
     }
 
     /// @inheritdoc IBridge
     function effectiveAvailableOutflow(uint256 chainId) external view override returns (uint256) {
         uint256 chainSpent = _chainSafetyWindows[chainId].current();
-        uint256 chainRef = lockedLiquidity[chainId] + chainSpent;
+        uint256 chainLiquidity = lockedLiquidity[chainId];
+        uint256 chainSafetyRef = chainLiquidity + chainSpent;
         uint256 globalSpent = _globalSafetyWindow.current();
-        uint256 globalRef = totalLockedLiquidity + globalSpent;
+        uint256 globalLiquidity = totalLockedLiquidity;
+        uint256 globalSafetyRef = globalLiquidity + globalSpent;
 
-        uint256 allowed = lockedLiquidity[chainId];
-        allowed =
-            Math.min(allowed, _fromShares(OutflowRateLimiter.currentState(chainBuckets[chainId]).tokens, chainRef));
-        allowed = Math.min(allowed, _fromShares(OutflowRateLimiter.currentState(globalBucket).tokens, globalRef));
-        allowed = Math.min(allowed, _remainingSafetyAllowance(chainRef, chainSpent, MAX_CHAIN_OUTFLOW_BPS));
-        allowed = Math.min(allowed, _remainingSafetyAllowance(globalRef, globalSpent, MAX_GLOBAL_OUTFLOW_BPS));
+        uint256 allowed = chainLiquidity;
+        allowed = Math.min(
+            allowed, _fromShares(OutflowRateLimiter.currentState(chainBuckets[chainId]).tokens, chainLiquidity)
+        );
+        allowed = Math.min(allowed, _fromShares(OutflowRateLimiter.currentState(globalBucket).tokens, globalLiquidity));
+        allowed = Math.min(allowed, _remainingSafetyAllowance(chainSafetyRef, chainSpent, MAX_CHAIN_OUTFLOW_BPS));
+        allowed = Math.min(allowed, _remainingSafetyAllowance(globalSafetyRef, globalSpent, MAX_GLOBAL_OUTFLOW_BPS));
         return allowed;
     }
 
@@ -508,17 +511,16 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         uint256 totalLiquidity = totalLockedLiquidity;
         totalLockedLiquidity = totalLiquidity - fundsOutParams.amount;
 
-        // Reference liquidity for both limiter layers: pre-debit liquidity plus
-        // usage already recorded in the rolling window. That sum is invariant as
-        // releases drain liquidity inside one window, so a sequence of small
-        // withdrawals cannot geometrically outpace the ceiling. Both the token
-        // buckets and the immutable safety limits below are denominated against
-        // the SAME reference, so the two layers never disagree about what a
-        // percentage means.
+        // Token buckets price this release against the actual pre-debit locked
+        // liquidity. Their reference therefore changes only when accounted
+        // liquidity changes, never merely because an old rolling slot expires.
+        // The immutable safety windows intentionally keep their own
+        // pre-window reference (`locked + spent`) so aggregate outflow remains
+        // capped across a sequence of transactions in the same rolling window.
         uint256 chainSpent = _chainSafetyWindows[fundsOutParams.sourceChainId].current();
-        uint256 chainReference = srcLiquidity + chainSpent;
+        uint256 chainSafetyReference = srcLiquidity + chainSpent;
         uint256 globalSpent = _globalSafetyWindow.current();
-        uint256 globalReference = totalLiquidity + globalSpent;
+        uint256 globalSafetyReference = totalLiquidity + globalSpent;
 
         // Outflow rate limit. Consume both the per-source-chain
         // bucket and the global aggregate bucket; either being short reverts the
@@ -530,8 +532,8 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // rejects the release instead of falling back to unlimited outflow.
         // Amounts are converted to shares of the reference, so a bucket keeps
         // its configured percentage meaning as liquidity moves.
-        chainBuckets[fundsOutParams.sourceChainId].spend(_toShares(fundsOutParams.amount, chainReference), TOKEN);
-        globalBucket.spend(_toShares(fundsOutParams.amount, globalReference), address(0));
+        chainBuckets[fundsOutParams.sourceChainId].spend(_toShares(fundsOutParams.amount, srcLiquidity), TOKEN);
+        globalBucket.spend(_toShares(fundsOutParams.amount, totalLiquidity), address(0));
 
         // Quote commission. NATIVE on fundsOut is unrepresentable: the
         // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
@@ -565,8 +567,10 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // They run after the existing bucket and route checks to preserve those
         // paths' fail-fast errors; any failure here still atomically rolls back
         // all earlier state and plugin calls.
-        _consumeChainSafetyOutflow(fundsOutParams.sourceChainId, chainSpent, chainReference, fundsOutParams.amount);
-        _consumeGlobalSafetyOutflow(globalSpent, globalReference, fundsOutParams.amount);
+        _consumeChainSafetyOutflow(
+            fundsOutParams.sourceChainId, chainSpent, chainSafetyReference, fundsOutParams.amount
+        );
+        _consumeGlobalSafetyOutflow(globalSpent, globalSafetyReference, fundsOutParams.amount);
 
         // Forward token commission to the CommissionManager pool.
         if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
@@ -644,11 +648,12 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // away from this chain, so it spends the chain bucket like a release.
         // The global bucket is intentionally NOT spent — it bounds physical
         // token egress, and no tokens leave here; the eventual exit pays the
-        // global bucket inside `fundsOut`. Same reference as the immutable
-        // per-chain safety limit consumed below.
+        // global bucket inside `fundsOut`. The bucket uses actual pre-debit
+        // source liquidity; the immutable safety window below separately keeps
+        // its rolling `locked + spent` reference.
         uint256 chainSpent = _chainSafetyWindows[params.sourceChainId].current();
-        uint256 chainReference = srcLiquidity + chainSpent;
-        chainBuckets[params.sourceChainId].spend(_toShares(params.amount, chainReference), TOKEN);
+        uint256 chainSafetyReference = srcLiquidity + chainSpent;
+        chainBuckets[params.sourceChainId].spend(_toShares(params.amount, srcLiquidity), TOKEN);
 
         // Debit-leg verification: route verifier (view-only source proof)
         // first, then the settlement module's release check. `recipient` is
@@ -698,7 +703,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // no token leaves custody, and the eventual fundsOut will consume it.
         // Kept after route validation so route-specific errors retain priority;
         // a safety-limit revert rolls the complete rebalance back atomically.
-        _consumeChainSafetyOutflow(params.sourceChainId, chainSpent, chainReference, params.amount);
+        _consumeChainSafetyOutflow(params.sourceChainId, chainSpent, chainSafetyReference, params.amount);
 
         // RGB-only correlation event, same contract as `_fundsIn`: the RGB
         // listener authorises a mint against `FundsIn` and needs no awareness
@@ -1107,17 +1112,6 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     /// @dev Convert bucket shares back to token units for the public views.
     function _fromShares(uint256 shares, uint256 refLiquidity) private pure returns (uint256) {
         return Math.mulDiv(shares, refLiquidity, SHARE_UNIT);
-    }
-
-    /// @dev Reference liquidity for a source chain: accounted liquidity plus
-    ///      usage still counted in the rolling window.
-    function _chainReference(uint256 chainId) private view returns (uint256) {
-        return lockedLiquidity[chainId] + _chainSafetyWindows[chainId].current();
-    }
-
-    /// @dev Reference liquidity for the aggregate scope.
-    function _globalReference() private view returns (uint256) {
-        return totalLockedLiquidity + _globalSafetyWindow.current();
     }
 
     function _remainingSafetyAllowance(uint256 refLiquidity, uint256 spent, uint256 maxBps)
