@@ -2085,6 +2085,81 @@ contract BridgeTest is Test {
         );
     }
 
+    function test_crossChainOutflowRepricesGlobalAllowanceAgainstCurrentLiquidity() public {
+        vm.warp((block.timestamp / 1 hours + 1) * 1 hours);
+
+        uint256 otherChain = 888;
+        vm.startPrank(deployer);
+        routeRegistry.setRoute(SOURCE_CHAIN_ID, otherChain, true, address(rgbVerifier), address(rgbModule));
+        routeRegistry.setRoute(otherChain, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+        vm.stopPrank();
+
+        usdt0.mint(user, 1_000 ether);
+        vm.prank(user);
+        bytes32 otherOpId = bridge.fundsIn(1_000 ether, otherChain, DST_ADDR, _rgbData(RGB_OP_ID + otherChain));
+
+        _seedRGB(100 ether); // 1,000 RGB + 1,000 other
+        vm.startPrank(multisig);
+        bridge.setOutflowLimit(otherChain, 1_000, 1_000); // 10% chain burst
+        bridge.setGlobalOutflowLimit(500, 1_500); // intentionally stricter 5% global burst
+        vm.stopPrank();
+
+        uint256 quotedForOther = bridge.effectiveAvailableOutflow(otherChain);
+        assertEq(quotedForOther, 100 ether, "initial global capacity is 5% of 2,000");
+
+        // A release from RGB consumes the global bucket and reduces actual
+        // aggregate liquidity, without changing the other chain's liquidity.
+        _releaseRGBTo(makeAddr("cross-chain-rgb"), 100 ether, BURN_ID);
+        assertEq(bridge.lockedLiquidity(otherChain), 1_000 ether, "other chain liquidity unchanged");
+        assertEq(bridge.globalOutflowReference(), 1_900 ether, "real outflow reprices global reference");
+        assertEq(bridge.effectiveAvailableOutflow(otherChain), 0, "spent global bucket blocks other chain");
+
+        // Once the bucket refills, the old 100-token quote is above the new 5%
+        // capacity. This is expected stale-state handling: the current getter
+        // reports 95, which remains executable and respects aggregate policy.
+        vm.warp(block.timestamp + bridge.BUCKET_REFILL_WINDOW() + 1);
+        uint256 currentAllowance = bridge.effectiveAvailableOutflow(otherChain);
+        assertEq(currentAllowance, 95 ether, "fresh quote follows current aggregate liquidity");
+
+        uint256 capacityShares = 500 * bridge.SHARE_UNIT() / bridge.BPS_DENOMINATOR();
+        uint256 requestedShares = (quotedForOther * bridge.SHARE_UNIT() + bridge.globalOutflowReference() - 1)
+            / bridge.globalOutflowReference();
+        bytes memory otherSettlement = _settlementWithAmounts(_ids(otherOpId), _one(1_000 ether));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OutflowRateLimiter.AggregateRequestAboveCapacity.selector, capacityShares, requestedShares
+            )
+        );
+        vm.prank(multisig);
+        _fundsOut(
+            makeAddr("stale-other"),
+            quotedForOther,
+            BURN_ID + 1,
+            otherChain,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            _proof(),
+            otherSettlement
+        );
+
+        vm.prank(multisig);
+        _fundsOut(
+            makeAddr("fresh-other"),
+            currentAllowance,
+            BURN_ID + 2,
+            otherChain,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            _proof(),
+            otherSettlement
+        );
+
+        assertEq(bridge.totalLockedLiquidity(), 1_805 ether, "aggregate accounting includes both releases");
+        assertEq(bridge.availableGlobalOutflow(), 0, "fresh release consumes the refilled global burst");
+        assertEq(bridge.availableGlobalSafetyOutflow(), 205 ether, "immutable aggregate safety remains enforced");
+    }
+
     function test_setOutflowLimit_revertsOnZeroChainId() public {
         vm.prank(multisig);
         vm.expectRevert(IBridge.InvalidOutflowLimit.selector);
