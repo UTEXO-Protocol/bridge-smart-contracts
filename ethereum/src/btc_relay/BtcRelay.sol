@@ -38,6 +38,10 @@ contract BtcRelay is IBtcRelay, IBtcRelayView {
     // only used during testing
     bool immutable _clampBlockTarget;
 
+    // The trusted initialization height. Headers below this checkpoint are not
+    // stored by this relay and must never be treated as part of its main chain.
+    uint32 immutable _checkpointHeight;
+
     //Initialize the btc relay with the provided stored_header
     constructor(StoredBlockHeader memory storedHeader, bool clampBlockTarget) {
         _clampBlockTarget = clampBlockTarget;
@@ -45,6 +49,7 @@ contract BtcRelay is IBtcRelay, IBtcRelayView {
         //Save the initial stored header
         bytes32 commitHash = storedHeader.hash();
         uint32 blockHeight = storedHeader.blockHeight();
+        _checkpointHeight = blockHeight;
         _mainChain[blockHeight] = commitHash;
         _relayState.write(
             blockHeight, uint224(storedHeader.chainWork() & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
@@ -63,8 +68,12 @@ contract BtcRelay is IBtcRelay, IBtcRelayView {
         uint256 mainBlockheight = _relayState.blockHeight;
         //Check that the block height isn't past the tip, this can happen if there is a reorg, where a shorter
         // chain becomes the cannonical one, this can happen due to the heaviest work rule (and not lonest chain rule)
+        require(height >= _checkpointHeight, "verify: before checkpoint");
         require(height <= mainBlockheight, "verify: future block");
 
+        // An unwritten mapping entry has the default zero value. Reject zero
+        // explicitly so it can never be presented as a real block commitment.
+        require(commitmentHash != bytes32(0), "verify: zero commitment");
         require(_mainChain[height] == commitmentHash, "verify: block commitment");
 
         confirmations = mainBlockheight - height + 1;
