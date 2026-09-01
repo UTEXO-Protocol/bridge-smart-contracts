@@ -43,6 +43,12 @@ Owner **must** be `MultisigProxy`. `fundsOut` is reachable only through the purp
 
 Every `fundsOut` call carries a `burnId` derived from the complete release intent. The `Bridge` keeps a `consumedBurnIds` mapping and **rejects** any call whose `burnId` is already recorded (`BurnIdAlreadyConsumed`). The flag is set before any token transfer (CEI ordering), so a downstream revert rolls the mark back with the rest of the call. This complements `MultisigProxy`'s per-source-chain `teeNonce`: the nonce prevents replaying one signature bundle, while `burnId` prevents independently signed duplication of the same logical release. Route-specific settlement records provide an additional guard where applicable.
 
+#### Outflow controls and reference liquidity
+
+The configurable per-chain and global token buckets store allowance as percentage shares. A release prices those shares against the actual pre-debit `lockedLiquidity[sourceChainId]` and `totalLockedLiquidity`, respectively. Consequently, bucket capacity follows real deposits, releases, and rebalances immediately, but does not change merely because an old rolling-usage slot expires.
+
+The immutable rolling safety limits are a separate defence layer. They retain each outflow for 24–25 hours and calculate their ceiling from `lockedLiquidity + rollingSpent`, preserving a stable pre-window reference while liquidity is released. `effectiveAvailableOutflow(chainId)` returns the minimum allowed by isolated liquidity, both configurable buckets, and both immutable safety limits.
+
 ### RouteRegistry (`src/RouteRegistry.sol`)
 
 The routing brain. For every supported `(sourceChainId, destChainId)` pair it stores `(FinalityVerifier, SettlementModule, enabled)`. The `Bridge` calls `onFundsIn` and `beforeFundsOut` on the registry; the registry forwards to the right plugins after gating on `enabled`. The registry's `bridge` is **immutable** (set in the constructor) — rotating it means deploying a new registry and pointing the Bridge at it via `UpdateRouteRegistry`.
