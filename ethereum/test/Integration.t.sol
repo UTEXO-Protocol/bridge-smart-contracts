@@ -166,6 +166,10 @@ contract IntegrationTest is Test {
 
         token = new MockERC20("Mock USDT0", "USDT0");
         btcRelay = new MockBtcRelay();
+        // The real relay never stores a header below its initialisation
+        // checkpoint; mirror that here so a proof this suite accepts is one
+        // the deployed relay would also accept.
+        btcRelay.setCheckpointHeight(BLOCK_HEIGHT);
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, BTC_CONFIRMATIONS);
         btcRelay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, LATEST_CONFIRMATIONS);
 
