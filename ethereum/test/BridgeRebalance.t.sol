@@ -700,6 +700,40 @@ contract BridgeRebalanceTest is Test {
         assertEq(bridge.availableGlobalOutflow(), globalBefore, "global bucket untouched (no token egress)");
     }
 
+    function test_rebalanceBucketCapacityDoesNotDecayWhenRollingUsageExpires() public {
+        vm.warp((block.timestamp / 1 hours + 1) * 1 hours);
+        uint256 startedAt = block.timestamp;
+
+        _rebalance(_archToRgbParams(AMOUNT, RGB_OP_ID + 1));
+        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), AMOUNT * 9, "actual source liquidity debited");
+
+        vm.warp(startedAt + 24 hours + 1 minutes);
+        assertEq(bridge.chainOutflowReference(ARCH_CHAIN_ID), AMOUNT * 9, "pre-expiry bucket reference");
+        assertEq(bridge.availableOutflow(ARCH_CHAIN_ID), AMOUNT * 9 / 10, "pre-expiry full bucket");
+
+        // The old rolling-inclusive reference incorrectly exposed AMOUNT here,
+        // allowing an intent that became permanently above-capacity at expiry.
+        // With the actual-liquidity reference it is rejected immediately.
+        IBridge.RebalanceParams memory oversized = _archToRgbParams(AMOUNT, RGB_OP_ID + 2);
+        uint256 capacityShares = MAX_BURST_BPS * bridge.SHARE_UNIT() / bridge.BPS_DENOMINATOR();
+        uint256 requestedShares = (AMOUNT * bridge.SHARE_UNIT() + AMOUNT * 9 - 1) / (AMOUNT * 9);
+        vm.prank(multisig);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OutflowRateLimiter.TokenRequestAboveCapacity.selector, capacityShares, requestedShares, address(usdt0)
+            )
+        );
+        bridge.rebalanceLiquidity(oversized);
+
+        vm.warp(startedAt + 25 hours);
+        uint256 validAmount = AMOUNT * 9 / 10;
+        assertEq(bridge.chainOutflowReference(ARCH_CHAIN_ID), AMOUNT * 9, "post-expiry bucket reference");
+        assertEq(bridge.availableOutflow(ARCH_CHAIN_ID), validAmount, "post-expiry full bucket unchanged");
+
+        _rebalance(_archToRgbParams(validAmount, RGB_OP_ID + 3));
+        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), AMOUNT * 81 / 10, "valid tranche executes after expiry");
+    }
+
     function test_rebalance_distinctMints_differInDestinationOpId() public {
         // Legitimately distinct credit-side rebalances differ in the destination
         // RGB OpId (settlementDataIn), which alone makes their canonical ids
@@ -712,6 +746,14 @@ contract BridgeRebalanceTest is Test {
         bytes32 secondOpId = _deriveRebalanceOpId(second);
         assertTrue(first.burnId != second.burnId, "distinct burnId per destination OpId");
         assertTrue(firstOpId != secondOpId, "distinct operationId per destination OpId");
+
+        // Restore the source liquidity so the same absolute amount remains 10%
+        // of the live bucket reference. This test isolates destination OpId as
+        // the only intent difference rather than relying on rolling usage to
+        // preserve a stale, higher reference.
+        usdt0.mint(user, AMOUNT);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, ARCH_CHAIN_ID, ARCH_DST_ADDR, "");
         vm.warp(block.timestamp + bridge.BUCKET_REFILL_WINDOW() + 1);
         _rebalance(second);
 
