@@ -157,8 +157,10 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         "UtexoRebalanceBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 destinationAddressHash,bytes32 proofHash,bytes32 settlementDataOutHash,bytes32 settlementDataInHash)"
     );
 
-    /// @notice CommissionManager that receives and custodies protocol fees.
-    ICommissionManager public immutable commissionManager;
+    /// @inheritdoc IBridge
+    /// @dev Mutable so federation can migrate to a redeployed manager through
+    ///      the typed, timelocked `UpdateCommissionManager` governance op.
+    ICommissionManager public override commissionManager;
 
     /// @inheritdoc IBridge
     /// @dev Mutable so federation can rotate registry deployments via
@@ -315,6 +317,16 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         address old = routeRegistry;
         routeRegistry = newRouteRegistry;
         emit RouteRegistryUpdated(old, newRouteRegistry);
+    }
+
+    /// @inheritdoc IBridge
+    /// @dev Owner is `MultisigProxy`; its typed `UpdateCommissionManager`
+    ///      operation updates this pointer and the proxy's own target atomically.
+    function setCommissionManager(address newCommissionManager) external override onlyOwner {
+        if (newCommissionManager == address(0)) revert InvalidCommissionManagerAddress();
+        address old = address(commissionManager);
+        commissionManager = ICommissionManager(payable(newCommissionManager));
+        emit CommissionManagerUpdated(old, newCommissionManager);
     }
 
     /// @inheritdoc IBridge
