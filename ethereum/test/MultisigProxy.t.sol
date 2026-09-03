@@ -221,6 +221,10 @@ contract MultisigProxyTest is Test {
 
         token = new MockERC20("Mock USDT0", "USDT0");
         btcRelay = new MockBtcRelay();
+        // The real relay never stores a header below its initialisation
+        // checkpoint; mirror that here so a proof this suite accepts is one
+        // the deployed relay would also accept.
+        btcRelay.setCheckpointHeight(BLOCK_HEIGHT);
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, BTC_CONFIRMATIONS);
         btcRelay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, LATEST_CONFIRMATIONS);
 
@@ -246,7 +250,8 @@ contract MultisigProxyTest is Test {
             address(routeRegistry),
             payable(address(cm)),
             address(0),
-            1 // minFundsInAmount: smallest non-zero floor for tests
+            1, // minFundsInAmount: smallest non-zero floor for tests
+            1 // minFundsOutAmount: smallest non-zero floor for tests
         );
 
         rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
@@ -1697,28 +1702,36 @@ contract MultisigProxyTest is Test {
         _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
     }
 
+    function test_federationGenericPathsCannotDesyncCommissionManager() public {
+        bytes memory callData = abi.encodeCall(IBridge.setCommissionManager, (makeAddr("genericCm")));
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
+    }
+
     // ========================================================================
     // Propose + Execute — UpdateCommissionManager
     // ========================================================================
 
     function test_proposeUpdateCommissionManager_execute() public {
-        address newCm = makeAddr("newCm");
+        CommissionManager newCm = new CommissionManager(address(bridge), commissionReceiver);
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
 
-        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(domainSep, newCm, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(domainSep, address(newCm), nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        bytes32 id = proxy.proposeUpdateCommissionManager(newCm, nonce, deadline, bitmap, sigs);
+        bytes32 id = proxy.proposeUpdateCommissionManager(address(newCm), nonce, deadline, bitmap, sigs);
 
         vm.warp(block.timestamp + TIMELOCK + 1);
 
-        vm.expectEmit(true, true, false, false);
-        emit CommissionManagerUpdated(address(cm), newCm);
+        vm.expectEmit(true, true, false, true, address(bridge));
+        emit CommissionManagerUpdated(address(cm), address(newCm));
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit CommissionManagerUpdated(address(cm), address(newCm));
 
-        proxy.executeProposal(id, abi.encode(newCm));
-        assertEq(proxy.commissionManager(), newCm);
+        proxy.executeProposal(id, abi.encode(address(newCm)));
+        assertEq(proxy.commissionManager(), address(newCm));
+        assertEq(address(bridge.commissionManager()), address(newCm));
     }
 
     // ========================================================================
@@ -1734,6 +1747,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: 400, // 4%
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_IN,
                 currency: CommissionCurrency.TOKEN,
@@ -1788,16 +1802,17 @@ contract MultisigProxyTest is Test {
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         bytes32 id = proxy.proposeUpdateBridge(newBridge, nonce, deadline, bitmap, sigs);
+        uint256 proposalNonceAfterPropose = proxy.proposalNonce();
 
-        uint256 cNonce = proxy.proposalNonce();
         uint256 cDeadline = block.timestamp + 1 hours;
-        bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cNonce, cDeadline);
+        bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cDeadline);
         bytes[] memory cSigs = MultisigHelper.signAll(vm, cDigest, pks);
 
         vm.expectEmit(true, false, false, false);
         emit ProposalCancelled(id);
-        proxy.cancelProposal(id, cNonce, cDeadline, bitmap, cSigs);
+        proxy.cancelProposal(id, cDeadline, bitmap, cSigs);
 
+        assertEq(proxy.proposalNonce(), proposalNonceAfterPropose, "cancel does not consume proposal nonce");
         IMultisigProxy.Proposal memory p = proxy.getProposal(id);
         assertEq(uint8(p.status), uint8(IMultisigProxy.ProposalStatus.Cancelled));
 
@@ -1808,14 +1823,74 @@ contract MultisigProxyTest is Test {
 
     function test_cancelProposal_revertsOnNotPending() public {
         bytes32 id = keccak256("ghost");
-        uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes32 digest = MultisigHelper.digestCancelProposal(domainSep, id, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestCancelProposal(domainSep, id, deadline);
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         vm.expectRevert(IMultisigProxy.NotPending.selector);
-        proxy.cancelProposal(id, nonce, deadline, bitmap, sigs);
+        proxy.cancelProposal(id, deadline, bitmap, sigs);
+    }
+
+    /// @dev Regression for the shared-nonce veto-starvation finding. Once a
+    ///      cancel is signed for a concrete proposal, unrelated proposal
+    ///      traffic cannot invalidate it by advancing `proposalNonce`.
+    function test_cancelProposal_survivesUnrelatedProposalNonceAdvance() public {
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+
+        uint256 targetNonce = proxy.proposalNonce();
+        uint256 targetDeadline = block.timestamp + 1 days;
+        address targetBridge = makeAddr("targetBridge");
+        bytes32 targetDigest =
+            MultisigHelper.digestProposeUpdateBridge(domainSep, targetBridge, targetNonce, targetDeadline);
+        bytes32 targetId = proxy.proposeUpdateBridge(
+            targetBridge, targetNonce, targetDeadline, bitmap, MultisigHelper.signAll(vm, targetDigest, pks)
+        );
+
+        uint256 cancelDeadline = block.timestamp + 1 hours;
+        bytes32 cancelDigest = MultisigHelper.digestCancelProposal(domainSep, targetId, cancelDeadline);
+        bytes[] memory cancelSigs = MultisigHelper.signAll(vm, cancelDigest, pks);
+
+        // A different, valid federation proposal advances the sequential
+        // proposal lane after the cancel bundle has already been collected.
+        uint256 unrelatedNonce = proxy.proposalNonce();
+        address unrelatedBridge = makeAddr("unrelatedBridge");
+        bytes32 unrelatedDigest =
+            MultisigHelper.digestProposeUpdateBridge(domainSep, unrelatedBridge, unrelatedNonce, targetDeadline);
+        proxy.proposeUpdateBridge(
+            unrelatedBridge, unrelatedNonce, targetDeadline, bitmap, MultisigHelper.signAll(vm, unrelatedDigest, pks)
+        );
+        uint256 nonceAfterUnrelatedProposal = proxy.proposalNonce();
+        assertEq(nonceAfterUnrelatedProposal, targetNonce + 2, "unrelated proposal advances its own lane");
+
+        proxy.cancelProposal(targetId, cancelDeadline, bitmap, cancelSigs);
+
+        assertEq(proxy.proposalNonce(), nonceAfterUnrelatedProposal, "cancel leaves proposal lane untouched");
+        assertEq(
+            uint256(proxy.getProposal(targetId).status),
+            uint256(IMultisigProxy.ProposalStatus.Cancelled),
+            "original cancel remains executable"
+        );
+    }
+
+    function test_cancelProposal_replayRevertsOnCancelledStatus() public {
+        address newBridge = makeAddr("cancelReplayBridge");
+        uint256 nonce = proxy.proposalNonce();
+        uint256 proposalDeadline = block.timestamp + 1 days;
+        bytes32 proposalDigest = MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, nonce, proposalDeadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 id = proxy.proposeUpdateBridge(
+            newBridge, nonce, proposalDeadline, bitmap, MultisigHelper.signAll(vm, proposalDigest, pks)
+        );
+
+        uint256 cancelDeadline = block.timestamp + 1 hours;
+        bytes32 cancelDigest = MultisigHelper.digestCancelProposal(domainSep, id, cancelDeadline);
+        bytes[] memory cancelSigs = MultisigHelper.signAll(vm, cancelDigest, pks);
+
+        proxy.cancelProposal(id, cancelDeadline, bitmap, cancelSigs);
+
+        vm.expectRevert(IMultisigProxy.NotPending.selector);
+        proxy.cancelProposal(id, cancelDeadline, bitmap, cancelSigs);
     }
 
     // ========================================================================
@@ -1956,15 +2031,14 @@ contract MultisigProxyTest is Test {
         address newAdapter = makeAddr("lzAdapter");
         bytes32 id = _proposeUpdateLZAdapter(newAdapter);
 
-        uint256 cNonce = proxy.proposalNonce();
         uint256 cDeadline = block.timestamp + 1 hours;
-        bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cNonce, cDeadline);
+        bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cDeadline);
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory cSigs = MultisigHelper.signAll(vm, cDigest, pks);
 
         vm.expectEmit(true, false, false, false);
         emit ProposalCancelled(id);
-        proxy.cancelProposal(id, cNonce, cDeadline, bitmap, cSigs);
+        proxy.cancelProposal(id, cDeadline, bitmap, cSigs);
 
         vm.warp(block.timestamp + TIMELOCK + 1);
         vm.expectRevert(IMultisigProxy.NotPending.selector);
@@ -2253,6 +2327,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2327,6 +2402,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2414,6 +2490,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2488,6 +2565,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2574,6 +2652,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2668,6 +2747,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: percent,
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2797,6 +2877,7 @@ contract MultisigProxyTest is Test {
             address(token),
             CommissionConfig({
                 stablePercent: 500, // 5%
+                baseFee: 0,
                 multiplier: 100,
                 side: CommissionSide.FUNDS_OUT,
                 currency: CommissionCurrency.TOKEN,
@@ -2913,29 +2994,29 @@ contract MultisigProxyTest is Test {
         assertEq(bridge.availableChainSafetyOutflow(RGB_CHAIN_ID), hardLimit / 2, "half the allowance left");
         assertEq(bridge.availableGlobalSafetyOutflow(), hardLimit / 2);
 
-        // At 24h + 1s the conservatively rounded share bucket is fully refilled,
-        // while the rolling limiter deliberately still counts the first release.
+        // At 24h + 1s the share bucket is fully refilled against the lower
+        // current liquidity, while the rolling limiter still counts the first
+        // release against its original reference.
         vm.warp(block.timestamp + bridge.BUCKET_REFILL_WINDOW() + 1);
-        _signedRelease(makeAddr("split-recipient-2"), hardLimit / 2, BURN_ID + 1);
-        assertEq(bridge.availableChainSafetyOutflow(RGB_CHAIN_ID), 0, "immutable chain allowance exhausted");
-        assertEq(bridge.availableGlobalSafetyOutflow(), 0, "immutable global allowance exhausted");
+        uint256 secondPart = bridge.effectiveAvailableOutflow(RGB_CHAIN_ID) - 1;
+        _signedRelease(makeAddr("split-recipient-2"), secondPart, BURN_ID + 1);
+        uint256 totalReleased = hardLimit / 2 + secondPart;
+        assertLe(totalReleased, hardLimit, "split releases stay within the immutable ceiling");
+        assertEq(bridge.availableChainSafetyOutflow(RGB_CHAIN_ID), hardLimit - totalReleased);
+        assertEq(bridge.availableGlobalSafetyOutflow(), hardLimit - totalReleased);
 
-        // One second of bucket refill makes the immutable limiter the failing
-        // layer, and `effectiveAvailableOutflow` reports the truth: nothing.
+        // One second of refill cannot make the effective allowance exceed the
+        // remaining immutable allowance.
         vm.warp(block.timestamp + 1);
         assertGt(bridge.availableOutflow(RGB_CHAIN_ID), 0, "bucket has accrued allowance");
-        assertEq(bridge.effectiveAvailableOutflow(RGB_CHAIN_ID), 0, "but nothing may leave");
-
-        (IBridge.FundsOutParams memory third, uint256 nonce, uint256 deadline, uint256 bitmap, bytes[] memory sigs) =
-            _prepareRelease(makeAddr("split-recipient-3"), 1, BURN_ID + 2);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IBridge.ChainSafetyLimitExceeded.selector, RGB_CHAIN_ID, uint256(1), hardLimit, hardLimit
-            )
+        assertLe(
+            bridge.effectiveAvailableOutflow(RGB_CHAIN_ID),
+            hardLimit - totalReleased,
+            "rolling ceiling remains authoritative"
         );
-        proxy.fundsOutCall(third, nonce, deadline, bitmap, sigs);
 
-        assertEq(token.balanceOf(address(bridge)), tvl - hardLimit, "at most 20% left during the window");
+        assertEq(token.balanceOf(address(bridge)), tvl - totalReleased);
+        assertGe(token.balanceOf(address(bridge)), tvl - hardLimit, "at most 20% leaves during the window");
 
         // Liveness: once the oldest usage expires the next tranche is releasable.
         // The ring retains for 24-25h, so 25h past the aligned start clears it.
@@ -3087,6 +3168,65 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.bridge(), newBridge, "snapshotted proposal executes despite the live timelock raise");
     }
 
+    function test_federationRotationInvalidatesPendingProposals() public {
+        assertEq(proxy.federationSignerSetVersion(), 1, "initial federation version");
+
+        // This proposal is valid under the original federation, but remains
+        // pending while a signer rotation is proposed and executed.
+        address staleBridge = makeAddr("staleBridge");
+        uint256 staleNonce = proxy.proposalNonce();
+        uint256 commonDeadline = block.timestamp + 1 days;
+        bytes32 staleDigest =
+            MultisigHelper.digestProposeUpdateBridge(domainSep, staleBridge, staleNonce, commonDeadline);
+        (uint256[] memory oldPks, uint256 oldBitmap) = _fedSigSet2of3();
+        bytes32 staleId = proxy.proposeUpdateBridge(
+            staleBridge, staleNonce, commonDeadline, oldBitmap, MultisigHelper.signAll(vm, staleDigest, oldPks)
+        );
+        assertEq(proxy.getProposal(staleId).federationVersion, 1, "proposal snapshots version one");
+
+        uint256[] memory newPks = new uint256[](3);
+        address[] memory newSigners = new address[](3);
+        for (uint256 i = 0; i < 3; i++) {
+            newPks[i] = 0xFA1 + i;
+            newSigners[i] = vm.addr(newPks[i]);
+        }
+
+        uint256 rotationNonce = proxy.proposalNonce();
+        bytes32 rotationDigest = MultisigHelper.digestProposeUpdateFederationSigners(
+            domainSep, newSigners, 2, rotationNonce, commonDeadline
+        );
+        bytes32 rotationId = proxy.proposeUpdateFederationSigners(
+            newSigners, 2, rotationNonce, commonDeadline, oldBitmap, MultisigHelper.signAll(vm, rotationDigest, oldPks)
+        );
+        assertEq(proxy.getProposal(rotationId).federationVersion, 1, "rotation uses current version");
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(rotationId, abi.encode(newSigners, uint256(2)));
+        assertEq(proxy.federationSignerSetVersion(), 2, "rotation advances version");
+
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.StaleFederationProposal.selector, uint256(1), uint256(2)));
+        proxy.executeProposal(staleId, abi.encode(staleBridge));
+        assertEq(
+            uint256(proxy.getProposal(staleId).status),
+            uint256(IMultisigProxy.ProposalStatus.Pending),
+            "stale proposal cannot execute"
+        );
+
+        // The live federation can still cancel stale records for operational
+        // cleanup; cancellation intentionally has no version restriction.
+        uint256 cancelDeadline = block.timestamp + 1 days;
+        bytes32 cancelDigest = MultisigHelper.digestCancelProposal(domainSep, staleId, cancelDeadline);
+        uint256[] memory cancellingPks = new uint256[](2);
+        cancellingPks[0] = newPks[0];
+        cancellingPks[1] = newPks[1];
+        proxy.cancelProposal(staleId, cancelDeadline, 3, MultisigHelper.signAll(vm, cancelDigest, cancellingPks));
+        assertEq(
+            uint256(proxy.getProposal(staleId).status),
+            uint256(IMultisigProxy.ProposalStatus.Cancelled),
+            "live federation cleans up stale proposal"
+        );
+    }
+
     // Emergency actions run on a separate `emergencyNonce`, so an emergency
     // pause does NOT stale an already-signed regular proposal.
     function test_emergencyDoesNotStaleRegularProposal() public {
@@ -3119,90 +3259,31 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.proposalNonce(), regularNonce + 1, "regular proposal consumed its lane nonce");
     }
 
-    // Generic Bridge admin execution can still call
-    // transferOwnership, but Ownable2Step only records a pendingOwner. A wrong
-    // non-zero address never becomes owner, so governance is not orphaned and
-    // the proxy keeps driving owner-only operations.
-    function test_ownershipTransferToWrongAddressDoesNotOrphanGovernance() public {
-        address wrongOwner = makeAddr("wrongBridgeOwner");
-        uint256 startTime = block.timestamp;
-
-        bytes memory transferCallData = abi.encodeWithSignature("transferOwnership(address)", wrongOwner);
-        uint256 transferNonce = proxy.proposalNonce();
-        uint256 transferDeadline = startTime + 1 days;
-        bytes32 transferDigest = MultisigHelper.digestProposeAdminExecute(
-            domainSep, bytes4(transferCallData), transferCallData, transferNonce, transferDeadline
-        );
-        (uint256[] memory transferPks, uint256 transferBitmap) = _fedSigSet2of3();
-        bytes[] memory transferSigs = MultisigHelper.signAll(vm, transferDigest, transferPks);
-
-        address routeRegistryBefore = bridge.routeRegistry();
-
-        assertEq(bridge.owner(), address(proxy), "pre bridge owner");
-        assertFalse(bridge.paused(), "pre bridge active");
-        assertEq(routeRegistryBefore, address(routeRegistry), "pre route registry");
-
-        bytes32 transferProposalId =
-            proxy.proposeAdminExecute(transferCallData, transferNonce, transferDeadline, transferBitmap, transferSigs);
-
-        uint256 transferReadyAt = startTime + TIMELOCK + 1;
-        vm.warp(transferReadyAt);
-
-        vm.expectEmit(true, true, false, true, address(proxy));
-        emit ProposalExecuted(transferProposalId, IMultisigProxy.OperationType.AdminExecute);
-
-        proxy.executeProposal(transferProposalId, transferCallData);
-
-        // Ownable2Step: ownership did NOT move; the wrong address is only pending.
-        assertEq(bridge.owner(), address(proxy), "owner unchanged (two-step)");
-        assertEq(bridge.pendingOwner(), wrongOwner, "wrong address only pending");
-
-        address replacementRegistry = makeAddr("replacementRouteRegistry");
-        bytes memory registryCallData = abi.encodeWithSignature("setRouteRegistry(address)", replacementRegistry);
-        uint256 registryNonce = proxy.proposalNonce();
-        uint256 registryDeadline = transferReadyAt + 1 days;
-        bytes32 registryDigest = MultisigHelper.digestProposeAdminExecute(
-            domainSep, bytes4(registryCallData), registryCallData, registryNonce, registryDeadline
-        );
-        (uint256[] memory registryPks, uint256 registryBitmap) = _fedSigSet2of3();
-        bytes[] memory registrySigs = MultisigHelper.signAll(vm, registryDigest, registryPks);
-
-        bytes32 registryProposalId =
-            proxy.proposeAdminExecute(registryCallData, registryNonce, registryDeadline, registryBitmap, registrySigs);
-
-        vm.warp(transferReadyAt + TIMELOCK + 1);
-
-        // Governance is NOT orphaned: the proxy still owns Bridge, so the
-        // setRouteRegistry op executes and takes effect.
-        proxy.executeProposal(registryProposalId, registryCallData);
-
-        assertEq(bridge.owner(), address(proxy), "proxy remains owner");
-        assertEq(bridge.routeRegistry(), replacementRegistry, "proxy still governs bridge config");
+    function test_genericPathsRejectTransferOwnershipSelector() public {
+        bytes memory callData = abi.encodeWithSignature("transferOwnership(address)", user);
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenOwnershipSelector.selector);
     }
 
-    // The new AdminExecuteRouteRegistry op gives the proxy a call path
-    // into RouteRegistry (which previously had only the typed SetRoute op), so
-    // it can drive RouteRegistry's Ownable2Step transferOwnership on migration.
-    function test_adminExecuteRouteRegistry_initiatesRouteRegistryOwnershipTransfer() public {
-        address newOwner = makeAddr("newRouteRegistryOwner");
-        bytes memory callData = abi.encodeWithSignature("transferOwnership(address)", newOwner);
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = block.timestamp + 1 days;
-        bytes32 digest = MultisigHelper.digestProposeAdminExecuteRouteRegistry(
-            domainSep, bytes4(callData), callData, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+    function test_transferManagedOwnership_initiatesBridgeOwnershipTransfer() public {
+        address newOwner = makeAddr("newBridgeOwner");
+        (bytes32 id, bytes memory opData) = _proposeManagedOwnership(address(bridge), newOwner);
 
-        assertEq(routeRegistry.owner(), address(proxy), "pre RR owner");
-
-        bytes32 id = proxy.proposeAdminExecuteRouteRegistry(callData, nonce, deadline, bitmap, sigs);
         vm.warp(block.timestamp + TIMELOCK + 1);
-        proxy.executeProposal(id, callData);
+        proxy.executeProposal(id, opData);
 
-        // Ownable2Step: RR ownership is only pending until the new owner accepts.
+        assertEq(bridge.owner(), address(proxy), "two-step owner unchanged");
+        assertEq(bridge.pendingOwner(), newOwner, "typed transfer started");
+    }
+
+    function test_transferManagedOwnership_initiatesRouteRegistryOwnershipTransfer() public {
+        address newOwner = makeAddr("newRouteRegistryOwner");
+        (bytes32 id, bytes memory opData) = _proposeManagedOwnership(address(routeRegistry), newOwner);
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, opData);
+
         assertEq(routeRegistry.owner(), address(proxy), "RR owner unchanged (two-step)");
-        assertEq(routeRegistry.pendingOwner(), newOwner, "RR transfer started via new op");
+        assertEq(routeRegistry.pendingOwner(), newOwner, "typed RR transfer started");
     }
 
     // Standard CM withdrawals stay on the dedicated typed operations. Recipient
@@ -3219,33 +3300,22 @@ contract MultisigProxyTest is Test {
         }
     }
 
-    // Alternate-target regression: even if governance aliases the LZ adapter
-    // target to CM and transfers CM ownership through that unfiltered
-    // raw-call path, the new owner cannot choose a withdrawal recipient. The
-    // asset layer always sends commission to CM's immutable recipient.
-    function test_adapterAliasTransferredOwnerCannotRedirectCommission() public {
-        _setLzAdapter(address(cm));
-
+    // CommissionManager ownership migration remains available through the
+    // typed lane, while its immutable recipient still pins all withdrawals.
+    function test_transferManagedOwnership_commissionRecipientRemainsPinned() public {
         uint256 amount = 10 ether;
         token.mint(address(cm), amount);
         vm.prank(address(bridge));
         cm.receiveTokenCommission(address(token), amount);
 
-        bytes memory callData = abi.encodeWithSignature("transferOwnership(address)", user);
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = block.timestamp + 1 days;
-        bytes32 digest =
-            MultisigHelper.digestProposeAdminExecuteAdapter(domainSep, bytes4(callData), callData, nonce, deadline);
-        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+        (bytes32 id, bytes memory opData) = _proposeManagedOwnership(address(cm), user);
 
-        bytes32 id = proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
         vm.warp(block.timestamp + TIMELOCK + 1);
-        proxy.executeProposal(id, callData);
+        proxy.executeProposal(id, opData);
 
         vm.prank(user);
         cm.acceptOwnership();
-        assertEq(cm.owner(), user, "governed CM ownership migration still works");
+        assertEq(cm.owner(), user, "typed CM ownership migration works");
 
         uint256 pinnedBefore = token.balanceOf(commissionReceiver);
         uint256 attackerBefore = token.balanceOf(user);
@@ -3257,10 +3327,83 @@ contract MultisigProxyTest is Test {
         assertEq(proxy.commissionRecipient(), commissionReceiver, "proxy reports CM's immutable recipient");
     }
 
+    function test_transferManagedOwnership_rejectsUnmanagedTarget() public {
+        address unmanaged = makeAddr("unmanaged");
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.InvalidManagedOwnershipTarget.selector, unmanaged));
+        proxy.proposeTransferManagedOwnership(unmanaged, user, 0, block.timestamp + 1 days, 0, new bytes[](0));
+    }
+
+    function test_transferManagedOwnership_rejectsZeroNewOwner() public {
+        vm.expectRevert(IMultisigProxy.ZeroNewOwner.selector);
+        proxy.proposeTransferManagedOwnership(
+            address(bridge), address(0), 0, block.timestamp + 1 days, 0, new bytes[](0)
+        );
+    }
+
+    function test_transferManagedOwnership_signatureBindsTargetAndNewOwner() public {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest =
+            MultisigHelper.digestProposeTransferManagedOwnership(domainSep, address(bridge), user, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
+        proxy.proposeTransferManagedOwnership(address(cm), user, nonce, deadline, bitmap, sigs);
+
+        vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
+        proxy.proposeTransferManagedOwnership(
+            address(bridge), makeAddr("differentOwner"), nonce, deadline, bitmap, sigs
+        );
+    }
+
+    function test_transferManagedOwnership_rechecksTargetAtExecution() public {
+        (bytes32 transferId, bytes memory transferData) =
+            _proposeManagedOwnership(address(routeRegistry), makeAddr("newOwner"));
+
+        RouteRegistry replacement = new RouteRegistry(address(bridge), address(proxy));
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest =
+            MultisigHelper.digestProposeUpdateRouteRegistry(domainSep, address(replacement), nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 updateId = proxy.proposeUpdateRouteRegistry(
+            address(replacement), nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks)
+        );
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(updateId, abi.encode(address(replacement)));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IMultisigProxy.InvalidManagedOwnershipTarget.selector, address(routeRegistry))
+        );
+        proxy.executeProposal(transferId, transferData);
+    }
+
+    function _proposeManagedOwnership(address target, address newOwner)
+        internal
+        returns (bytes32 id, bytes memory opData)
+    {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest =
+            MultisigHelper.digestProposeTransferManagedOwnership(domainSep, target, newOwner, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        id = proxy.proposeTransferManagedOwnership(
+            target, newOwner, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks)
+        );
+        opData = abi.encode(target, newOwner);
+    }
+
     // The generic path stays open for permitted CommissionManager setters.
     function test_adminExecuteCommissionManager_allowsConfigSelector() public {
         bytes memory callData = abi.encodeWithSignature(
-            "setGlobalDefaults(uint256,uint8,uint8,uint8)", uint256(0), uint8(100), uint8(0), uint8(0)
+            "setGlobalDefaults(uint256,uint256,uint8,uint8,uint8)",
+            uint256(0),
+            uint256(0),
+            uint8(100),
+            uint8(0),
+            uint8(0)
         );
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
@@ -3468,31 +3611,26 @@ contract MultisigProxyTest is Test {
         proxy.executeProposal(id, abi.encode(newFed, 2));
     }
 
-    /// @dev An enclave rotation for chain C must be disjoint from other enclave
-    ///      chains (here chain B).
-    function test_perSourceChain_enclaveRotationRejectsOtherChainOverlap() public {
+    /// @dev Different source chains may intentionally reuse the same enclave
+    ///      keys. Each set remains internally unique and signatures stay bound
+    ///      to their sourceChainId-specific digest and nonce lane.
+    function test_perSourceChain_enclaveSetsMayReuseSameSigners() public {
         uint256 chainB = 8_000_003;
         address[] memory sB = _encSetFor(chainB, 3);
         _govUpdateEnclave(chainB, sB, 2);
 
         uint256 chainC = 8_000_004;
-        address[] memory sC = _encSetFor(chainC, 3);
-        sC[1] = sB[2]; // inject overlap with chainB
+        _govUpdateEnclave(chainC, sB, 2);
 
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = vm.getBlockTimestamp() + TIMELOCK + 1 days;
-        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(domainSep, chainC, sC, 2, nonce, deadline);
-        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-        bytes32 id = proxy.proposeUpdateEnclaveSigners(chainC, sC, 2, nonce, deadline, bitmap, sigs);
-        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
-
-        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.SignerSetsOverlap.selector, sB[2]));
-        proxy.executeProposal(id, abi.encode(chainC, sC, 2));
+        address[] memory gotB = proxy.getEnclaveSigners(chainB);
+        address[] memory gotC = proxy.getEnclaveSigners(chainC);
+        assertEq(gotB, sB, "chain B signer set");
+        assertEq(gotC, sB, "chain C reuses signer set");
+        assertEq(proxy.enclaveThreshold(chainB), 2, "chain B threshold");
+        assertEq(proxy.enclaveThreshold(chainC), 2, "chain C threshold");
     }
 
-    /// @dev A partial rotation may keep some of the chain's own keys — the
-    ///      disjoint check self-excludes the chain being rotated.
+    /// @dev A partial rotation may keep some of the chain's own keys.
     function test_perSourceChain_partialRotationSelfExclusionAllowed() public {
         address[] memory newRgb = new address[](2);
         newRgb[0] = encA1; // keep an existing RGB signer

@@ -25,8 +25,15 @@ enum CommissionCurrency {
 }
 
 /// @notice Commission parameters for one directional route (keyed by `buildRouteKey`).
+/// @dev The effective fee is `amount * stablePercent / multiplier^2 + baseFee`:
+///      a proportional part plus a flat part. `baseFee` is denominated in the
+///      token's smallest units (the bridged token is a USD-pegged stablecoin, so
+///      it doubles as a USD figure) and exists to cover a per-operation cost that
+///      does not scale with the amount — notably the Bitcoin transaction fee on
+///      the RGB leg. Either part may be zero; both zero disables the route's fee.
 struct CommissionConfig {
     uint256 stablePercent;
+    uint256 baseFee;
     uint8 multiplier;
     CommissionSide side;
     CommissionCurrency currency;
@@ -47,9 +54,12 @@ interface ICommissionManager {
     error StablePercentTooHigh();
     error MultiplierZero();
     error InvalidFeeShape(uint256 stablePercent, uint8 multiplier);
+    error FeeRateTooHigh(uint256 stablePercent, uint8 multiplier);
     error CommissionRoundsToZero(uint256 amount, uint256 stablePercent, uint8 multiplier);
     error ZeroNetAmount(uint256 amount, uint256 commission);
     error NativeCommissionNotAllowedOnFundsOut();
+    error FeeAboveAmountFloor(uint256 feeAtFloor, uint256 amountFloor);
+    error AmountFloorUnavailable();
     error TokenDecimalsUnavailable();
     error BalanceBelowRecordedPool();
     error NothingReceived();
@@ -77,7 +87,7 @@ interface ICommissionManager {
     event BridgeAddressUpdated(address indexed newBridge);
 
     event GlobalDefaultsUpdated(
-        uint256 stablePercent, uint8 multiplier, CommissionSide side, CommissionCurrency currency
+        uint256 stablePercent, uint256 baseFee, uint8 multiplier, CommissionSide side, CommissionCurrency currency
     );
 
     event CommissionRuleUpdated(
@@ -107,6 +117,8 @@ interface ICommissionManager {
     function commissionRecipient() external view returns (address);
 
     function globalStablePercent() external view returns (uint256);
+
+    function globalBaseFee() external view returns (uint256);
 
     function globalMultiplier() external view returns (uint8);
 
@@ -147,6 +159,23 @@ interface ICommissionManager {
         pure
         returns (uint256);
 
+    /// @notice Total fee for `amount` under the route's effective rule:
+    ///         `calculateStableFee(...) + baseFee`, in token smallest units.
+    function calculateTotalFee(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
+        external
+        view
+        returns (uint256);
+
+    /// @notice The Bridge's current `minFundsInAmount`. Every configured
+    ///         `FUNDS_IN` fee must leave a positive net for a deposit sitting
+    ///         exactly on this floor; it is the bound an inbound `baseFee` is
+    ///         validated and quoted against.
+    function depositFloor() external view returns (uint256);
+
+    /// @notice The Bridge's current `minFundsOutAmount` — the same bound for the
+    ///         release side.
+    function releaseFloor() external view returns (uint256);
+
     /// @notice Convert a USD-denominated token fee (stablecoin, 1 token ≈ $1) to
     ///         native wei using the configured ETH/USD Chainlink feed. Reverts
     ///         `EthUsdFeedNotSet` when the price feed is unconfigured,
@@ -160,6 +189,7 @@ interface ICommissionManager {
 
     function setGlobalDefaults(
         uint256 stablePercent,
+        uint256 baseFee,
         uint8 multiplier,
         CommissionSide side,
         CommissionCurrency currency
@@ -198,7 +228,13 @@ interface ICommissionManager {
     function getGlobalDefaults()
         external
         view
-        returns (uint256 stablePercent, uint8 multiplier, CommissionSide side, CommissionCurrency currency);
+        returns (
+            uint256 stablePercent,
+            uint256 baseFee,
+            uint8 multiplier,
+            CommissionSide side,
+            CommissionCurrency currency
+        );
 
     function getCommissionRule(uint256 sourceChainId, uint256 destChainId, address token)
         external

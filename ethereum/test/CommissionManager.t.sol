@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {CommissionManager} from "../src/CommissionManager.sol";
 import {
@@ -12,6 +12,7 @@ import {
 } from "../src/interfaces/ICommissionManager.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
+import {MockDepositFloor} from "./mocks/MockDepositFloor.sol";
 
 contract CommissionManagerTest is Test {
     CommissionManager internal cm;
@@ -39,9 +40,15 @@ contract CommissionManagerTest is Test {
     uint256 internal constant MIN_ETH_USD = 100e8;
     uint256 internal constant MAX_ETH_USD = 100_000e8;
 
+    /// @dev Bridge dust floors the manager reads to bound a flat `baseFee` on
+    ///      each side. 1 USDT0 / 2 USDT0 at 6 decimals — deliberately different
+    ///      so a test that reads the wrong one fails.
+    uint256 internal constant DEPOSIT_FLOOR = 1_000_000;
+    uint256 internal constant RELEASE_FLOOR = 2_000_000;
+
     event BridgeAddressUpdated(address indexed newBridge);
     event GlobalDefaultsUpdated(
-        uint256 stablePercent, uint8 multiplier, CommissionSide side, CommissionCurrency currency
+        uint256 stablePercent, uint256 baseFee, uint8 multiplier, CommissionSide side, CommissionCurrency currency
     );
     event EthUsdFeedUpdated(address indexed feed, uint256 heartbeat);
     event TokenCommissionReceived(address indexed token, uint256 amount);
@@ -54,11 +61,17 @@ contract CommissionManagerTest is Test {
         // underflowing.
         vm.warp(HEARTBEAT * 10);
 
+        // `BRIDGE` is a bare address in these unit tests, but the manager reads
+        // the Bridge dust floors off it to bound a flat `baseFee`. Install the
+        // getters there so the existing `vm.prank(BRIDGE)` call sites are
+        // unaffected.
+        _installFloors(BRIDGE, DEPOSIT_FLOOR, RELEASE_FLOOR);
+
         vm.prank(owner);
         cm = new CommissionManager(BRIDGE, recipient);
         token = new MockERC20("Test", "TST");
         vm.prank(owner);
-        cm.setGlobalDefaults(0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
         // Install a complete healthy Arbitrum oracle config. The sequencer feed
         // and price band are mandatory whenever a non-zero NATIVE
@@ -70,6 +83,14 @@ contract CommissionManagerTest is Test {
         cm.setEthUsdPriceBounds(MIN_ETH_USD, MAX_ETH_USD);
         cm.setEthUsdFeed(address(ethUsdFeed), HEARTBEAT);
         vm.stopPrank();
+    }
+
+    /// @dev Put the Bridge dust-floor getters at `where`, reporting `inFloor`
+    ///      for deposits and `outFloor` for releases.
+    function _installFloors(address where, uint256 inFloor, uint256 outFloor) internal {
+        vm.etch(where, address(new MockDepositFloor()).code);
+        MockDepositFloor(where).setMinFundsInAmount(inFloor);
+        MockDepositFloor(where).setMinFundsOutAmount(outFloor);
     }
 
     // --- Constructor ---
@@ -175,8 +196,9 @@ contract CommissionManagerTest is Test {
     // --- Global defaults ---
 
     function test_getGlobalDefaults_initial() public view {
-        (uint256 sp, uint8 m, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
+        (uint256 sp, uint256 baseFee, uint8 m, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
         assertEq(sp, 0);
+        assertEq(baseFee, 0);
         assertEq(m, 100);
         assertEq(uint8(side), uint8(CommissionSide.FUNDS_IN));
         assertEq(uint8(cur), uint8(CommissionCurrency.TOKEN));
@@ -187,11 +209,12 @@ contract CommissionManagerTest is Test {
         // deposit). NATIVE + FUNDS_OUT is rejected by the setter and is covered
         // by a dedicated revert test.
         vm.expectEmit(true, true, true, true);
-        emit GlobalDefaultsUpdated(200, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        emit GlobalDefaultsUpdated(200, 50_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
         vm.prank(owner);
-        cm.setGlobalDefaults(200, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
-        (uint256 sp, uint8 m, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
+        cm.setGlobalDefaults(200, 50_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        (uint256 sp, uint256 baseFee, uint8 m, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
         assertEq(sp, 200);
+        assertEq(baseFee, 50_000);
         assertEq(m, 100);
         assertEq(uint8(side), uint8(CommissionSide.FUNDS_IN));
         assertEq(uint8(cur), uint8(CommissionCurrency.NATIVE));
@@ -200,43 +223,43 @@ contract CommissionManagerTest is Test {
     function test_setGlobalDefaults_onlyOwner() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
-        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
     function test_setGlobalDefaults_revertsPercentTooHigh() public {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.StablePercentTooHigh.selector);
-        cm.setGlobalDefaults(9001, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(9001, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
     function test_setGlobalDefaults_acceptsZeroPercent() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(100, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(100, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
         assertEq(cm.globalStablePercent(), 100);
         vm.prank(owner);
-        cm.setGlobalDefaults(0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
-        (uint256 sp,,,) = cm.getGlobalDefaults();
+        cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        (uint256 sp,,,,) = cm.getGlobalDefaults();
         assertEq(sp, 0);
     }
 
     function test_setGlobalDefaults_revertsZeroMultiplier() public {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.MultiplierZero.selector);
-        cm.setGlobalDefaults(400, 0, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(400, 0, 0, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
     /// @dev setGlobalDefaults rejects the NATIVE + FUNDS_OUT shape.
     function test_setGlobalDefaults_revertsNativeFundsOut() public {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.NativeCommissionNotAllowedOnFundsOut.selector);
-        cm.setGlobalDefaults(100, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.NATIVE);
+        cm.setGlobalDefaults(100, 0, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.NATIVE);
     }
 
     /// @dev FUNDS_IN + NATIVE stays valid — the user funds the native fee on deposit.
     function test_setGlobalDefaults_acceptsNativeFundsIn() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(100, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
-        (,, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
+        cm.setGlobalDefaults(100, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        (,,, CommissionSide side, CommissionCurrency cur) = cm.getGlobalDefaults();
         assertEq(uint8(side), uint8(CommissionSide.FUNDS_IN));
         assertEq(uint8(cur), uint8(CommissionCurrency.NATIVE));
     }
@@ -245,7 +268,7 @@ contract CommissionManagerTest is Test {
 
     function test_calculateFundsInCommission_token_deductsFromAmount() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
         address t = address(token);
         uint256 amount = 100_000;
         (uint256 tok, uint256 nat, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, amount);
@@ -265,7 +288,7 @@ contract CommissionManagerTest is Test {
 
     function test_calculateFundsInCommission_zeroStablePercent_native_skipsFeedCheck() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
         // Make the feed unhealthy: if the contract still hit it the call would
         // revert. A zero stable percent must short-circuit before the read.
         ethUsdFeed.setAnswer(0);
@@ -279,7 +302,7 @@ contract CommissionManagerTest is Test {
 
     function test_calculateFundsInCommission_native_fullAmount_bridged() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
         address t = address(token);
         uint256 amount = 100_000 ether;
         (uint256 tok, uint256 nat, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, amount);
@@ -295,7 +318,7 @@ contract CommissionManagerTest is Test {
 
     function test_calculateFundsInCommission_skipsWhenSideIsFundsOut() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
         address t = address(token);
         (uint256 tok, uint256 nat, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 50_000);
         assertEq(tok, 0);
@@ -310,7 +333,7 @@ contract CommissionManagerTest is Test {
         vm.prank(owner);
         cm.setEthUsdFeed(address(0), 0);
         vm.prank(owner);
-        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
         address t = address(token);
         vm.expectRevert(ICommissionManager.EthUsdFeedNotSet.selector);
         cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 1000);
@@ -318,7 +341,7 @@ contract CommissionManagerTest is Test {
 
     function test_calculateFundsInCommission_native_revertsWhenPriceStale() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
         ethUsdFeed.setUpdatedAt(block.timestamp - HEARTBEAT - 1);
         vm.expectRevert(ICommissionManager.StalePrice.selector);
         cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1000);
@@ -365,7 +388,7 @@ contract CommissionManagerTest is Test {
 
     function test_calculateFundsOutCommission_token() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
         address t = address(token);
         uint256 amount = 80_000;
         (uint256 tok, uint256 nat, uint256 net) = cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, amount);
@@ -388,6 +411,7 @@ contract CommissionManagerTest is Test {
         address t = address(token);
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 1000,
+            baseFee: 0,
             multiplier: 100,
             side: CommissionSide.FUNDS_IN,
             currency: CommissionCurrency.TOKEN,
@@ -407,10 +431,11 @@ contract CommissionManagerTest is Test {
 
     function test_clearCommissionRule_fallsBackToGlobal() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
         address t = address(token);
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 1000,
+            baseFee: 0,
             multiplier: 100,
             side: CommissionSide.FUNDS_IN,
             currency: CommissionCurrency.TOKEN,
@@ -432,6 +457,7 @@ contract CommissionManagerTest is Test {
         address t = address(token);
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 9001,
+            baseFee: 0,
             multiplier: 100,
             side: CommissionSide.FUNDS_IN,
             currency: CommissionCurrency.TOKEN,
@@ -447,6 +473,7 @@ contract CommissionManagerTest is Test {
         address t = address(token);
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 100,
+            baseFee: 0,
             multiplier: 100,
             side: CommissionSide.FUNDS_OUT,
             currency: CommissionCurrency.NATIVE,
@@ -462,6 +489,7 @@ contract CommissionManagerTest is Test {
         address t = address(token);
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 100,
+            baseFee: 0,
             multiplier: 100,
             side: CommissionSide.FUNDS_OUT,
             currency: CommissionCurrency.TOKEN,
@@ -485,7 +513,7 @@ contract CommissionManagerTest is Test {
     function test_setGlobalDefaults_revertsWhenStablePercentExceedsMultiplierSquared() public {
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(9000), uint8(1)));
-        cm.setGlobalDefaults(9000, 1, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(9000, 0, 1, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
     /// @dev Boundary just above the invariant: `multiplier = 10` → `multiplier^2 = 100`,
@@ -493,14 +521,14 @@ contract CommissionManagerTest is Test {
     function test_setGlobalDefaults_revertsJustAboveFeeShapeBoundary() public {
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(101), uint8(10)));
-        cm.setGlobalDefaults(101, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(101, 0, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
     /// @dev The exact boundary is a 100% fee and must be rejected too.
     function test_setGlobalDefaults_revertsFeeShapeAtExactBoundary() public {
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(100), uint8(10)));
-        cm.setGlobalDefaults(100, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(100, 0, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
     /// @dev Regression for the uint8 widening in the fix. With the default
@@ -511,8 +539,8 @@ contract CommissionManagerTest is Test {
     ///      the fix widens to uint256 before squaring.
     function test_setGlobalDefaults_acceptsHighPercentWithDefaultMultiplier() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(9000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
-        (uint256 sp, uint8 m,,) = cm.getGlobalDefaults();
+        cm.setGlobalDefaults(9000, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        (uint256 sp,, uint8 m,,) = cm.getGlobalDefaults();
         assertEq(sp, 9000);
         assertEq(m, 100);
     }
@@ -521,6 +549,7 @@ contract CommissionManagerTest is Test {
     function test_setCommissionRule_revertsWhenStablePercentExceedsMultiplierSquared() public {
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 9000,
+            baseFee: 0,
             multiplier: 1,
             side: CommissionSide.FUNDS_IN,
             currency: CommissionCurrency.TOKEN,
@@ -535,6 +564,7 @@ contract CommissionManagerTest is Test {
     function test_setCommissionRule_revertsFeeShapeAtExactBoundary() public {
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 100,
+            baseFee: 0,
             multiplier: 10,
             side: CommissionSide.FUNDS_IN,
             currency: CommissionCurrency.TOKEN,
@@ -549,6 +579,7 @@ contract CommissionManagerTest is Test {
     function test_setCommissionRule_acceptsHighPercentWithDefaultMultiplier() public {
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 9000,
+            baseFee: 0,
             multiplier: 100,
             side: CommissionSide.FUNDS_IN,
             currency: CommissionCurrency.TOKEN,
@@ -565,13 +596,13 @@ contract CommissionManagerTest is Test {
     function test_rejectsHundredPercentFeeConfiguration() public {
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, uint256(8100), uint8(90)));
-        cm.setGlobalDefaults(8100, 90, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(8100, 0, 90, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
     }
 
     /// @dev A non-zero inbound fee policy cannot silently round to zero.
     function test_fundsInActiveFeeRejectsCommissionFreeDust() public {
         vm.prank(owner);
-        cm.setGlobalDefaults(400, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -585,6 +616,7 @@ contract CommissionManagerTest is Test {
     function test_fundsOutActiveFeeRejectsCommissionFreeDust() public {
         CommissionConfig memory cfg = CommissionConfig({
             stablePercent: 400,
+            baseFee: 0,
             multiplier: 100,
             side: CommissionSide.FUNDS_OUT,
             currency: CommissionCurrency.TOKEN,
@@ -1001,5 +1033,425 @@ contract CommissionManagerTest is Test {
         vm.prank(user);
         vm.expectRevert();
         cm.setEthUsdPriceBounds(1_000e8, 100_000e8);
+    }
+
+    // =========================================================================
+    // Effective-rate ceiling (90%)
+    //
+    // The charged fraction is `stablePercent / multiplier^2`, so bounding
+    // `stablePercent` alone only caps the rate at `multiplier == 100`. These
+    // cover the ceiling on the rate itself.
+    // =========================================================================
+
+    /// @dev The canonical bypass: 99 / 10^2 = 99%, with both `stablePercent` and
+    ///      the "below 100%" shape bound individually satisfied.
+    function test_feeRate_rejectsSmallMultiplierBypass() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.FeeRateTooHigh.selector, 99, uint8(10)));
+        cm.setGlobalDefaults(99, 0, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev The worst case reachable under the old bounds: 8999 / 95^2 ≈ 99.7%.
+    function test_feeRate_rejectsNearHundredPercentBypass() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.FeeRateTooHigh.selector, 8999, uint8(95)));
+        cm.setGlobalDefaults(8999, 0, 95, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    function test_feeRate_acceptsExactlyNinetyPercentAtSmallMultiplier() public {
+        // 90 / 10^2 = 90% — exactly the ceiling.
+        vm.prank(owner);
+        cm.setGlobalDefaults(90, 0, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        (uint256 tok,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000);
+        assertEq(tok, 900_000, "90% charged");
+    }
+
+    function test_feeRate_rejectsOneUnitAboveCeilingAtSmallMultiplier() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.FeeRateTooHigh.selector, 91, uint8(10)));
+        cm.setGlobalDefaults(91, 0, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev At the conventional multiplier the ceiling reduces to the old raw
+    ///      bound, so no existing rule shape changes meaning.
+    function test_feeRate_unchangedAtDefaultMultiplier() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(9000, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        assertEq(cm.globalStablePercent(), 9000);
+
+        // 9001 still trips the raw numerator bound first, as before.
+        vm.prank(owner);
+        vm.expectRevert(ICommissionManager.StablePercentTooHigh.selector);
+        cm.setGlobalDefaults(9001, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev An over-100% shape keeps reporting `InvalidFeeShape`, not the new
+    ///      rate error — the checks are ordered so that diagnosis is preserved.
+    function test_feeRate_overHundredPercentStillReportsInvalidFeeShape() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, 101, uint8(10)));
+        cm.setGlobalDefaults(101, 0, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    function test_feeRate_ceilingAppliesToPerRouteRuleToo() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.FeeRateTooHigh.selector, 99, uint8(10)));
+        cm.setCommissionRule(
+            SRC_CHAIN_ID,
+            DST_CHAIN_ID,
+            address(token),
+            CommissionConfig({
+                stablePercent: 99,
+                baseFee: 0,
+                multiplier: 10,
+                side: CommissionSide.FUNDS_IN,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+    }
+
+    /// @dev The invariant itself: for ANY `(stablePercent, multiplier)` the
+    ///      setter accepts, the charged fee never exceeds 90% of the amount.
+    function testFuzz_feeRate_acceptedConfigNeverChargesAboveCeiling(
+        uint256 stablePercent,
+        uint8 multiplier,
+        uint256 amount
+    ) public {
+        stablePercent = bound(stablePercent, 0, 20_000);
+        amount = bound(amount, 1, 1e30);
+
+        vm.prank(owner);
+        try cm.setGlobalDefaults(stablePercent, 0, multiplier, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN) {
+            // Accepted — the resulting fee must respect the ceiling.
+            uint256 fee = cm.calculateStableFee(amount, stablePercent, multiplier);
+            assertLe(fee * 10_000, amount * 9_000, "accepted config charges at most 90%");
+            assertLt(fee, amount == 0 ? 1 : amount + 1, "fee never exceeds the amount");
+        } catch {
+            // Rejected — nothing to assert.
+        }
+    }
+
+    // =========================================================================
+    // Flat `baseFee`
+    // =========================================================================
+
+    function _cfg(uint256 stablePercent, uint256 baseFee, CommissionSide side, CommissionCurrency currency)
+        internal
+        pure
+        returns (CommissionConfig memory)
+    {
+        return CommissionConfig({
+            stablePercent: stablePercent, baseFee: baseFee, multiplier: 100, side: side, currency: currency, isSet: true
+        });
+    }
+
+    /// @dev The flat part is ADDED to the proportional one, not multiplied into it.
+    function test_baseFee_addsOnTopOfPercentage() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(200, 50_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        // 2% of 10_000_000 = 200_000, plus the flat 50_000.
+        (uint256 tok,, uint256 net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+        assertEq(tok, 250_000, "percentage + flat");
+        assertEq(net, 9_750_000, "net is gross minus total");
+    }
+
+    /// @dev A route may charge a flat fee only, with no proportional part.
+    function test_baseFee_aloneWithZeroPercent() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, 50_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        (uint256 tok,, uint256 net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+        assertEq(tok, 50_000);
+        assertEq(net, 9_950_000);
+    }
+
+    /// @dev Both parts zero still means "fee disabled for this route".
+    function test_baseFee_zeroBothKeepsFeeDisabled() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        (uint256 tok,, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1234);
+        assertEq(tok, 0);
+        assertEq(net, 1234);
+    }
+
+    /// @dev A flat fee never rounds away, so it also removes the
+    ///      `CommissionRoundsToZero` dust revert an amount-only fee has.
+    function test_baseFee_preventsCommissionRoundingToZero() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(400, 10, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        // 4% of 24 rounds to 0, but the flat 10 keeps the total non-zero.
+        (uint256 tok,, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24);
+        assertEq(tok, 10);
+        assertEq(net, 14);
+    }
+
+    /// @dev The NATIVE path converts the FULL fee (proportional + flat).
+    function test_baseFee_includedInNativeConversion() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(200, 50_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+
+        (uint256 tok, uint256 nativeFee, uint256 net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+        assertEq(tok, 0, "native route takes no token fee");
+        assertEq(net, 10_000_000, "full amount bridges");
+        // 250_000 token units at 18 decimals, $2000/ETH.
+        assertEq(nativeFee, cm.convertTokenFeeToNative(250_000, 18));
+    }
+
+    /// @dev Per-route override carries its own flat fee.
+    function test_baseFee_perRouteOverride() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        vm.prank(owner);
+        cm.setCommissionRule(
+            SRC_CHAIN_ID,
+            DST_CHAIN_ID,
+            address(token),
+            _cfg(100, 7_000, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN)
+        );
+
+        (uint256 tok,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000);
+        assertEq(tok, 10_000 + 7_000);
+
+        // Clearing it falls back to the (fee-free) globals.
+        vm.prank(owner);
+        cm.clearCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token));
+        (uint256 tokAfter,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000);
+        assertEq(tokAfter, 0);
+    }
+
+    /// @dev Global fallback carries `globalBaseFee` into the effective config.
+    function test_baseFee_globalFallbackCarriesBaseFee() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, 12_345, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        assertEq(cm.globalBaseFee(), 12_345);
+        assertEq(cm.globalStablePercent(), 0);
+
+        // No per-route override exists, so the quote resolves through the
+        // global fallback and must include the flat part.
+        assertEq(cm.calculateTotalFee(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000), 12_345);
+    }
+
+    // --- FUNDS_OUT: symmetric, bounded by the release floor ---
+
+    function test_baseFee_appliesOnFundsOut() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(400, 50_000, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
+
+        (uint256 tok,, uint256 net) =
+            cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+        assertEq(tok, 400_000 + 50_000, "percentage + flat on release");
+        assertEq(net, 9_550_000);
+    }
+
+    function test_baseFee_zeroStillAllowedOnFundsOut() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
+        (uint256 tok,,) = cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000);
+        assertEq(tok, 40_000);
+    }
+
+    /// @dev The release side is bounded by `minFundsOutAmount`, NOT by the
+    ///      deposit floor. A flat fee between the two floors proves which one is
+    ///      actually consulted.
+    function test_baseFee_fundsOutBoundedByReleaseFloorNotDepositFloor() public {
+        // 1_500_000 sits above DEPOSIT_FLOOR (1e6) but below RELEASE_FLOOR (2e6),
+        // so it is valid on the release side and invalid on the deposit side.
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, 1_500_000, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
+        assertEq(cm.globalBaseFee(), 1_500_000);
+
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.FeeAboveAmountFloor.selector, 1_500_000, DEPOSIT_FLOOR)
+        );
+        cm.setGlobalDefaults(0, 1_500_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    function test_baseFee_rejectedWhenItConsumesTheWholeReleaseFloor() public {
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.FeeAboveAmountFloor.selector, RELEASE_FLOOR, RELEASE_FLOOR)
+        );
+        cm.setGlobalDefaults(0, RELEASE_FLOOR, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev Same live re-check as the deposit side: lowering `minFundsOutAmount`
+    ///      under a stored rule must stop it quoting.
+    function test_baseFee_fundsOutQuoteRevertsAfterReleaseFloorLowered() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, 1_800_000, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
+
+        (uint256 tok,,) = cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000);
+        assertEq(tok, 1_800_000);
+
+        MockDepositFloor(BRIDGE).setMinFundsOutAmount(1_000_000);
+
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.FeeAboveAmountFloor.selector, 1_800_000, 1_000_000));
+        cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000);
+    }
+
+    /// @dev NATIVE is still unrepresentable on a release, flat fee or not.
+    function test_baseFee_doesNotUnblockNativeOnFundsOut() public {
+        vm.prank(owner);
+        vm.expectRevert(ICommissionManager.NativeCommissionNotAllowedOnFundsOut.selector);
+        cm.setGlobalDefaults(100, 1000, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.NATIVE);
+    }
+
+    function test_releaseFloor_readsBridge() public view {
+        assertEq(cm.releaseFloor(), RELEASE_FLOOR);
+    }
+
+    // --- Deposit-floor bound ---
+
+    function test_depositFloor_readsBridge() public view {
+        assertEq(cm.depositFloor(), DEPOSIT_FLOOR);
+    }
+
+    function test_baseFee_rejectedWhenItConsumesTheWholeFloor() public {
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.FeeAboveAmountFloor.selector, DEPOSIT_FLOOR, DEPOSIT_FLOOR)
+        );
+        cm.setGlobalDefaults(0, DEPOSIT_FLOOR, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    function test_baseFee_acceptedJustBelowTheFloor() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, DEPOSIT_FLOOR - 1, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        assertEq(cm.globalBaseFee(), DEPOSIT_FLOOR - 1);
+    }
+
+    /// @dev `baseFee < depositFloor` is NECESSARY but NOT SUFFICIENT: the
+    ///      proportional part consumes some of the floor too, so the bound must
+    ///      be checked on the combined fee.
+    function test_baseFee_belowFloorStillRejectedWhenCombinedFeeExceedsIt() public {
+        // 10% of the floor = 100_000, and a flat fee 1 below the floor.
+        // Individually fine, together 1_099_999 >= 1_000_000.
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICommissionManager.FeeAboveAmountFloor.selector, DEPOSIT_FLOOR - 1 + 100_000, DEPOSIT_FLOOR
+            )
+        );
+        cm.setGlobalDefaults(1000, DEPOSIT_FLOOR - 1, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev The whole point of re-reading the floor on every quote: a rule that
+    ///      was valid when written must stop quoting once the Bridge lowers the
+    ///      floor beneath it.
+    function test_baseFee_quoteRevertsAfterFloorIsLowered() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, 900_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        // Valid at the original floor.
+        (uint256 tok,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000);
+        assertEq(tok, 900_000);
+
+        // Bridge governance lowers the floor under the already-stored rule.
+        MockDepositFloor(BRIDGE).setMinFundsInAmount(500_000);
+
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.FeeAboveAmountFloor.selector, 900_000, 500_000));
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000);
+    }
+
+    /// @dev A zero-fee rule is unaffected by the floor moving, so a fee-free
+    ///      route can never be bricked by this coupling.
+    function test_zeroFeeRouteUnaffectedByFloorChanges() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        MockDepositFloor(BRIDGE).setMinFundsInAmount(1);
+
+        (uint256 tok,, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10);
+        assertEq(tok, 0);
+        assertEq(net, 10);
+    }
+
+    /// @dev The Bridge read is scoped to routes that actually charge a flat fee.
+    ///      A percentage-only route keeps quoting even with the floor
+    ///      unreadable, so the new coupling cannot brick today's routes.
+    function test_percentageOnlyRouteQuotesWithoutReadableFloor() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        vm.prank(owner);
+        cm.setBridgeAddress(makeAddr("floorless-bridge"));
+
+        (uint256 tok,, uint256 net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+        assertEq(tok, 400_000, "percentage still quoted");
+        assertEq(net, 9_600_000);
+    }
+
+    /// @dev …and configuring a percentage-only rule does not require the floor either.
+    function test_percentageOnlyConfigAcceptedWithoutReadableFloor() public {
+        vm.prank(owner);
+        cm.setBridgeAddress(makeAddr("floorless-bridge-2"));
+
+        vm.prank(owner);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        assertEq(cm.globalStablePercent(), 400);
+    }
+
+    function test_depositFloor_revertsWhenBridgeHasNoCode() public {
+        vm.prank(owner);
+        cm.setBridgeAddress(makeAddr("not-a-contract"));
+
+        vm.expectRevert(ICommissionManager.AmountFloorUnavailable.selector);
+        cm.depositFloor();
+    }
+
+    function test_depositFloor_revertsWhenFloorIsZero() public {
+        MockDepositFloor(BRIDGE).setMinFundsInAmount(0);
+
+        vm.expectRevert(ICommissionManager.AmountFloorUnavailable.selector);
+        cm.depositFloor();
+    }
+
+    /// @dev Fail-closed: with the floor unreadable, a fee-bearing quote must not
+    ///      fall through to an unbounded flat fee.
+    function test_quoteFailsClosedWhenFloorUnavailable() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(400, 1000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+
+        vm.prank(owner);
+        cm.setBridgeAddress(makeAddr("not-a-contract-either"));
+
+        vm.expectRevert(ICommissionManager.AmountFloorUnavailable.selector);
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+    }
+
+    // --- Event/state consistency ---
+
+    /// @dev `setCommissionRule` forces `isSet` true in storage; the log must say
+    ///      the same, even when the caller passed `isSet: false`.
+    function test_setCommissionRule_logsStoredConfigNotCallerStruct() public {
+        CommissionConfig memory passed = CommissionConfig({
+            stablePercent: 1000,
+            baseFee: 0,
+            multiplier: 100,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: false
+        });
+
+        vm.recordLogs();
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), passed);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1, "one rule event");
+        // `token` is indexed, so the data carries (sourceChainId, destChainId, config).
+        (,, CommissionConfig memory logged) = abi.decode(logs[0].data, (uint256, uint256, CommissionConfig));
+        assertTrue(logged.isSet, "logged config reflects stored isSet");
+        assertEq(logged.stablePercent, 1000);
+        assertTrue(cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token)).isSet);
     }
 }
