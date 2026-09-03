@@ -44,7 +44,7 @@ The EVM-side contracts in this repository are deployed on Arbitrum. Cross-chain 
 
 - **`FinalityVerifier`** — a per-route plugin consulted by `Bridge.fundsOut` to confirm that the source-side event justifying the release is final on its origin chain. The current production verifier is `RGBVerifier`, a wrapper around Atomiq's on-chain Bitcoin SPV light client (`BtcRelay`) — it stores Bitcoin block headers and validates proof-of-work continuity and the difficulty-retarget rules. This removes the need to trust any single oracle or off-chain attestation for Bitcoin finality: the EVM-side release is gated by Bitcoin's own consensus, observed on-chain. Routes that don't need finality verification (e.g. trusted-bridge EVM legs) use `NullVerifier`.
 
-- **`SettlementModule`** — a per-route plugin that owns route-specific state. For RGB-anchored transfers, `RgbSettlementModule` tracks per-`operationId` net deposit balances and consumes them on `fundsOut` (the double-spend / fake-event guard formerly built into `Bridge`). Routes whose settlement is handled entirely by an external delivery layer (e.g. LayerZero compose paths) use `NullSettlementModule`.
+- **`SettlementModule`** — a per-route plugin that owns route-specific state. `RgbSettlementModule` is the permanent proof-of-mint ledger for RGB mint/burn routes. `RgbPoolSettlementModule` gives pool routes asymmetric behavior: pool credits create no ledger record or RGB-specific event, while pool releases verify their Bridge operation ids against the mint/burn ledger. Routes whose settlement is handled entirely by an external delivery layer use `NullSettlementModule`.
 
 - **`CommissionManager`** — a dedicated fee-accounting contract that holds the protocol's commissions strictly separated from bridge liquidity. The `Bridge` consults it on every transfer to determine the per-route commission (token vs. native; charged on `FundsIn` vs. `FundsOut`) and forwards the fee to it. Withdrawal is gated by federation governance through `MultisigProxy`. Owned by `MultisigProxy`.
 
@@ -75,7 +75,7 @@ Each transfer may deduct a per-route service commission consisting of a proporti
 
 ### Replay protection
 
-Each network enforces replay protection at the smart-contract level. On EVM the `Bridge` records consumed `burnId`s on-chain (each `FundsOut` carries the `burnId` extracted from the source-side burn consignment and is rejected if already seen) and `MultisigProxy` enforces per-selector sequential nonces on `execute` plus a sequential `batchNonce` on `executeBatch`. Route-specific bookkeeping — e.g. matching `FundsOut` against the exact source-side deposits being settled — lives in the per-route `SettlementModule` (for the RGB route, `RgbSettlementModule` tracks net deposit balances and consumes them atomically with the release).
+Each network enforces replay protection at the smart-contract level. On EVM the `Bridge` records consumed `burnId`s on-chain (each `FundsOut` carries a burn id bound to the complete release intent and is rejected if already seen), while `MultisigProxy` enforces a sequential `teeNonce` for each source chain's typed enclave operations. Route-specific bookkeeping — e.g. matching `FundsOut` against the exact source-side deposits being settled — lives in the per-route `SettlementModule`.
 
 ## Third-party code
 

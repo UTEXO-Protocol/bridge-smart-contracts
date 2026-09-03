@@ -52,8 +52,11 @@ library MultisigHelper {
     bytes32 internal constant PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
 
+    bytes32 internal constant PROPOSE_TRANSFER_MANAGED_OWNERSHIP_TYPEHASH =
+        keccak256("ProposeTransferManagedOwnership(address target,address newOwner,uint256 nonce,uint256 deadline)");
+
     bytes32 internal constant CANCEL_PROPOSAL_TYPEHASH =
-        keccak256("CancelProposal(bytes32 proposalId,uint256 nonce,uint256 deadline)");
+        keccak256("CancelProposal(bytes32 proposalId,uint256 deadline)");
 
     bytes32 internal constant PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH = keccak256(
         "ProposeAdminExecuteCommissionManager(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
@@ -320,6 +323,19 @@ library MultisigHelper {
         );
     }
 
+    function digestProposeTransferManagedOwnership(
+        bytes32 domainSep,
+        address target,
+        address newOwner,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(
+            domainSep,
+            keccak256(abi.encode(PROPOSE_TRANSFER_MANAGED_OWNERSHIP_TYPEHASH, target, newOwner, nonce, deadline))
+        );
+    }
+
     function digestProposeAdminExecuteCM(
         bytes32 domainSep,
         bytes4 selector,
@@ -446,12 +462,12 @@ library MultisigHelper {
         );
     }
 
-    function digestCancelProposal(bytes32 domainSep, bytes32 proposalId, uint256 nonce, uint256 deadline)
+    function digestCancelProposal(bytes32 domainSep, bytes32 proposalId, uint256 deadline)
         internal
         pure
         returns (bytes32)
     {
-        return toTypedDataHash(domainSep, keccak256(abi.encode(CANCEL_PROPOSAL_TYPEHASH, proposalId, nonce, deadline)));
+        return toTypedDataHash(domainSep, keccak256(abi.encode(CANCEL_PROPOSAL_TYPEHASH, proposalId, deadline)));
     }
 
     // ========================================================================

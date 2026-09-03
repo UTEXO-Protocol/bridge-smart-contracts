@@ -35,6 +35,10 @@ contract RGBVerifierTest is Test {
 
     function setUp() public {
         btcRelay = new MockBtcRelay();
+        // The real relay never stores a header below its initialisation
+        // checkpoint; mirror that here so a proof this suite accepts is one
+        // the deployed relay would also accept.
+        btcRelay.setCheckpointHeight(SOURCE_HEIGHT);
         btcRelay.setBlock(SOURCE_HEIGHT, SOURCE_COMMIT, SOURCE_CONF);
         btcRelay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, LATEST_CONF);
         verifier = new RGBVerifier(address(btcRelay), MIN_SOURCE_CONF, MAX_LATEST_CONF, MIN_GAP);
