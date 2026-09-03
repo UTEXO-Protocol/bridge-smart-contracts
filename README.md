@@ -75,7 +75,7 @@ Each transfer may deduct a per-route service commission consisting of a proporti
 
 ### Replay protection
 
-Each network enforces replay protection at the smart-contract level. On EVM the `Bridge` records consumed `burnId`s on-chain (each `FundsOut` carries the `burnId` extracted from the source-side burn consignment and is rejected if already seen) and `MultisigProxy` enforces per-selector sequential nonces on `execute` plus a sequential `batchNonce` on `executeBatch`. Route-specific bookkeeping — e.g. matching `FundsOut` against the exact source-side deposits being settled — lives in the per-route `SettlementModule` (for the RGB route, `RgbSettlementModule` tracks net deposit balances and consumes them atomically with the release).
+Each network enforces replay protection at the smart-contract level. On EVM the `Bridge` records consumed `burnId`s on-chain (each `FundsOut` carries a burn id bound to the complete release intent and is rejected if already seen), while `MultisigProxy` enforces a sequential `teeNonce` for each source chain's typed enclave operations. Route-specific bookkeeping — e.g. matching `FundsOut` against the exact source-side deposits being settled — lives in the per-route `SettlementModule`.
 
 ## Third-party code
 

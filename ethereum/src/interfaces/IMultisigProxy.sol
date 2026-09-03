@@ -74,6 +74,10 @@ interface IMultisigProxy {
     error ZeroTarget();
     error ForbiddenCommissionManagerSelector(bytes4 selector);
     error ForbiddenBridgeReleaseSelector(bytes4 selector);
+    error ForbiddenOwnershipSelector(bytes4 selector);
+    error InvalidManagedOwnershipTarget(address target);
+    error ZeroNewOwner();
+    error StaleFederationProposal(uint256 proposalVersion, uint256 currentVersion);
     error LZAdapterNotSet();
     error InvalidLZAdapter();
 
@@ -98,7 +102,8 @@ interface IMultisigProxy {
         PauseInflow, // 13 — Bridge.pauseInflow()  (planned inflow-only freeze, timelocked)
         UnpauseInflow, // 14 — Bridge.unpauseInflow()
         DisableLZAdapter, // 15 — clear the routing target (explicit disable, distinct from UpdateLZAdapter rotation)
-        AdminExecuteRouteRegistry // 16 — generic call into RouteRegistry (transferOwnership/acceptOwnership, setRoute, …)
+        AdminExecuteRouteRegistry, // 16 — generic call into RouteRegistry (acceptOwnership, config, …)
+        TransferManagedOwnership // 17 — typed Ownable2Step transfer for an allowlisted governance target
     }
 
     enum ProposalStatus {
@@ -130,6 +135,7 @@ interface IMultisigProxy {
         uint256 proposedAt;
         uint256 deadline;
         uint256 timelockSnapshot;
+        uint256 federationVersion;
         OperationType opType;
         ProposalStatus status;
     }
@@ -171,6 +177,8 @@ interface IMultisigProxy {
     // Emitted when proposals are executed
     event EnclaveSignersUpdated(uint256 indexed sourceChainId, address[] newSigners, uint256 newThreshold);
     event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
+    event FederationSignerSetVersionUpdated(uint256 indexed newVersion);
+    event ManagedOwnershipTransferStarted(address indexed target, address indexed newOwner);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
@@ -299,8 +307,8 @@ interface IMultisigProxy {
 
     /// @notice Propose a permitted generic call into the CommissionManager.
     /// @dev Used for rare configuration: setCommissionRule, setGlobalDefaults,
-    ///      setMockTokenToNativeRate, setBridgeAddress, transferOwnership, …
-    ///      Withdrawal selectors are reserved for the typed operations.
+    ///      setMockTokenToNativeRate, setBridgeAddress, … Withdrawal and
+    ///      ownership-transfer selectors are reserved for typed operations.
     /// @dev opData = raw ABI-encoded CommissionManager callData (selector + args).
     function proposeAdminExecuteCommissionManager(
         bytes calldata callData,
@@ -312,10 +320,10 @@ interface IMultisigProxy {
 
     // --- RouteRegistry-targeted operations ---
 
-    /// @notice Propose an arbitrary call into the RouteRegistry (resolved from
-    ///         Bridge). Enables ownership migration (`transferOwnership` /
-    ///         `acceptOwnership`) now that RouteRegistry is `Ownable2Step`,
-    ///         alongside the dedicated `SetRoute` op.
+    /// @notice Propose an arbitrary permitted call into the RouteRegistry
+    ///         (resolved from Bridge), alongside the dedicated `SetRoute` op.
+    ///         `acceptOwnership` remains available here; `transferOwnership`
+    ///         must use `proposeTransferManagedOwnership`.
     /// @dev opData = raw ABI-encoded RouteRegistry callData (selector + args).
     function proposeAdminExecuteRouteRegistry(
         bytes calldata callData,
@@ -348,7 +356,8 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose migrating to a new CommissionManager address.
+    /// @notice Propose migrating Bridge and this proxy to a new
+    ///         CommissionManager address atomically.
     /// @dev opData = abi.encode(address newCommissionManager)
     function proposeUpdateCommissionManager(
         address newCommissionManager,
@@ -427,6 +436,21 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
+    /// @notice Propose an Ownable2Step ownership transfer for a contract under
+    ///         this proxy's governance.
+    /// @dev `target` must be the current Bridge, CommissionManager, LZAdapter,
+    ///      or Bridge RouteRegistry both when proposed and when executed. The
+    ///      exact target and new owner are bound into the EIP-712 signature.
+    ///      opData = abi.encode(address target, address newOwner).
+    function proposeTransferManagedOwnership(
+        address target,
+        address newOwner,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
     /// @notice Propose a planned inflow-only pause on Bridge (`pauseInflow`).
     /// @dev Freezes deposits while leaving withdrawals open — intended for a
     ///      bridge upgrade / liquidity migration. Runs through the timelocked
@@ -447,13 +471,8 @@ interface IMultisigProxy {
     // =========================================================================
 
     /// @notice Cancel a pending proposal. Requires M-of-N federation signatures.
-    function cancelProposal(
-        bytes32 proposalId,
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external;
+    /// @dev The authorization is bound directly to `proposalId`;
+    function cancelProposal(bytes32 proposalId, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
     /// @notice Execute a proposal after the timelock has elapsed. Permissionless.
     /// @param proposalId The proposal to execute.
@@ -482,7 +501,7 @@ interface IMultisigProxy {
     function enclaveThreshold(uint256 sourceChainId) external view returns (uint256);
     function getFederationSigners() external view returns (address[] memory);
     function federationThreshold() external view returns (uint256);
-    /// @notice Immutable recipient reported by the current CommissionManager.
+    function federationSignerSetVersion() external view returns (uint256);
     function commissionRecipient() external view returns (address);
     function DOMAIN_SEPARATOR() external view returns (bytes32);
     function proposalNonce() external view returns (uint256);

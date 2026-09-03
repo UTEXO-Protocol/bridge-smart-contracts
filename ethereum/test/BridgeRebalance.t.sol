@@ -37,7 +37,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///                    (burn-backed: BtcRelay proof + record check; credit leg
 ///                     writes nothing and emits no FundsIn)
 contract BridgeRebalanceTest is Test {
-    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 rgbOpId, uint256 amount);
     event BridgeRebalance(
         bytes32 indexed operationId,
         uint256 indexed burnId,
@@ -101,6 +101,10 @@ contract BridgeRebalanceTest is Test {
     function setUp() public {
         usdt0 = new MockERC20("Mock USDT0", "USDT0");
         btcRelay = new MockBtcRelay();
+        // The real relay never stores a header below its initialisation
+        // checkpoint; mirror that here so a proof this suite accepts is one
+        // the deployed relay would also accept.
+        btcRelay.setCheckpointHeight(BLOCK_HEIGHT);
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, CONFIRMATIONS);
         btcRelay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, LATEST_CONFIRMATIONS);
 
@@ -528,7 +532,7 @@ contract BridgeRebalanceTest is Test {
         IBridge.RebalanceParams memory p = _productionPoolToMintBurnParams(AMOUNT, rgbOpId);
         bytes32 rebalanceOperationId = _deriveRebalanceOpId(p);
 
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(multisig, rgbOpId, AMOUNT);
         _rebalance(p);
 
@@ -550,7 +554,7 @@ contract BridgeRebalanceTest is Test {
 
         // Credit-RGB rebalance emits the standard FundsIn (the RGB side needs
         // no rebalance awareness) plus the canonical BridgeRebalance.
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(multisig, mintOpId, AMOUNT);
         vm.expectEmit(true, true, false, true);
         emit BridgeRebalance(expectedOpId, p.burnId, ARCH_CHAIN_ID, RGB_CHAIN_ID, AMOUNT, ARCH_SRC_ADDR, RGB_DST_ADDR);
@@ -605,7 +609,7 @@ contract BridgeRebalanceTest is Test {
         // Both sides are RGB: the debit leg verifies the mint/burn record and the
         // credit leg writes a NEW pool record + emits FundsIn — all on the one
         // shared module, no composite module or privileged writer.
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(multisig, poolOpId, AMOUNT);
         _rebalance(p);
 
@@ -626,7 +630,7 @@ contract BridgeRebalanceTest is Test {
         // Scenario A: operational, no external burn → NullVerifier, empty proof
         // and empty debit settlement. The credit leg writes the mint/burn record
         // (tagged with the mint/burn network) and emits the inflate FundsIn.
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(multisig, inflateOpId, AMOUNT);
         _rebalance(p);
 
@@ -700,6 +704,40 @@ contract BridgeRebalanceTest is Test {
         assertEq(bridge.availableGlobalOutflow(), globalBefore, "global bucket untouched (no token egress)");
     }
 
+    function test_rebalanceBucketCapacityDoesNotDecayWhenRollingUsageExpires() public {
+        vm.warp((block.timestamp / 1 hours + 1) * 1 hours);
+        uint256 startedAt = block.timestamp;
+
+        _rebalance(_archToRgbParams(AMOUNT, RGB_OP_ID + 1));
+        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), AMOUNT * 9, "actual source liquidity debited");
+
+        vm.warp(startedAt + 24 hours + 1 minutes);
+        assertEq(bridge.chainOutflowReference(ARCH_CHAIN_ID), AMOUNT * 9, "pre-expiry bucket reference");
+        assertEq(bridge.availableOutflow(ARCH_CHAIN_ID), AMOUNT * 9 / 10, "pre-expiry full bucket");
+
+        // The old rolling-inclusive reference incorrectly exposed AMOUNT here,
+        // allowing an intent that became permanently above-capacity at expiry.
+        // With the actual-liquidity reference it is rejected immediately.
+        IBridge.RebalanceParams memory oversized = _archToRgbParams(AMOUNT, RGB_OP_ID + 2);
+        uint256 capacityShares = MAX_BURST_BPS * bridge.SHARE_UNIT() / bridge.BPS_DENOMINATOR();
+        uint256 requestedShares = (AMOUNT * bridge.SHARE_UNIT() + AMOUNT * 9 - 1) / (AMOUNT * 9);
+        vm.prank(multisig);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OutflowRateLimiter.TokenRequestAboveCapacity.selector, capacityShares, requestedShares, address(usdt0)
+            )
+        );
+        bridge.rebalanceLiquidity(oversized);
+
+        vm.warp(startedAt + 25 hours);
+        uint256 validAmount = AMOUNT * 9 / 10;
+        assertEq(bridge.chainOutflowReference(ARCH_CHAIN_ID), AMOUNT * 9, "post-expiry bucket reference");
+        assertEq(bridge.availableOutflow(ARCH_CHAIN_ID), validAmount, "post-expiry full bucket unchanged");
+
+        _rebalance(_archToRgbParams(validAmount, RGB_OP_ID + 3));
+        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), AMOUNT * 81 / 10, "valid tranche executes after expiry");
+    }
+
     function test_rebalance_distinctMints_differInDestinationOpId() public {
         // Legitimately distinct credit-side rebalances differ in the destination
         // RGB OpId (settlementDataIn), which alone makes their canonical ids
@@ -712,6 +750,14 @@ contract BridgeRebalanceTest is Test {
         bytes32 secondOpId = _deriveRebalanceOpId(second);
         assertTrue(first.burnId != second.burnId, "distinct burnId per destination OpId");
         assertTrue(firstOpId != secondOpId, "distinct operationId per destination OpId");
+
+        // Restore the source liquidity so the same absolute amount remains 10%
+        // of the live bucket reference. This test isolates destination OpId as
+        // the only intent difference rather than relying on rolling usage to
+        // preserve a stale, higher reference.
+        usdt0.mint(user, AMOUNT);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, ARCH_CHAIN_ID, ARCH_DST_ADDR, "");
         vm.warp(block.timestamp + bridge.BUCKET_REFILL_WINDOW() + 1);
         _rebalance(second);
 
