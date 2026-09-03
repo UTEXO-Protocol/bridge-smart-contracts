@@ -145,6 +145,10 @@ contract MultisigProxy is IMultisigProxy {
     bytes4 private constant _SEL_FUNDS_OUT = IBridge.fundsOut.selector;
     bytes4 private constant _SEL_REBALANCE_LIQUIDITY = IBridge.rebalanceLiquidity.selector;
 
+    /// @notice CommissionManager rotation is reserved for the typed operation,
+    ///         which keeps the Bridge and proxy targets synchronized atomically.
+    bytes4 private constant _SEL_SET_COMMISSION_MANAGER = IBridge.setCommissionManager.selector;
+
     /// @notice Ownership transfer is reserved for the typed managed-target
     ///         operation and rejected from every generic raw-call lane.
     bytes4 private constant _SEL_TRANSFER_OWNERSHIP = bytes4(keccak256("transferOwnership(address)"));
@@ -1180,6 +1184,7 @@ contract MultisigProxy is IMultisigProxy {
             address newCm = abi.decode(opData, (address));
             if (newCm == address(0)) revert ZeroCommissionManager();
             address old = commissionManager;
+            IBridge(bridge).setCommissionManager(newCm);
             commissionManager = newCm;
             emit CommissionManagerUpdated(old, newCm);
         } else if (opType == OperationType.AdminExecuteAdapter) {
@@ -1412,6 +1417,7 @@ contract MultisigProxy is IMultisigProxy {
     function _requireAllowedGenericSelector(bytes4 selector) private pure {
         _requireNotCommissionWithdrawSelector(selector);
         _requireNotBridgeReleaseSelector(selector);
+        if (selector == _SEL_SET_COMMISSION_MANAGER) revert ForbiddenCommissionManagerSelector(selector);
         if (selector == _SEL_TRANSFER_OWNERSHIP) revert ForbiddenOwnershipSelector(selector);
     }
 

@@ -1702,28 +1702,36 @@ contract MultisigProxyTest is Test {
         _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
     }
 
+    function test_federationGenericPathsCannotDesyncCommissionManager() public {
+        bytes memory callData = abi.encodeCall(IBridge.setCommissionManager, (makeAddr("genericCm")));
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
+    }
+
     // ========================================================================
     // Propose + Execute — UpdateCommissionManager
     // ========================================================================
 
     function test_proposeUpdateCommissionManager_execute() public {
-        address newCm = makeAddr("newCm");
+        CommissionManager newCm = new CommissionManager(address(bridge), commissionReceiver);
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
 
-        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(domainSep, newCm, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(domainSep, address(newCm), nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        bytes32 id = proxy.proposeUpdateCommissionManager(newCm, nonce, deadline, bitmap, sigs);
+        bytes32 id = proxy.proposeUpdateCommissionManager(address(newCm), nonce, deadline, bitmap, sigs);
 
         vm.warp(block.timestamp + TIMELOCK + 1);
 
-        vm.expectEmit(true, true, false, false);
-        emit CommissionManagerUpdated(address(cm), newCm);
+        vm.expectEmit(true, true, false, true, address(bridge));
+        emit CommissionManagerUpdated(address(cm), address(newCm));
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit CommissionManagerUpdated(address(cm), address(newCm));
 
-        proxy.executeProposal(id, abi.encode(newCm));
-        assertEq(proxy.commissionManager(), newCm);
+        proxy.executeProposal(id, abi.encode(address(newCm)));
+        assertEq(proxy.commissionManager(), address(newCm));
+        assertEq(address(bridge.commissionManager()), address(newCm));
     }
 
     // ========================================================================

@@ -356,7 +356,8 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose migrating to a new CommissionManager address.
+    /// @notice Propose migrating Bridge and this proxy to a new
+    ///         CommissionManager address atomically.
     /// @dev opData = abi.encode(address newCommissionManager)
     function proposeUpdateCommissionManager(
         address newCommissionManager,
