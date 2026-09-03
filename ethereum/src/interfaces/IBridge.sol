@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
+import {ICommissionManager} from "./ICommissionManager.sol";
+
 interface IBridge {
     // =========================================================================
     // Errors
@@ -55,6 +57,11 @@ interface IBridge {
     /// @param newRegistry New registry (non-zero by `setRouteRegistry` guard).
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
+    /// @notice Emitted on every successful `setCommissionManager`.
+    /// @param oldCommissionManager Previous CommissionManager address.
+    /// @param newCommissionManager New non-zero CommissionManager address.
+    event CommissionManagerUpdated(address indexed oldCommissionManager, address indexed newCommissionManager);
+
     /// @notice Emitted on every successful `setMinFundsInAmount`.
     /// @param oldMinimum Previous minimum (constructor value before first update).
     /// @param newMinimum New minimum (in token smallest units; always non-zero).
@@ -100,7 +107,7 @@ interface IBridge {
     /// @param rgbOpId RGB operation id, decoded by the route module from its
     ///                `settlementData`. Not an on-chain dedup key.
     /// @param amount  Net amount bridged (post-commission).
-    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 rgbOpId, uint256 amount);
 
     /// @param operationId        Canonical bridge-side operation id, derived
     ///                           on-chain by Bridge and unpredictable by third
@@ -342,6 +349,11 @@ interface IBridge {
     ///         `onFundsIn` / `beforeFundsOut` through. Owner-only.
     function setRouteRegistry(address newRouteRegistry) external;
 
+    /// @notice Updates the `CommissionManager` used for fee quotes and custody.
+    ///         Owner-only (MultisigProxy via the typed, timelocked
+    ///         `UpdateCommissionManager` operation). Must be non-zero.
+    function setCommissionManager(address newCommissionManager) external;
+
     /// @notice Updates the minimum accepted `fundsIn` deposit (token smallest
     ///         units). Owner-only (MultisigProxy via the federation
     ///         propose -> timelock -> execute flow). Must be non-zero; reverts
@@ -442,6 +454,9 @@ interface IBridge {
 
     /// @notice Current `RouteRegistry` Bridge uses for route dispatch.
     function routeRegistry() external view returns (address);
+
+    /// @notice Current `CommissionManager` Bridge uses for fee quotes and custody.
+    function commissionManager() external view returns (ICommissionManager);
 
     /// @notice Permanently blocked — ownership cannot be renounced.
     function renounceOwnership() external view;

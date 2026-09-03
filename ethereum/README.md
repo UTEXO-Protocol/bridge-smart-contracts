@@ -27,14 +27,15 @@ No TEE verification, no destination chain field, **no commission integration**, 
 
 Production bridge for UTEXO. Inherits `BridgeBase`, implements `IBridge`. Route-agnostic: all per-route logic (finality verification, settlement bookkeeping) is delegated to plugins registered in `RouteRegistry`.
 
-Constructor takes four addresses — the accepted ERC-20 token (immutable), the `RouteRegistry` (mutable — federation can rotate via `UpdateRouteRegistry`), the `CommissionManager` (immutable), and the initial LayerZero adapter (mutable; `address(0)` is allowed) — plus non-zero `minFundsInAmount` and `minFundsOutAmount` values in token smallest units. Federation may retune either minimum through the timelocked owner path. The bridge's own chain identifier is `block.chainid` — chain IDs are `uint256` throughout the stack (real EVM chain IDs for EVM legs; backend-assigned IDs in a reserved namespace above `2^32` for non-EVM endpoints, e.g. RGB = `1_000_001`).
+Constructor takes four addresses — the accepted ERC-20 token (immutable), the `RouteRegistry` (mutable — federation can rotate via `UpdateRouteRegistry`), the initial `CommissionManager` (mutable — federation can rotate it via `UpdateCommissionManager`), and the initial LayerZero adapter (mutable; `address(0)` is allowed) — plus non-zero `minFundsInAmount` and `minFundsOutAmount` values in token smallest units. Federation may retune either minimum through the timelocked owner path. The bridge's own chain identifier is `block.chainid` — chain IDs are `uint256` throughout the stack (real EVM chain IDs for EVM legs; backend-assigned IDs in a reserved namespace above `2^32` for non-EVM endpoints, e.g. RGB = `1_000_001`).
 
 - `fundsIn(amount, destinationChainId, destinationAddress, settlementData)` — open, **`payable`**. Direct entry point for EVM users; the source chain is implicit (`block.chainid`). Requires `amount >= minFundsInAmount`. Quotes commission from `CommissionManager` using route key `(block.chainid, destinationChainId, TOKEN)`; if the route uses NATIVE currency, `msg.value` must be between the fresh quote and 5% above it. Exactly the fresh quote is collected and any surplus is refunded to the caller. Pulls the full `amount` in tokens from the sender, forwards any token/native commission to `CommissionManager`, and dispatches to the route's `SettlementModule.onFundsIn(...)` via `RouteRegistry`. The `settlementData` blob is opaque to the bridge — its layout is dictated by the destination route's settlement module (empty for routes that don't consume extra data on inbound, e.g. RGB). Emits two events:
-  - `FundsIn` (from `BridgeBase`) — minimal, uses `netAmount`.
+  - `FundsIn` — RGB-only compatibility event using `netAmount`; `sender` is indexed while `rgbOpId` is carried in event data.
   - `BridgeFundsIn` (from `IBridge`) — full, consumed by the UTEXO backend.
 - `fundsIn(amount, sourceChainId, sourceSender, destinationChainId, destinationAddress, settlementData)` — `onlyLZAdapter` overload used by `LZAdapter` after a cross-chain `OFT.send` compose lands. The adapter has already authenticated the originating sender on the source chain via LayerZero's `OFTComposeMsgCodec.composeFrom`, so it forwards the non-spoofable `sourceChainId` and `sourceSender` to the bridge. For NATIVE commission routes, the source-agreed `msg.value` must remain within the immutable ±5% band around the fresh destination quote. Cross-domain refunds are deliberately unsupported, so the complete accepted value is collected as commission.
 - `setLZAdapter(adapter)` — `onlyOwner`. Rotates the address authorized to call the adapter overload. Set to `address(0)` to close the adapter path entirely.
 - `setRouteRegistry(newRouteRegistry)` — `onlyOwner`. Rotates the `RouteRegistry` Bridge talks to. Used to migrate to a redeployed registry (the registry's `bridge` is immutable, so a new registry deploy is the only way to rotate). Reverts on `address(0)`.
+- `setCommissionManager(newCommissionManager)` — `onlyOwner`. Rotates the manager used for fee quotes and custody. Production migration uses the typed `UpdateCommissionManager` operation so the Bridge and `MultisigProxy` pointers change atomically. Reverts on `address(0)`.
 - `fundsOut(FundsOutParams)` — `onlyOwner`, called only by the typed `MultisigProxy.fundsOutCall` / `lzFundsOutCall` enclave paths. The params bind recipient, amount, burn id, source/destination chains, source address, finality proof, and settlement data. The Bridge checks replay protection and isolated liquidity/rate limits, dispatches route verification and settlement bookkeeping, charges any token commission, and releases the net amount. NATIVE commission is disallowed because the release has no native-currency payer.
 
 Owner **must** be `MultisigProxy`. `fundsOut` is reachable only through the purpose-built `fundsOutCall` or `lzFundsOutCall` entrypoints, and `rebalanceLiquidity` only through `rebalanceCall`; all require the registered source chain's M-of-N enclave signatures. These Bridge selectors are blocked from every federation generic-call lane.
@@ -117,7 +118,7 @@ Federation-controlled operations (`OperationType`):
 | `AdminExecuteCommissionManager` | CommissionManager | Permitted generic call into CM (route rules, global defaults, ETH/USD feed, …) |
 | `WithdrawTokenCommissionCM` | CommissionManager | Withdraw ERC-20 commission to CM's immutable `commissionRecipient` |
 | `WithdrawNativeCommissionCM` | CommissionManager | Withdraw native commission to CM's immutable `commissionRecipient` |
-| `UpdateCommissionManager` | self | Migrate to a redeployed CommissionManager |
+| `UpdateCommissionManager` | Bridge + self | Atomically migrate Bridge and proxy to a redeployed CommissionManager |
 | `AdminExecuteAdapter` | LZAdapter | Generic call into the registered LayerZero adapter (`setTrustedEntrypoint`, `refundStuckFunds`, …). Reverts `ZeroTarget` if `MultisigProxy.lzAdapter` is unset. |
 | `UpdateLZAdapter` | self | Rotate `MultisigProxy.lzAdapter` — the routing target for `AdminExecuteAdapter`. Setting to `address(0)` closes the adapter-admin path. |
 | `SetRoute` | RouteRegistry | Register, update, pause, or re-enable a single `(sourceChainId, destChainId)` route on the registry. The opData encodes `(src, dst, enabled, verifier, module)`. |
@@ -128,6 +129,13 @@ Federation-controlled operations (`OperationType`):
 | `DisableLZAdapter` | self | Explicitly clear the adapter governance target. |
 
 Note: `MultisigProxy.lzAdapter` and `Bridge.lzAdapter` are **separate** fields with different roles. `Bridge.lzAdapter` gates the adapter `fundsIn` overload (data path); `MultisigProxy.lzAdapter` is the target of `AdminExecuteAdapter` proposals (governance path). Both default to `address(0)` and are wired in by federation after the adapter is deployed.
+
+For a CommissionManager migration, deploy and configure the replacement with
+the current Bridge as `bridgeAddress`, start its two-step ownership transfer to
+`MultisigProxy`, and prepare both `UpdateCommissionManager` and a subsequent
+`AdminExecuteCommissionManager(acceptOwnership())` proposal. After their
+timelocks, execute the update first and the ownership acceptance immediately
+after it. The update changes the Bridge and proxy pointers atomically.
 
 ## How it works
 

@@ -37,7 +37,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///                    (burn-backed: BtcRelay proof + record check; credit leg
 ///                     writes nothing and emits no FundsIn)
 contract BridgeRebalanceTest is Test {
-    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 rgbOpId, uint256 amount);
     event BridgeRebalance(
         bytes32 indexed operationId,
         uint256 indexed burnId,
@@ -101,6 +101,10 @@ contract BridgeRebalanceTest is Test {
     function setUp() public {
         usdt0 = new MockERC20("Mock USDT0", "USDT0");
         btcRelay = new MockBtcRelay();
+        // The real relay never stores a header below its initialisation
+        // checkpoint; mirror that here so a proof this suite accepts is one
+        // the deployed relay would also accept.
+        btcRelay.setCheckpointHeight(BLOCK_HEIGHT);
         btcRelay.setBlock(BLOCK_HEIGHT, COMMITMENT_HASH, CONFIRMATIONS);
         btcRelay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, LATEST_CONFIRMATIONS);
 
@@ -528,7 +532,7 @@ contract BridgeRebalanceTest is Test {
         IBridge.RebalanceParams memory p = _productionPoolToMintBurnParams(AMOUNT, rgbOpId);
         bytes32 rebalanceOperationId = _deriveRebalanceOpId(p);
 
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(multisig, rgbOpId, AMOUNT);
         _rebalance(p);
 
@@ -550,7 +554,7 @@ contract BridgeRebalanceTest is Test {
 
         // Credit-RGB rebalance emits the standard FundsIn (the RGB side needs
         // no rebalance awareness) plus the canonical BridgeRebalance.
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(multisig, mintOpId, AMOUNT);
         vm.expectEmit(true, true, false, true);
         emit BridgeRebalance(expectedOpId, p.burnId, ARCH_CHAIN_ID, RGB_CHAIN_ID, AMOUNT, ARCH_SRC_ADDR, RGB_DST_ADDR);
@@ -605,7 +609,7 @@ contract BridgeRebalanceTest is Test {
         // Both sides are RGB: the debit leg verifies the mint/burn record and the
         // credit leg writes a NEW pool record + emits FundsIn — all on the one
         // shared module, no composite module or privileged writer.
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(multisig, poolOpId, AMOUNT);
         _rebalance(p);
 
@@ -626,7 +630,7 @@ contract BridgeRebalanceTest is Test {
         // Scenario A: operational, no external burn → NullVerifier, empty proof
         // and empty debit settlement. The credit leg writes the mint/burn record
         // (tagged with the mint/burn network) and emits the inflate FundsIn.
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(multisig, inflateOpId, AMOUNT);
         _rebalance(p);
 
