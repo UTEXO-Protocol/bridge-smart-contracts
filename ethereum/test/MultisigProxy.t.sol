@@ -1702,28 +1702,36 @@ contract MultisigProxyTest is Test {
         _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
     }
 
+    function test_federationGenericPathsCannotDesyncCommissionManager() public {
+        bytes memory callData = abi.encodeCall(IBridge.setCommissionManager, (makeAddr("genericCm")));
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
+    }
+
     // ========================================================================
     // Propose + Execute — UpdateCommissionManager
     // ========================================================================
 
     function test_proposeUpdateCommissionManager_execute() public {
-        address newCm = makeAddr("newCm");
+        CommissionManager newCm = new CommissionManager(address(bridge), commissionReceiver);
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
 
-        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(domainSep, newCm, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(domainSep, address(newCm), nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        bytes32 id = proxy.proposeUpdateCommissionManager(newCm, nonce, deadline, bitmap, sigs);
+        bytes32 id = proxy.proposeUpdateCommissionManager(address(newCm), nonce, deadline, bitmap, sigs);
 
         vm.warp(block.timestamp + TIMELOCK + 1);
 
-        vm.expectEmit(true, true, false, false);
-        emit CommissionManagerUpdated(address(cm), newCm);
+        vm.expectEmit(true, true, false, true, address(bridge));
+        emit CommissionManagerUpdated(address(cm), address(newCm));
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit CommissionManagerUpdated(address(cm), address(newCm));
 
-        proxy.executeProposal(id, abi.encode(newCm));
-        assertEq(proxy.commissionManager(), newCm);
+        proxy.executeProposal(id, abi.encode(address(newCm)));
+        assertEq(proxy.commissionManager(), address(newCm));
+        assertEq(address(bridge.commissionManager()), address(newCm));
     }
 
     // ========================================================================
@@ -1794,16 +1802,17 @@ contract MultisigProxyTest is Test {
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         bytes32 id = proxy.proposeUpdateBridge(newBridge, nonce, deadline, bitmap, sigs);
+        uint256 proposalNonceAfterPropose = proxy.proposalNonce();
 
-        uint256 cNonce = proxy.proposalNonce();
         uint256 cDeadline = block.timestamp + 1 hours;
-        bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cNonce, cDeadline);
+        bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cDeadline);
         bytes[] memory cSigs = MultisigHelper.signAll(vm, cDigest, pks);
 
         vm.expectEmit(true, false, false, false);
         emit ProposalCancelled(id);
-        proxy.cancelProposal(id, cNonce, cDeadline, bitmap, cSigs);
+        proxy.cancelProposal(id, cDeadline, bitmap, cSigs);
 
+        assertEq(proxy.proposalNonce(), proposalNonceAfterPropose, "cancel does not consume proposal nonce");
         IMultisigProxy.Proposal memory p = proxy.getProposal(id);
         assertEq(uint8(p.status), uint8(IMultisigProxy.ProposalStatus.Cancelled));
 
@@ -1814,14 +1823,74 @@ contract MultisigProxyTest is Test {
 
     function test_cancelProposal_revertsOnNotPending() public {
         bytes32 id = keccak256("ghost");
-        uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes32 digest = MultisigHelper.digestCancelProposal(domainSep, id, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestCancelProposal(domainSep, id, deadline);
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         vm.expectRevert(IMultisigProxy.NotPending.selector);
-        proxy.cancelProposal(id, nonce, deadline, bitmap, sigs);
+        proxy.cancelProposal(id, deadline, bitmap, sigs);
+    }
+
+    /// @dev Regression for the shared-nonce veto-starvation finding. Once a
+    ///      cancel is signed for a concrete proposal, unrelated proposal
+    ///      traffic cannot invalidate it by advancing `proposalNonce`.
+    function test_cancelProposal_survivesUnrelatedProposalNonceAdvance() public {
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+
+        uint256 targetNonce = proxy.proposalNonce();
+        uint256 targetDeadline = block.timestamp + 1 days;
+        address targetBridge = makeAddr("targetBridge");
+        bytes32 targetDigest =
+            MultisigHelper.digestProposeUpdateBridge(domainSep, targetBridge, targetNonce, targetDeadline);
+        bytes32 targetId = proxy.proposeUpdateBridge(
+            targetBridge, targetNonce, targetDeadline, bitmap, MultisigHelper.signAll(vm, targetDigest, pks)
+        );
+
+        uint256 cancelDeadline = block.timestamp + 1 hours;
+        bytes32 cancelDigest = MultisigHelper.digestCancelProposal(domainSep, targetId, cancelDeadline);
+        bytes[] memory cancelSigs = MultisigHelper.signAll(vm, cancelDigest, pks);
+
+        // A different, valid federation proposal advances the sequential
+        // proposal lane after the cancel bundle has already been collected.
+        uint256 unrelatedNonce = proxy.proposalNonce();
+        address unrelatedBridge = makeAddr("unrelatedBridge");
+        bytes32 unrelatedDigest =
+            MultisigHelper.digestProposeUpdateBridge(domainSep, unrelatedBridge, unrelatedNonce, targetDeadline);
+        proxy.proposeUpdateBridge(
+            unrelatedBridge, unrelatedNonce, targetDeadline, bitmap, MultisigHelper.signAll(vm, unrelatedDigest, pks)
+        );
+        uint256 nonceAfterUnrelatedProposal = proxy.proposalNonce();
+        assertEq(nonceAfterUnrelatedProposal, targetNonce + 2, "unrelated proposal advances its own lane");
+
+        proxy.cancelProposal(targetId, cancelDeadline, bitmap, cancelSigs);
+
+        assertEq(proxy.proposalNonce(), nonceAfterUnrelatedProposal, "cancel leaves proposal lane untouched");
+        assertEq(
+            uint256(proxy.getProposal(targetId).status),
+            uint256(IMultisigProxy.ProposalStatus.Cancelled),
+            "original cancel remains executable"
+        );
+    }
+
+    function test_cancelProposal_replayRevertsOnCancelledStatus() public {
+        address newBridge = makeAddr("cancelReplayBridge");
+        uint256 nonce = proxy.proposalNonce();
+        uint256 proposalDeadline = block.timestamp + 1 days;
+        bytes32 proposalDigest = MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, nonce, proposalDeadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 id = proxy.proposeUpdateBridge(
+            newBridge, nonce, proposalDeadline, bitmap, MultisigHelper.signAll(vm, proposalDigest, pks)
+        );
+
+        uint256 cancelDeadline = block.timestamp + 1 hours;
+        bytes32 cancelDigest = MultisigHelper.digestCancelProposal(domainSep, id, cancelDeadline);
+        bytes[] memory cancelSigs = MultisigHelper.signAll(vm, cancelDigest, pks);
+
+        proxy.cancelProposal(id, cancelDeadline, bitmap, cancelSigs);
+
+        vm.expectRevert(IMultisigProxy.NotPending.selector);
+        proxy.cancelProposal(id, cancelDeadline, bitmap, cancelSigs);
     }
 
     // ========================================================================
@@ -1962,15 +2031,14 @@ contract MultisigProxyTest is Test {
         address newAdapter = makeAddr("lzAdapter");
         bytes32 id = _proposeUpdateLZAdapter(newAdapter);
 
-        uint256 cNonce = proxy.proposalNonce();
         uint256 cDeadline = block.timestamp + 1 hours;
-        bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cNonce, cDeadline);
+        bytes32 cDigest = MultisigHelper.digestCancelProposal(domainSep, id, cDeadline);
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory cSigs = MultisigHelper.signAll(vm, cDigest, pks);
 
         vm.expectEmit(true, false, false, false);
         emit ProposalCancelled(id);
-        proxy.cancelProposal(id, cNonce, cDeadline, bitmap, cSigs);
+        proxy.cancelProposal(id, cDeadline, bitmap, cSigs);
 
         vm.warp(block.timestamp + TIMELOCK + 1);
         vm.expectRevert(IMultisigProxy.NotPending.selector);
@@ -3146,15 +3214,12 @@ contract MultisigProxyTest is Test {
 
         // The live federation can still cancel stale records for operational
         // cleanup; cancellation intentionally has no version restriction.
-        uint256 cancelNonce = proxy.proposalNonce();
         uint256 cancelDeadline = block.timestamp + 1 days;
-        bytes32 cancelDigest = MultisigHelper.digestCancelProposal(domainSep, staleId, cancelNonce, cancelDeadline);
+        bytes32 cancelDigest = MultisigHelper.digestCancelProposal(domainSep, staleId, cancelDeadline);
         uint256[] memory cancellingPks = new uint256[](2);
         cancellingPks[0] = newPks[0];
         cancellingPks[1] = newPks[1];
-        proxy.cancelProposal(
-            staleId, cancelNonce, cancelDeadline, 3, MultisigHelper.signAll(vm, cancelDigest, cancellingPks)
-        );
+        proxy.cancelProposal(staleId, cancelDeadline, 3, MultisigHelper.signAll(vm, cancelDigest, cancellingPks));
         assertEq(
             uint256(proxy.getProposal(staleId).status),
             uint256(IMultisigProxy.ProposalStatus.Cancelled),

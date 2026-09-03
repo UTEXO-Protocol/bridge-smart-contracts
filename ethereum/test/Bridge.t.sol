@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 
 import {Bridge} from "../src/Bridge.sol";
 import {IBridge} from "../src/interfaces/IBridge.sol";
@@ -32,7 +32,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract BridgeTest is Test {
     // Events re-declared locally for vm.expectEmit
-    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 rgbOpId, uint256 amount);
     event BridgeFundsIn(
         bytes32 indexed operationId,
         bytes32 indexed sourceSender,
@@ -59,6 +59,7 @@ contract BridgeTest is Test {
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
     event LZAdapterDisabled(address indexed oldAdapter);
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
+    event CommissionManagerUpdated(address indexed oldCommissionManager, address indexed newCommissionManager);
     event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
     event MinFundsOutAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
     event OutflowLimitUpdated(uint256 indexed chainId, uint256 capacity, uint256 refillRate, uint256 available);
@@ -583,6 +584,62 @@ contract BridgeTest is Test {
     }
 
     // ========================================================================
+    // setCommissionManager
+    // ========================================================================
+
+    function test_setCommissionManager_ownerCanRotate() public {
+        CommissionManager newCm = new CommissionManager(address(bridge), recipient);
+
+        vm.expectEmit(true, true, false, true, address(bridge));
+        emit CommissionManagerUpdated(address(cm), address(newCm));
+
+        vm.prank(multisig);
+        bridge.setCommissionManager(address(newCm));
+        assertEq(address(bridge.commissionManager()), address(newCm));
+    }
+
+    function test_setCommissionManager_revertsOnZero() public {
+        vm.prank(multisig);
+        vm.expectRevert(IBridge.InvalidCommissionManagerAddress.selector);
+        bridge.setCommissionManager(address(0));
+    }
+
+    function test_setCommissionManager_revertsIfNotOwner() public {
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
+        bridge.setCommissionManager(makeAddr("newCm"));
+    }
+
+    function test_setCommissionManager_routesNewFeesToReplacement() public {
+        CommissionManager newCm = new CommissionManager(address(bridge), recipient);
+        uint256 percent = 400; // 4%
+        newCm.setCommissionRule(
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            address(usdt0),
+            CommissionConfig({
+                stablePercent: percent,
+                baseFee: 0,
+                multiplier: 100,
+                side: CommissionSide.FUNDS_IN,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+
+        vm.prank(multisig);
+        bridge.setCommissionManager(address(newCm));
+
+        uint256 oldPoolBefore = cm.tokenCommissionPool(address(usdt0));
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        uint256 expectedCommission = AMOUNT * percent / 100 / 100;
+        assertEq(newCm.tokenCommissionPool(address(usdt0)), expectedCommission, "replacement receives fees");
+        assertEq(cm.tokenCommissionPool(address(usdt0)), oldPoolBefore, "old manager receives nothing");
+    }
+
+    // ========================================================================
     // Minimum fundsIn amount + zero-amount guards
     //
     // `minFundsInAmount` is a non-zero floor enforced on the inbound path: it
@@ -1051,7 +1108,7 @@ contract BridgeTest is Test {
         // Drop the emitter filter so Forge's expectEmit scans past the token's
         // Transfer event (emitter = usdt0) and matches BridgeFundsIn by topic0.
         // FundsIn (RGB route) carries the rgbOpId; sender = the adapter.
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(mockAdapter, RGB_OP_ID, AMOUNT);
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -1090,7 +1147,7 @@ contract BridgeTest is Test {
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
         bytes32 expectedOpId = _deriveOpId(SOURCE_CHAIN_ID, sourceSender, 0, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(user, RGB_OP_ID, AMOUNT);
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -2943,7 +3000,7 @@ contract BridgeTest is Test {
         assertEq(nativePoolBefore, 0, "pre native pool");
         assertEq(recordBefore, 0, "pre record");
 
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(user, RGB_OP_ID, netAmount);
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -3015,7 +3072,7 @@ contract BridgeTest is Test {
         assertEq(nativePoolBefore, 0, "pre native pool");
         assertEq(recordBefore, 0, "pre record");
 
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(user, RGB_OP_ID, netAmount);
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -3455,7 +3512,7 @@ contract BridgeTest is Test {
         assertEq(cm.nativeCommissionPool(), nativePoolBefore, "native pool unchanged");
         assertEq(rgbModule.fundsInRecords(expectedOpId), recordBefore, "record not created");
 
-        vm.expectEmit(true, true, false, true, address(bridge));
+        vm.expectEmit(true, false, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, AMOUNT);
         vm.expectEmit(true, true, true, true, address(bridge));
         emit BridgeFundsIn(
@@ -3499,7 +3556,7 @@ contract BridgeTest is Test {
         assertEq(bridgeBefore, 0, "pre bridge token");
         assertEq(recordBefore, 0, "pre record");
 
-        vm.expectEmit(true, true, false, true, address(bridge));
+        vm.expectEmit(true, false, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, AMOUNT);
         vm.expectEmit(true, true, true, true, address(bridge));
         emit BridgeFundsIn(
@@ -3556,7 +3613,7 @@ contract BridgeTest is Test {
             SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData()
         );
 
-        vm.expectEmit(true, true, false, true, address(bridge));
+        vm.expectEmit(true, false, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, netAmount);
         vm.expectEmit(true, true, true, true, address(bridge));
         emit BridgeFundsIn(
@@ -3716,7 +3773,7 @@ contract BridgeTest is Test {
             SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, amount, RGB_CHAIN_ID, DST_ADDR, _rgbData()
         );
 
-        vm.expectEmit(true, true, false, true, address(bridge));
+        vm.expectEmit(true, false, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, netAmount);
         vm.expectEmit(true, true, true, true, address(bridge));
         emit BridgeFundsIn(
@@ -3860,10 +3917,30 @@ contract BridgeTest is Test {
 
     /// @dev The RGB route emits FundsIn carrying the rgbOpId and net amount.
     function test_fundsIn_rgbRouteEmitsFundsInWithRgbOpId() public {
-        vm.expectEmit(true, true, false, true, address(bridge));
+        vm.expectEmit(true, false, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, AMOUNT); // no commission → net == gross == AMOUNT
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+    }
+
+    function test_fundsIn_rgbOpIdIsNonIndexedEventData() public {
+        bytes32 fundsInTopic = keccak256("FundsIn(address,uint256,uint256)");
+        vm.recordLogs();
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(bridge) && logs[i].topics[0] == fundsInTopic) {
+                assertEq(logs[i].topics.length, 2, "only signature and sender are indexed");
+                assertEq(address(uint160(uint256(logs[i].topics[1]))), user, "sender topic");
+                (uint256 rgbOpId, uint256 amount) = abi.decode(logs[i].data, (uint256, uint256));
+                assertEq(rgbOpId, RGB_OP_ID, "rgb op id is event data");
+                assertEq(amount, AMOUNT, "amount is event data");
+                return;
+            }
+        }
+        fail("FundsIn event not found");
     }
 
     /// @dev The returned bytes32 is the key under which the module records net.
@@ -4011,7 +4088,7 @@ contract BridgeTest is Test {
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
 
         // BridgeFundsIn must carry gross `amount == AMOUNT` and `netAmount == received`.
-        vm.expectEmit(true, true, false, true);
+        vm.expectEmit(true, false, false, true);
         emit FundsIn(user, RGB_OP_ID, received);
         vm.expectEmit(false, true, true, true);
         emit BridgeFundsIn(

@@ -75,8 +75,8 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Federation proposals.
     mapping(bytes32 => Proposal) private _proposals;
 
-    /// @notice Sequential nonce for the regular federation lane: `_propose`
-    ///         (all typed proposals) and `cancelProposal`.
+    /// @notice Sequential nonce for the regular federation proposal lane
+    ///         (`_propose` and all typed proposal entrypoints).
     uint256 public proposalNonce;
 
     /// @notice Sequential nonce for the emergency lane: `emergencyPause` /
@@ -145,6 +145,10 @@ contract MultisigProxy is IMultisigProxy {
     bytes4 private constant _SEL_FUNDS_OUT = IBridge.fundsOut.selector;
     bytes4 private constant _SEL_REBALANCE_LIQUIDITY = IBridge.rebalanceLiquidity.selector;
 
+    /// @notice CommissionManager rotation is reserved for the typed operation,
+    ///         which keeps the Bridge and proxy targets synchronized atomically.
+    bytes4 private constant _SEL_SET_COMMISSION_MANAGER = IBridge.setCommissionManager.selector;
+
     /// @notice Ownership transfer is reserved for the typed managed-target
     ///         operation and rejected from every generic raw-call lane.
     bytes4 private constant _SEL_TRANSFER_OWNERSHIP = bytes4(keccak256("transferOwnership(address)"));
@@ -212,7 +216,7 @@ contract MultisigProxy is IMultisigProxy {
 
     // Cancel
     bytes32 private constant _CANCEL_PROPOSAL_TYPEHASH =
-        keccak256("CancelProposal(bytes32 proposalId,uint256 nonce,uint256 deadline)");
+        keccak256("CancelProposal(bytes32 proposalId,uint256 deadline)");
 
     // Emergency
     bytes32 private constant _EMERGENCY_PAUSE_TYPEHASH = keccak256("EmergencyPause(uint256 nonce,uint256 deadline)");
@@ -963,23 +967,17 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     /// @inheritdoc IMultisigProxy
-    function cancelProposal(
-        bytes32 proposalId,
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external {
+    function cancelProposal(bytes32 proposalId, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs)
+        external
+    {
         if (block.timestamp > deadline) revert Expired();
-        if (nonce != proposalNonce) revert InvalidNonce();
 
         Proposal storage p = _proposals[proposalId];
         if (p.status != ProposalStatus.Pending) revert NotPending();
 
-        bytes32 digest = _hashTypedData(keccak256(abi.encode(_CANCEL_PROPOSAL_TYPEHASH, proposalId, nonce, deadline)));
+        bytes32 digest = _hashTypedData(keccak256(abi.encode(_CANCEL_PROPOSAL_TYPEHASH, proposalId, deadline)));
         _verifySignatures(digest, fedBitmap, fedSigs, _federationSigners, federationThreshold);
 
-        proposalNonce++;
         p.status = ProposalStatus.Cancelled;
 
         emit ProposalCancelled(proposalId);
@@ -1186,6 +1184,7 @@ contract MultisigProxy is IMultisigProxy {
             address newCm = abi.decode(opData, (address));
             if (newCm == address(0)) revert ZeroCommissionManager();
             address old = commissionManager;
+            IBridge(bridge).setCommissionManager(newCm);
             commissionManager = newCm;
             emit CommissionManagerUpdated(old, newCm);
         } else if (opType == OperationType.AdminExecuteAdapter) {
@@ -1418,6 +1417,7 @@ contract MultisigProxy is IMultisigProxy {
     function _requireAllowedGenericSelector(bytes4 selector) private pure {
         _requireNotCommissionWithdrawSelector(selector);
         _requireNotBridgeReleaseSelector(selector);
+        if (selector == _SEL_SET_COMMISSION_MANAGER) revert ForbiddenCommissionManagerSelector(selector);
         if (selector == _SEL_TRANSFER_OWNERSHIP) revert ForbiddenOwnershipSelector(selector);
     }
 
