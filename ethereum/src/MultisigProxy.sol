@@ -35,6 +35,11 @@ contract MultisigProxy is IMultisigProxy {
     address public bridge;
     address public commissionManager;
 
+    /// @notice Direct emergency operator configured at deployment and rotatable
+    ///         through timelocked federation governance. `address(0)` disables
+    ///         the guardian path after deployment.
+    address public emergencyGuardian;
+
     /// @notice Routing target for `AdminExecuteAdapter` proposals. Settable via
     ///         `UpdateLZAdapter` after the adapter is deployed; `address(0)`
     ///         until then (closes adapter-execute by default).
@@ -183,6 +188,8 @@ contract MultisigProxy is IMultisigProxy {
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_SET_EMERGENCY_GUARDIAN_TYPEHASH =
+        keccak256("ProposeSetEmergencyGuardian(address newGuardian,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_TRANSFER_MANAGED_OWNERSHIP_TYPEHASH =
         keccak256("ProposeTransferManagedOwnership(address target,address newOwner,uint256 nonce,uint256 deadline)");
 
@@ -236,6 +243,7 @@ contract MultisigProxy is IMultisigProxy {
     constructor(
         address bridge_,
         address commissionManager_,
+        address emergencyGuardian_,
         address[] memory enclaveSigners_,
         uint256 enclaveThreshold_,
         uint256 initialEnclaveSourceChain_,
@@ -246,6 +254,7 @@ contract MultisigProxy is IMultisigProxy {
     ) {
         if (bridge_ == address(0)) revert ZeroBridge();
         if (commissionManager_ == address(0)) revert ZeroCommissionManager();
+        if (emergencyGuardian_ == address(0)) revert ZeroEmergencyGuardian();
         if (enclaveSigners_.length == 0) revert NoSigners();
         if (initialEnclaveSourceChain_ == 0) revert UnknownSourceChain(0);
         _requireValidThreshold(enclaveThreshold_, enclaveSigners_.length);
@@ -263,6 +272,7 @@ contract MultisigProxy is IMultisigProxy {
 
         bridge = bridge_;
         commissionManager = commissionManager_;
+        emergencyGuardian = emergencyGuardian_;
         _enclaveSigners[initialEnclaveSourceChain_] = enclaveSigners_;
         enclaveThreshold[initialEnclaveSourceChain_] = enclaveThreshold_;
         _enclaveSourceChains.push(initialEnclaveSourceChain_);
@@ -519,8 +529,7 @@ contract MultisigProxy is IMultisigProxy {
         // Emergency freeze of BOTH inflow and outflow — no timelock, federation
         // signatures only. Also halts the enclave/TEE release path (it routes
         // through Bridge.fundsOut, now gated by whenOutflowNotPaused).
-        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyPauseAll()"));
-        _propagateRevert(ok, ret);
+        _emergencyPauseBridge();
 
         emit EmergencyPaused(nonce, fedBitmap);
     }
@@ -536,10 +545,23 @@ contract MultisigProxy is IMultisigProxy {
         emergencyNonce++;
 
         // Lift the emergency freeze on BOTH inflow and outflow.
-        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyUnpauseAll()"));
-        _propagateRevert(ok, ret);
+        _emergencyUnpauseBridge();
 
         emit EmergencyUnpaused(nonce, fedBitmap);
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function guardianEmergencyPause() external {
+        if (msg.sender != emergencyGuardian) revert UnauthorizedEmergencyGuardian(msg.sender);
+        _emergencyPauseBridge();
+        emit GuardianEmergencyPaused(msg.sender);
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function guardianEmergencyUnpause() external {
+        if (msg.sender != emergencyGuardian) revert UnauthorizedEmergencyGuardian(msg.sender);
+        _emergencyUnpauseBridge();
+        emit GuardianEmergencyUnpaused(msg.sender);
     }
 
     // =========================================================================
@@ -671,6 +693,23 @@ contract MultisigProxy is IMultisigProxy {
 
         return _propose(
             OperationType.SetTimelockDuration, abi.encode(newDuration), nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeSetEmergencyGuardian(
+        address newGuardian,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_SET_EMERGENCY_GUARDIAN_TYPEHASH, newGuardian, nonce, deadline)
+        );
+
+        return _propose(
+            OperationType.SetEmergencyGuardian, abi.encode(newGuardian), nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
 
@@ -1148,6 +1187,11 @@ contract MultisigProxy is IMultisigProxy {
             if (newDuration >= MAX_PROPOSAL_LIFETIME) revert TimelockTooLong();
             timelockDuration = newDuration;
             emit TimelockDurationUpdated(newDuration);
+        } else if (opType == OperationType.SetEmergencyGuardian) {
+            address newGuardian = abi.decode(opData, (address));
+            address oldGuardian = emergencyGuardian;
+            emergencyGuardian = newGuardian;
+            emit EmergencyGuardianUpdated(oldGuardian, newGuardian);
         } else if (opType == OperationType.AdminExecuteCommissionManager) {
             // opData = raw CommissionManager callData. Enforce (again, at the
             // execution boundary) that standard withdrawals use their typed
@@ -1242,6 +1286,20 @@ contract MultisigProxy is IMultisigProxy {
         } else {
             revert UnknownOperationType();
         }
+    }
+
+    /// @dev Shared Bridge dispatch for both federation- and guardian-authorized
+    ///      emergency pauses.
+    function _emergencyPauseBridge() private {
+        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyPauseAll()"));
+        _propagateRevert(ok, ret);
+    }
+
+    /// @dev Shared Bridge dispatch for both federation- and guardian-authorized
+    ///      emergency unpauses.
+    function _emergencyUnpauseBridge() private {
+        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyUnpauseAll()"));
+        _propagateRevert(ok, ret);
     }
 
     // =========================================================================

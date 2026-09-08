@@ -106,7 +106,8 @@ abstract contract BridgeBase is Ownable2Step, Pausable {
     /// @notice Emergency freeze of BOTH inflow and outflow, set atomically.
     /// @dev No-timelock control for incident response. On the production
     ///      `Bridge` it is reached through the federation-signed
-    ///      `MultisigProxy.emergencyPause` (multisig only, no propose step).
+    ///      `MultisigProxy.emergencyPause` (federation signatures, no propose
+    ///      step) or its configured emergency guardian path.
     ///      Each flag is set idempotently, so the call does not revert if one
     ///      side is already frozen (e.g. inflow already paused via the planned
     ///      path). Freezing `fundsOut` also freezes the enclave/TEE release

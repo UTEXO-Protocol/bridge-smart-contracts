@@ -20,7 +20,9 @@ import {IBridge} from "./IBridge.sol";
 ///      All administrative operations go through a two-phase timelock:
 ///        Phase 1 — PROPOSE: federation signs, contract stores hash, emits full data.
 ///        Phase 2 — EXECUTE: after timelockDuration, anyone can call executeProposal().
-///      Exception: emergencyPause / emergencyUnpause are instant (no timelock).
+///      Exception: federation emergencyPause / emergencyUnpause are instant
+///      (no timelock). A separately configured emergency guardian can invoke
+///      equivalent pause/unpause actions directly without signatures.
 ///
 ///      COMMISSION MANAGER
 ///      This proxy is the owner of the CommissionManager. Federation can reach CM via:
@@ -43,6 +45,7 @@ interface IMultisigProxy {
 
     error ZeroBridge();
     error ZeroCommissionManager();
+    error ZeroEmergencyGuardian();
     error NoSigners();
     error InvalidThreshold();
     error TimelockTooLong();
@@ -80,6 +83,7 @@ interface IMultisigProxy {
     error StaleFederationProposal(uint256 proposalVersion, uint256 currentVersion);
     error LZAdapterNotSet();
     error InvalidLZAdapter();
+    error UnauthorizedEmergencyGuardian(address caller);
 
     // =========================================================================
     // Types
@@ -103,7 +107,8 @@ interface IMultisigProxy {
         UnpauseInflow, // 14 — Bridge.unpauseInflow()
         DisableLZAdapter, // 15 — clear the routing target (explicit disable, distinct from UpdateLZAdapter rotation)
         AdminExecuteRouteRegistry, // 16 — generic call into RouteRegistry (acceptOwnership, config, …)
-        TransferManagedOwnership // 17 — typed Ownable2Step transfer for an allowlisted governance target
+        TransferManagedOwnership, // 17 — typed Ownable2Step transfer for an allowlisted governance target
+        SetEmergencyGuardian // 18 — rotate or disable the direct emergency guardian
     }
 
     enum ProposalStatus {
@@ -173,6 +178,8 @@ interface IMultisigProxy {
     // Federation emergency
     event EmergencyPaused(uint256 nonce, uint256 fedBitmap);
     event EmergencyUnpaused(uint256 nonce, uint256 fedBitmap);
+    event GuardianEmergencyPaused(address indexed guardian);
+    event GuardianEmergencyUnpaused(address indexed guardian);
 
     // Emitted when proposals are executed
     event EnclaveSignersUpdated(uint256 indexed sourceChainId, address[] newSigners, uint256 newThreshold);
@@ -186,6 +193,7 @@ interface IMultisigProxy {
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
     event NativeCommissionWithdrawn(uint256 amount, address indexed recipient);
     event TimelockDurationUpdated(uint256 newDuration);
+    event EmergencyGuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
 
     // =========================================================================
     // TEE-authorized
@@ -239,6 +247,14 @@ interface IMultisigProxy {
 
     /// @notice Emergency unpause the Bridge. Instant, no timelock.
     function emergencyUnpause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
+
+    /// @notice Emergency pause the Bridge directly as the configured guardian.
+    /// @dev Requires `msg.sender == emergencyGuardian`; no signatures, nonce, or deadline.
+    function guardianEmergencyPause() external;
+
+    /// @notice Emergency unpause the Bridge directly as the configured guardian.
+    /// @dev Requires `msg.sender == emergencyGuardian`; no signatures, nonce, or deadline.
+    function guardianEmergencyUnpause() external;
 
     // =========================================================================
     // Federation propose (Phase 1 — timelock)
@@ -297,6 +313,17 @@ interface IMultisigProxy {
     /// @dev opData = abi.encode(uint256 newDuration)
     function proposeSetTimelockDuration(
         uint256 newDuration,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    /// @notice Propose rotating or disabling the direct emergency guardian.
+    /// @dev `address(0)` is explicitly allowed and disables the guardian path.
+    ///      opData = abi.encode(address newGuardian)
+    function proposeSetEmergencyGuardian(
+        address newGuardian,
         uint256 nonce,
         uint256 deadline,
         uint256 fedBitmap,
@@ -496,6 +523,7 @@ interface IMultisigProxy {
     function bridge() external view returns (address);
     function commissionManager() external view returns (address);
     function lzAdapter() external view returns (address);
+    function emergencyGuardian() external view returns (address);
     function getEnclaveSigners(uint256 sourceChainId) external view returns (address[] memory);
     function getEnclaveSourceChains() external view returns (uint256[] memory);
     function enclaveThreshold(uint256 sourceChainId) external view returns (uint256);
