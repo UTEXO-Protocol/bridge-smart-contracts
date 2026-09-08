@@ -219,7 +219,18 @@ contract IntegrationTest is Test {
         fed[1] = fedA2;
         fed[2] = fedA3;
 
-        proxy = new MultisigProxy(address(bridge), address(cm), enc, 2, RGB_CHAIN_ID, fed, 2, TIMELOCK, MIN_TIMELOCK);
+        proxy = new MultisigProxy(
+            address(bridge),
+            address(cm),
+            makeAddr("emergencyGuardian"),
+            enc,
+            2,
+            RGB_CHAIN_ID,
+            fed,
+            2,
+            TIMELOCK,
+            MIN_TIMELOCK
+        );
 
         cm.transferOwnership(address(proxy));
         bridge.transferOwnership(address(proxy));
