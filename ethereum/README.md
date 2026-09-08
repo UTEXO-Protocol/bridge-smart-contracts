@@ -9,7 +9,7 @@ Solidity smart contracts for the Ethereum/Arbitrum side of the UTEXO bridge. Bui
 Abstract base contract shared by `BaseBridge` and `Bridge`. Provides:
 
 - Single accepted ERC-20 token (immutable, set at deployment).
-- `FundsIn` event (minimal: `sender, operationId, amount`).
+- Shared pause, ownership, and token-custody primitives used by both concrete bridges.
 - Owner-only `pause` / `unpause`.
 - Permanently blocked `renounceOwnership` (reverts with `RenounceOwnershipBlocked`).
 - View helpers: `getContractBalance()`, `getChainId()`.
@@ -18,7 +18,7 @@ Abstract base contract shared by `BaseBridge` and `Bridge`. Provides:
 
 Minimal bridge for integrators. Inherits `BridgeBase`.
 
-- `fundsIn(amount, operationId)` — open, no signature required. Locks tokens and emits `FundsIn`.
+- `fundsIn(amount, operationId)` — open, no signature required. Locks tokens and emits `FundsIn`; only `sender` is indexed, while `operationId` and the range-checked `uint64 amount` are event data.
 - `fundsOut(recipient, amount, operationId, sourceAddress)` — `onlyOwner`. Releases tokens and emits `FundsOut`.
 
 No TEE verification, no destination chain field, **no commission integration**, **no route plugins**. Suitable for integrations where the owner is a standard multisig or EOA.
@@ -30,7 +30,7 @@ Production bridge for UTEXO. Inherits `BridgeBase`, implements `IBridge`. Route-
 Constructor takes four addresses — the accepted ERC-20 token (immutable), the `RouteRegistry` (mutable — federation can rotate via `UpdateRouteRegistry`), the initial `CommissionManager` (mutable — federation can rotate it via `UpdateCommissionManager`), and the initial LayerZero adapter (mutable; `address(0)` is allowed) — plus non-zero `minFundsInAmount` and `minFundsOutAmount` values in token smallest units. Federation may retune either minimum through the timelocked owner path. The bridge's own chain identifier is `block.chainid` — chain IDs are `uint256` throughout the stack (real EVM chain IDs for EVM legs; backend-assigned IDs in a reserved namespace above `2^32` for non-EVM endpoints, e.g. RGB = `1_000_001`).
 
 - `fundsIn(amount, destinationChainId, destinationAddress, settlementData)` — open, **`payable`**. Direct entry point for EVM users; the source chain is implicit (`block.chainid`). Requires `amount >= minFundsInAmount`. Quotes commission from `CommissionManager` using route key `(block.chainid, destinationChainId, TOKEN)`; if the route uses NATIVE currency, `msg.value` must be between the fresh quote and 5% above it. Exactly the fresh quote is collected and any surplus is refunded to the caller. Pulls the full `amount` in tokens from the sender, forwards any token/native commission to `CommissionManager`, and dispatches to the route's `SettlementModule.onFundsIn(...)` via `RouteRegistry`. The `settlementData` blob is opaque to the bridge — its layout is dictated by the destination route's settlement module (empty for routes that don't consume extra data on inbound, e.g. RGB). Emits two events:
-  - `FundsIn` — RGB-only compatibility event using `netAmount`; `sender` is indexed while `rgbOpId` is carried in event data.
+  - `FundsIn` — RGB-only compatibility event using `netAmount`; `sender` is indexed while `rgbOpId` and the `uint64`-bounded amount are carried in event data. Deposits whose RGB amount exceeds `type(uint64).max` revert instead of truncating.
   - `BridgeFundsIn` (from `IBridge`) — full, consumed by the UTEXO backend.
 - `fundsIn(amount, sourceChainId, sourceSender, destinationChainId, destinationAddress, settlementData)` — `onlyLZAdapter` overload used by `LZAdapter` after a cross-chain `OFT.send` compose lands. The adapter has already authenticated the originating sender on the source chain via LayerZero's `OFTComposeMsgCodec.composeFrom`, so it forwards the non-spoofable `sourceChainId` and `sourceSender` to the bridge. For NATIVE commission routes, the source-agreed `msg.value` must remain within the immutable ±5% band around the fresh destination quote. Cross-domain refunds are deliberately unsupported, so the complete accepted value is collected as commission.
 - `setLZAdapter(adapter)` — `onlyOwner`. Rotates the address authorized to call the adapter overload. Set to `address(0)` to close the adapter path entirely.
