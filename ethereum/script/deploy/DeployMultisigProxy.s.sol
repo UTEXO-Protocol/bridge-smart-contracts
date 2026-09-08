@@ -12,6 +12,7 @@ import {MultisigProxy} from "../../src/MultisigProxy.sol";
 ///   PRIVATE_KEY           — deployer private key
 ///   BRIDGE_ADDRESS        — existing Bridge deployment
 ///   COMMISSION_MANAGER    — existing CommissionManager deployment
+///   EMERGENCY_GUARDIAN     — non-zero direct emergency pause/unpause operator
 ///   ENCLAVE_SIGNERS       — comma-separated TEE signer addresses
 ///   ENCLAVE_THRESHOLD     — M for enclave M-of-N
 ///   INITIAL_ENCLAVE_SOURCE_CHAIN_ID — source chain id the initial enclave set authorises (non-zero)
@@ -28,6 +29,7 @@ contract DeployMultisigProxy is Script {
 
         address bridgeAddr = vm.envAddress("BRIDGE_ADDRESS");
         address commissionManager = vm.envAddress("COMMISSION_MANAGER");
+        address emergencyGuardian = vm.envAddress("EMERGENCY_GUARDIAN");
         address[] memory enc = vm.envAddress("ENCLAVE_SIGNERS", ",");
         uint256 encThr = vm.envUint("ENCLAVE_THRESHOLD");
         uint256 initialSrcChain = vm.envUint("INITIAL_ENCLAVE_SOURCE_CHAIN_ID");
@@ -38,13 +40,23 @@ contract DeployMultisigProxy is Script {
 
         vm.startBroadcast(pk);
         proxy = new MultisigProxy(
-            bridgeAddr, commissionManager, enc, encThr, initialSrcChain, fed, fedThr, timelock, minTimelock
+            bridgeAddr,
+            commissionManager,
+            emergencyGuardian,
+            enc,
+            encThr,
+            initialSrcChain,
+            fed,
+            fedThr,
+            timelock,
+            minTimelock
         );
         vm.stopBroadcast();
 
         console2.log("MultisigProxy deployed at:", address(proxy));
         console2.log("Bridge:                   ", proxy.bridge());
         console2.log("CommissionManager:        ", proxy.commissionManager());
+        console2.log("Emergency guardian:       ", proxy.emergencyGuardian());
         console2.log("Initial enclave srcChain: ", initialSrcChain);
         console2.log("Enclave threshold:        ", proxy.enclaveThreshold(initialSrcChain));
         console2.log("Federation threshold:     ", proxy.federationThreshold());

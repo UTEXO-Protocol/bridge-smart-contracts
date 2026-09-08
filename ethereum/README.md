@@ -105,6 +105,7 @@ Owner of `Bridge`, `RouteRegistry`, **and** `CommissionManager`. Two-level ECDSA
 
 - **Enclave signers (TEE)** — authorize only the purpose-built `fundsOutCall`, `lzFundsOutCall`, and `rebalanceCall` operations (M-of-N, bitmap encoding). Signer sets and replay-protection nonces are isolated per source chain; there is no generic enclave call dispatch.
 - **Federation signers (governance)** — two-phase timelock for admin operations. Instant `emergencyPause` / `emergencyUnpause` bypass the timelock.
+- **Emergency guardian** — a required non-zero constructor address that can call `guardianEmergencyPause` and `guardianEmergencyUnpause` directly, without signatures or nonce consumption. Federation may rotate it, or set it to `address(0)` to disable this direct path, through a timelocked `SetEmergencyGuardian` proposal.
 
 Federation-controlled operations (`OperationType`):
 
@@ -127,6 +128,7 @@ Federation-controlled operations (`OperationType`):
 | `TransferManagedOwnership` | managed target | Typed `transferOwnership(newOwner)` for the current Bridge, CommissionManager, LZAdapter, or RouteRegistry. |
 | `PauseInflow` / `UnpauseInflow` | Bridge | Timelocked planned inflow-only pause controls. |
 | `DisableLZAdapter` | self | Explicitly clear the adapter governance target. |
+| `SetEmergencyGuardian` | self | Rotate the direct emergency guardian, or set it to `address(0)` to disable guardian access. |
 
 Note: `MultisigProxy.lzAdapter` and `Bridge.lzAdapter` are **separate** fields with different roles. `Bridge.lzAdapter` gates the adapter `fundsIn` overload (data path); `MultisigProxy.lzAdapter` is the target of `AdminExecuteAdapter` proposals (governance path). Both default to `address(0)` and are wired in by federation after the adapter is deployed.
 
@@ -164,7 +166,9 @@ Administrative operations (signer rotation, configuration changes, commission wi
 
 Raw generic calls cannot invoke `transferOwnership(address)`. Ownership migration uses the typed `TransferManagedOwnership` operation, which binds the exact allowlisted target and new owner into the federation's EIP-712 signatures and revalidates the target at execution. `acceptOwnership()` remains available through the relevant generic lane for two-step deployment and migration handoffs.
 
-**Emergency pause/unpause** bypass the timelock — federation can stop or resume `Bridge` instantly.
+**Emergency pause/unpause** bypass the timelock — federation can stop or resume `Bridge` instantly with M-of-N signatures. The configured guardian can perform the equivalent action directly, without signatures, through `guardianEmergencyPause` / `guardianEmergencyUnpause`; these calls do not advance `emergencyNonce` or `proposalNonce`.
+
+The guardian is deliberately trusted with both directions of this control. `guardianEmergencyUnpause` calls `Bridge.emergencyUnpauseAll()`, so it resumes both inflow and outflow and can also clear an inflow-only pause previously established through timelocked governance. Compromise of the guardian therefore permits resuming bridge traffic during an incident; use a tightly controlled EOA or contract account and disable it with `SetEmergencyGuardian(address(0))` when direct access is not required.
 
 ### EIP-712 signatures
 
@@ -217,6 +221,7 @@ set -a && source .env.interact && set +a   # before interact scripts
 - `RGB_SETTLEMENT_MODULE_ADDRESS`, `RGB_MINT_BURN_CHAIN_ID`, `RGB_POOL_CHAIN_ID` — standalone `DeployRgbPoolSettlementModule` inputs (`96` and `97` in production)
 - `COMMISSION_MANAGER` — `CommissionManager` address (step-by-step deploys only)
 - `COMMISSION_RECIPIENT` — immutable destination for every CM withdrawal; choose a long-lived treasury address
+- `EMERGENCY_GUARDIAN` — required non-zero initial guardian address with direct emergency pause/unpause authority
 - `MIN_FUNDS_IN_AMOUNT` / `MIN_FUNDS_OUT_AMOUNT` — required non-zero operation floors in token smallest units; configure the outbound value consistently in source-side tooling and TEE policy
 - `ETH_USD_FEED` / `ETH_USD_HEARTBEAT` — Chainlink ETH/USD aggregator + staleness window (required if any route uses NATIVE commission)
 - `ENCLAVE_SIGNERS` / `FEDERATION_SIGNERS` — comma-separated addresses, ordered by bitmap bit index
@@ -233,6 +238,7 @@ set -a && source .env.interact && set +a   # before interact scripts
 - `BLOCK_HEIGHT`, `COMMITMENT_HASH` — RGB-route `proof` inputs (packed as `abi.encode(blockHeight, commitmentHash)` by the script)
 - `FUNDS_IN_IDS` — RGB-route `settlementData` inputs (packed as `abi.encode(uint256[])` by the script)
 - `FINALITY_VERIFIER` / `SETTLEMENT_MODULE` / `ROUTE_ENABLED` / `DEADLINE_OFFSET` — `MultisigProposeSetRoute` inputs
+- `NEW_EMERGENCY_GUARDIAN` — replacement guardian for `MultisigProposeSetEmergencyGuardian`; use `0x0000000000000000000000000000000000000000` to disable
 - `ENCLAVE_PKS` / `FED_PKS` — comma-separated private keys for local TEE/federation simulation
 - `ENCLAVE_BITMAP` / `FED_BITMAP` — participating-signer bitmaps
 
@@ -298,6 +304,9 @@ Scripts in `script/interact/` let you exercise contracts manually before the bac
 | `MultisigProposeSetRoute.s.sol` | Signs and submits a `proposeSetRoute(...)` federation proposal on `MultisigProxy`. Intentionally does **not** call `executeProposal` — prints the `proposalId` + the `opData` blob for the operator to run `cast send` after the timelock. First federation step after `DeployAll`. |
 | `EmergencyPause.s.sol` | Signs and submits `MultisigProxy.emergencyPause()` with `FED_PKS` |
 | `EmergencyUnpause.s.sol` | Signs and submits `MultisigProxy.emergencyUnpause()` with `FED_PKS` |
+| `GuardianEmergencyPause.s.sol` | Calls `guardianEmergencyPause()` directly from the configured guardian account |
+| `GuardianEmergencyUnpause.s.sol` | Calls `guardianEmergencyUnpause()` directly from the configured guardian account |
+| `MultisigProposeSetEmergencyGuardian.s.sol` | Signs and submits a timelocked guardian rotation/disable proposal; prints the `proposalId` and execution `opData` |
 
 Example:
 
@@ -319,12 +328,13 @@ forge script script/interact/BridgeFundsIn.s.sol --rpc-url $RPC_URL --broadcast
 8. Verify LZ adapter wiring: `Bridge.lzAdapter()` and `MultisigProxy.lzAdapter()` both return `address(0)` immediately after deploy. Once the adapter is live, federation must run two timelocked proposals:
    - `proposeAdminExecute` on the proxy with calldata `Bridge.setLZAdapter(adapter)` — opens the adapter `fundsIn` data path.
    - `proposeUpdateLZAdapter(adapter)` — opens the `AdminExecuteAdapter` governance path on the proxy.
-9. Verify enclave signers: `MultisigProxy.getEnclaveSigners()` returns the TEE addresses.
-10. Verify federation signers: `MultisigProxy.getFederationSigners()` returns the governance addresses.
-11. Verify the typed TEE path: `MultisigProxy.getEnclaveSigners(sourceChainId)`, `enclaveThreshold(sourceChainId)`, and `teeNonce(sourceChainId)` match the intended source-chain signer configuration.
-12. **Register routes.** For each supported `(sourceChainId, destChainId)` pair, federation runs `MultisigProposeSetRoute` and — after the timelock — `executeProposal` with the printed `opData`. Verify with `RouteRegistry.routes(src, dst)` that the entry is `enabled` and the plugin addresses match.
-13. Configure and verify each route's proportional and flat commission; ensure the combined fee at the applicable Bridge floor leaves a positive net amount.
-14. Test `fundsIn` with an amount at or above `minFundsInAmount` on a registered route to confirm token transfer, commission forwarding, and event emission.
+9. Verify emergency guardian: `MultisigProxy.emergencyGuardian()` returns the intended non-zero deployment address.
+10. Verify enclave signers: `MultisigProxy.getEnclaveSigners()` returns the TEE addresses.
+11. Verify federation signers: `MultisigProxy.getFederationSigners()` returns the governance addresses.
+12. Verify the typed TEE path: `MultisigProxy.getEnclaveSigners(sourceChainId)`, `enclaveThreshold(sourceChainId)`, and `teeNonce(sourceChainId)` match the intended source-chain signer configuration.
+13. **Register routes.** For each supported `(sourceChainId, destChainId)` pair, federation runs `MultisigProposeSetRoute` and — after the timelock — `executeProposal` with the printed `opData`. Verify with `RouteRegistry.routes(src, dst)` that the entry is `enabled` and the plugin addresses match.
+14. Configure and verify each route's proportional and flat commission; ensure the combined fee at the applicable Bridge floor leaves a positive net amount.
+15. Test `fundsIn` with an amount at or above `minFundsInAmount` on a registered route to confirm token transfer, commission forwarding, and event emission.
 
 ## Project structure
 
@@ -361,7 +371,9 @@ script/
                                  DeployCommissionManager,
                                  DeployMultisigProxy
   interact/                    — BridgeFundsIn, MultisigExecuteFundsOut,
-                                 MultisigProposeSetRoute, EmergencyPause, EmergencyUnpause
+                                 MultisigProposeSetRoute, EmergencyPause, EmergencyUnpause,
+                                 GuardianEmergencyPause, GuardianEmergencyUnpause,
+                                 MultisigProposeSetEmergencyGuardian
 
 test/
   Bridge.t.sol                 — Bridge tests (routing through RouteRegistry, burnId, commission)

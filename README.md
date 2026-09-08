@@ -48,7 +48,7 @@ The EVM-side contracts in this repository are deployed on Arbitrum. Cross-chain 
 
 - **`CommissionManager`** — a dedicated fee-accounting contract that holds the protocol's commissions strictly separated from bridge liquidity. The `Bridge` consults it on every transfer to determine the per-route commission (token vs. native; charged on `FundsIn` vs. `FundsOut`) and forwards the fee to it. Withdrawal is gated by federation governance through `MultisigProxy`. Owned by `MultisigProxy`.
 
-- **`MultisigProxy`** — the authorization layer. Owns `Bridge`, `RouteRegistry`, and `CommissionManager`. Two independent signer sets and two execution paths: TEE-authorized routine operations (`FundsOut`) execute immediately on M-of-N enclave signatures; federation-authorized administrative operations (signer rotation, configuration changes, commission withdrawal, route registration, contract address updates) go through a two-phase propose → timelock → execute flow. Emergency pause/unpause is the only federation operation that is instant.
+- **`MultisigProxy`** — the authorization layer. Owns `Bridge`, `RouteRegistry`, and `CommissionManager`. It has two independent signer sets plus a direct emergency path: TEE-authorized routine operations (`FundsOut`) execute immediately on M-of-N enclave signatures; federation-authorized administrative operations (signer rotation, configuration changes, commission withdrawal, route registration, contract address updates) go through a two-phase propose → timelock → execute flow. Federation emergency pause/unpause is instant, and a separately configured emergency guardian may perform the same actions directly without multisig signatures.
 
 ### Signing model
 
@@ -59,6 +59,8 @@ There are two independent signer sets:
 **Enclave signers (TEE)** — authorize routine value-transfer operations. For `FundsOut`, M-of-N signatures are required. In turn, `FundsIn` does not perform any TEE signature verification, so anyone can call it.
 
 **Federation signers (governance)** — authorize administrative operations: signer rotation, configuration changes, commission withdrawal, and updates to the addresses of `Bridge` / `CommissionManager`. All federation operations go through a two-phase timelock (propose → wait → execute), except emergency pause/unpause which are instant.
+
+**Emergency guardian** — a single address initialized when `MultisigProxy` is deployed. It may immediately pause or unpause both bridge directions without signatures. Federation can rotate it or set it to `address(0)` through timelocked governance.
 
 Private keys are held inside Enclaves and cannot be extracted. Key persistence is handled through attested enclave-to-enclave cloning.
 

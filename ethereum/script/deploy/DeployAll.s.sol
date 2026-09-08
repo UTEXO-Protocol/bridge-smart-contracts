@@ -59,6 +59,7 @@ import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.so
 ///   PRIVATE_KEY, USDT0_ADDRESS, BTC_RELAY_ADDRESS,
 ///   ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD, INITIAL_ENCLAVE_SOURCE_CHAIN_ID,
 ///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD,
+///   EMERGENCY_GUARDIAN,
 ///   COMMISSION_RECIPIENT, TIMELOCK_DURATION, MIN_TIMELOCK,
 ///   MIN_FUNDS_IN_AMOUNT, MIN_FUNDS_OUT_AMOUNT,
 ///   INITIAL_CHAIN_BURST_BPS, INITIAL_CHAIN_REFILL_BPS_PER_WINDOW,
@@ -115,6 +116,7 @@ contract DeployAll is Script {
         uint256 initialSrcChain = vm.envUint("INITIAL_ENCLAVE_SOURCE_CHAIN_ID");
         address[] memory fed = vm.envAddress("FEDERATION_SIGNERS", ",");
         uint256 fedThr = vm.envUint("FEDERATION_THRESHOLD");
+        address emergencyGuardian = vm.envAddress("EMERGENCY_GUARDIAN");
         address commission = vm.envAddress("COMMISSION_RECIPIENT");
         uint256 timelock = vm.envUint("TIMELOCK_DURATION");
         uint256 minTimelock = vm.envUint("MIN_TIMELOCK");
@@ -195,7 +197,16 @@ contract DeployAll is Script {
 
         // ---- 6. MultisigProxy (nonce n+9) --------------------------------
         proxy = new MultisigProxy(
-            address(bridge), address(cm), enc, encThr, initialSrcChain, fed, fedThr, timelock, minTimelock
+            address(bridge),
+            address(cm),
+            emergencyGuardian,
+            enc,
+            encThr,
+            initialSrcChain,
+            fed,
+            fedThr,
+            timelock,
+            minTimelock
         );
 
         // ---- 7. Install initial outflow policies before ownership transfer -
@@ -245,6 +256,7 @@ contract DeployAll is Script {
         console2.log("  backing record chain id:      ", poolModule.backingRecordChainId());
         console2.log("NullSettlementModule at:        ", address(nullModule));
         console2.log("MultisigProxy deployed at:      ", address(proxy));
+        console2.log("Emergency guardian:             ", proxy.emergencyGuardian());
         console2.log("Initial chain bucket burst bps: ", initialChainBurstBps);
         console2.log("Initial chain bucket refill bps:", initialChainRefillBps);
         console2.log("Global bucket burst bps:        ", globalBurstBps);
@@ -287,6 +299,7 @@ contract DeployAll is Script {
         );
         require(bridge.routeRegistry() == address(routeRegistry), "Bridge.routeRegistry mismatch");
         require(cm.bridgeAddress() == address(bridge), "CM.bridgeAddress mismatch");
+        require(proxy.emergencyGuardian() == emergencyGuardian, "MultisigProxy guardian mismatch");
         (uint128 chainTokens,, bool chainEnabled, uint128 chainCapacity, uint128 chainRate) =
             bridge.chainBuckets(initialSrcChain);
         require(chainEnabled && chainTokens == chainCapacity && chainRate != 0, "initial chain bucket not configured");
