@@ -106,8 +106,8 @@ interface IBridge {
     /// @param sender  EVM caller Bridge saw (user, or the LZ adapter).
     /// @param rgbOpId RGB operation id, decoded by the route module from its
     ///                `settlementData`. Not an on-chain dedup key.
-    /// @param amount  Net amount bridged (post-commission).
-    event FundsIn(address indexed sender, uint256 rgbOpId, uint256 amount);
+    /// @param amount  Net amount bridged (post-commission), bounded to the RGB `u64` range.
+    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
 
     /// @param operationId        Canonical bridge-side operation id, derived
     ///                           on-chain by Bridge and unpredictable by third

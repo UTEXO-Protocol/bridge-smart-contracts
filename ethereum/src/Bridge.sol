@@ -720,7 +720,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         // RGB-only correlation event, same contract as `_fundsIn`: the RGB
         // listener authorises a mint against `FundsIn` and needs no awareness
         // of the rebalance mechanics.
-        if (rgbOpId != 0) emit FundsIn(_msgSender(), rgbOpId, params.amount);
+        if (rgbOpId != 0) _emitRgbFundsIn(_msgSender(), rgbOpId, params.amount);
         emit BridgeRebalance(
             operationId,
             params.burnId,
@@ -740,6 +740,13 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     // =========================================================================
     // Internal
     // =========================================================================
+
+    /// @dev Emit the RGB compatibility event without silently truncating an
+    ///      EVM-native `uint256` token amount to RGB's `u64` amount range.
+    function _emitRgbFundsIn(address sender, uint256 rgbOpId, uint256 amount) private {
+        if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
+        emit FundsIn(sender, rgbOpId, uint64(amount));
+    }
 
     function _validateFundsOutParams(FundsOutParams calldata params) private view {
         if (params.amount == 0) revert ZeroAmount();
@@ -1020,7 +1027,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
 
         // RGB-only correlation event: emitted only when the route module
         // returned a non-zero external id (the RGB OpId). Other routes skip it.
-        if (rgbOpId != 0) emit FundsIn(ctx.sender, rgbOpId, ctx.netAmount);
+        if (rgbOpId != 0) _emitRgbFundsIn(ctx.sender, rgbOpId, ctx.netAmount);
         emit BridgeFundsIn(
             ctx.operationId,
             ctx.sourceSender,

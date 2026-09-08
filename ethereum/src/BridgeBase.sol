@@ -57,6 +57,7 @@ abstract contract BridgeBase is Ownable2Step, Pausable {
     error InvalidTokenAddress();
     error InvalidRecipientAddress();
     error AmountExceedBridgePool();
+    error AmountExceedsUint64(uint256 amount);
     error RenounceOwnershipBlocked();
 
     /// @notice Thrown by `whenOutflowNotPaused` when the outflow path is frozen.
