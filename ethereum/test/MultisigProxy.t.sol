@@ -190,7 +190,7 @@ contract MultisigProxyTest is Test {
     uint256 constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
     string constant DST_ADDR = "rgb:asset/utxo1abc";
     string constant SRC_ADDR = "rgb:sender/utxo1src";
-    uint256 constant AMOUNT = 100e18;
+    uint256 constant AMOUNT = 1e18;
 
     /// @dev Balanced policy that consumes the full configurable budget:
     ///      10% instant burst plus 10% refill per window.
@@ -2026,7 +2026,7 @@ contract MultisigProxyTest is Test {
             })
         );
 
-        uint256 depositAmount = 100e18;
+        uint256 depositAmount = 1e18;
         vm.prank(user);
         bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
 

@@ -81,7 +81,7 @@ contract IntegrationTest is Test {
     uint256 constant SOURCE_CHAIN_ID = 31337; // foundry default block.chainid
     uint256 constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
 
-    uint256 constant USER_DEPOSIT = 100 ether; // 100 tokens gross
+    uint256 constant USER_DEPOSIT = 1 ether; // one 18-decimal mock token gross
     // FUNDS_IN route: 2% token commission (stablePercent = 200, multiplier = 100 → 200/100/100 = 2%).
     uint256 constant FUNDS_IN_PERCENT = 200;
     uint8 constant FUNDS_IN_MULT = 100;

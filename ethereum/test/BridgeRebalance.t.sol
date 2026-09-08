@@ -37,7 +37,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///                    (burn-backed: BtcRelay proof + record check; credit leg
 ///                     writes nothing and emits no FundsIn)
 contract BridgeRebalanceTest is Test {
-    event FundsIn(address indexed sender, uint256 rgbOpId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
     event BridgeRebalance(
         bytes32 indexed operationId,
         uint256 indexed burnId,
@@ -75,7 +75,7 @@ contract BridgeRebalanceTest is Test {
     string constant ARCH_DST_ADDR = "arch:bridge-wallet";
     string constant RGB_SRC_ADDR = "rgb:burner/utxo1burn";
     string constant ARCH_SRC_ADDR = "arch:burner";
-    uint256 constant AMOUNT = 100e18;
+    uint256 constant AMOUNT = 1e18;
 
     /// @dev Balanced policy that consumes the full configurable budget:
     ///      10% instant burst plus 10% refill per window.
@@ -455,9 +455,7 @@ contract BridgeRebalanceTest is Test {
 
         assertEq(rgbModule.fundsInRecords(operationId), 0, "pool deposit creates no mint/burn record");
         assertEq(
-            _countBridgeLogs(logs, keccak256("FundsIn(address,uint256,uint256)")),
-            0,
-            "pool deposit emits no RGB FundsIn"
+            _countBridgeLogs(logs, keccak256("FundsIn(address,uint256,uint64)")), 0, "pool deposit emits no RGB FundsIn"
         );
         assertEq(
             _countBridgeLogs(
@@ -519,7 +517,7 @@ contract BridgeRebalanceTest is Test {
 
         assertEq(rgbModule.fundsInRecords(rebalanceOperationId), 0, "pool credit writes no canonical record");
         assertEq(
-            _countBridgeLogs(logs, keccak256("FundsIn(address,uint256,uint256)")), 0, "pool credit emits no RGB FundsIn"
+            _countBridgeLogs(logs, keccak256("FundsIn(address,uint256,uint64)")), 0, "pool credit emits no RGB FundsIn"
         );
     }
 
@@ -533,7 +531,7 @@ contract BridgeRebalanceTest is Test {
         bytes32 rebalanceOperationId = _deriveRebalanceOpId(p);
 
         vm.expectEmit(true, false, false, true);
-        emit FundsIn(multisig, rgbOpId, AMOUNT);
+        emit FundsIn(multisig, rgbOpId, uint64(AMOUNT));
         _rebalance(p);
 
         assertEq(rgbModule.fundsInRecords(rebalanceOperationId), AMOUNT, "mint/burn credit creates record");
@@ -555,7 +553,7 @@ contract BridgeRebalanceTest is Test {
         // Credit-RGB rebalance emits the standard FundsIn (the RGB side needs
         // no rebalance awareness) plus the canonical BridgeRebalance.
         vm.expectEmit(true, false, false, true);
-        emit FundsIn(multisig, mintOpId, AMOUNT);
+        emit FundsIn(multisig, mintOpId, uint64(AMOUNT));
         vm.expectEmit(true, true, false, true);
         emit BridgeRebalance(expectedOpId, p.burnId, ARCH_CHAIN_ID, RGB_CHAIN_ID, AMOUNT, ARCH_SRC_ADDR, RGB_DST_ADDR);
 
@@ -565,6 +563,30 @@ contract BridgeRebalanceTest is Test {
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), dstBefore + AMOUNT, "destination bucket credited");
         assertEq(rgbModule.fundsInRecords(expectedOpId), AMOUNT, "mint record written for the credit leg");
         assertTrue(bridge.consumedBurnIds(p.burnId), "replay key consumed");
+    }
+
+    function test_rebalance_rgbCreditRejectsAmountAboveUint64WithoutChangingAccounting() public {
+        uint256 amount = uint256(type(uint64).max) + 1;
+        uint256 additionalLiquidity = amount * 10;
+
+        // The non-RGB deposit leg may hold a uint256 amount. It provides enough
+        // source liquidity and bucket capacity to reach the RGB event boundary.
+        usdt0.mint(user, additionalLiquidity);
+        vm.prank(user);
+        bridge.fundsIn(additionalLiquidity, ARCH_CHAIN_ID, ARCH_DST_ADDR, "");
+
+        IBridge.RebalanceParams memory p = _archToRgbParams(amount, RGB_OP_ID + 9_000);
+        bytes32 operationId = _deriveRebalanceOpId(p);
+        uint256 sourceBefore = bridge.lockedLiquidity(ARCH_CHAIN_ID);
+        uint256 destinationBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+
+        vm.expectRevert(abi.encodeWithSelector(BridgeBase.AmountExceedsUint64.selector, amount));
+        _rebalance(p);
+
+        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), sourceBefore, "source debit rolled back");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), destinationBefore, "destination credit rolled back");
+        assertEq(rgbModule.fundsInRecords(operationId), 0, "RGB settlement write rolled back");
+        assertFalse(bridge.consumedBurnIds(p.burnId), "burn id remains unused");
     }
 
     function test_rebalance_rgbToArch_burnBacked_noFundsInEvent() public {
@@ -582,7 +604,7 @@ contract BridgeRebalanceTest is Test {
         // The credit leg wrote nothing and returned 0, so no RGB-only FundsIn
         // event may appear — only BridgeRebalance.
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        bytes32 fundsInTopic = keccak256("FundsIn(address,uint256,uint256)");
+        bytes32 fundsInTopic = keccak256("FundsIn(address,uint256,uint64)");
         for (uint256 i = 0; i < logs.length; i++) {
             assertTrue(logs[i].topics[0] != fundsInTopic, "no FundsIn event on a non-RGB credit leg");
         }
@@ -610,7 +632,7 @@ contract BridgeRebalanceTest is Test {
         // credit leg writes a NEW pool record + emits FundsIn — all on the one
         // shared module, no composite module or privileged writer.
         vm.expectEmit(true, false, false, true);
-        emit FundsIn(multisig, poolOpId, AMOUNT);
+        emit FundsIn(multisig, poolOpId, uint64(AMOUNT));
         _rebalance(p);
 
         assertEq(bridge.lockedLiquidity(RGB_MINTBURN_CHAIN_ID), srcBefore - AMOUNT, "mint/burn bucket debited");
@@ -631,7 +653,7 @@ contract BridgeRebalanceTest is Test {
         // and empty debit settlement. The credit leg writes the mint/burn record
         // (tagged with the mint/burn network) and emits the inflate FundsIn.
         vm.expectEmit(true, false, false, true);
-        emit FundsIn(multisig, inflateOpId, AMOUNT);
+        emit FundsIn(multisig, inflateOpId, uint64(AMOUNT));
         _rebalance(p);
 
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), srcBefore - AMOUNT, "pool bucket debited");
