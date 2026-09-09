@@ -6,7 +6,7 @@ Solidity smart contracts for the Ethereum/Arbitrum side of the UTEXO bridge. Bui
 
 ### BridgeBase (`src/BridgeBase.sol`)
 
-Abstract base contract shared by `BaseBridge` and `Bridge`. Provides:
+Abstract base contract shared by `MinimalBridge` and `Bridge`. Provides:
 
 - Single accepted ERC-20 token (immutable, set at deployment).
 - Shared pause, ownership, and token-custody primitives used by both concrete bridges.
@@ -14,7 +14,7 @@ Abstract base contract shared by `BaseBridge` and `Bridge`. Provides:
 - Permanently blocked `renounceOwnership` (reverts with `RenounceOwnershipBlocked`).
 - View helpers: `getContractBalance()`, `getChainId()`.
 
-### BaseBridge (`src/BaseBridge.sol`)
+### MinimalBridge (`src/MinimalBridge.sol`)
 
 Minimal bridge for integrators. Inherits `BridgeBase`.
 
@@ -231,7 +231,7 @@ set -a && source .env.interact && set +a   # before interact scripts
 > Chain identifiers are `uint256` everywhere — `block.chainid` for EVM legs, backend-assigned values for non-EVM endpoints (e.g. RGB = `1_000_001`). There is no `SOURCE_CHAIN_NAME` env var anymore; the bridge reads `block.chainid` at runtime.
 
 **Key interact variables** (`.env.interact`):
-- `BRIDGE_ADDRESS`, `PROXY_ADDRESS`, `BASE_BRIDGE_ADDRESS` — deployed contracts
+- `BRIDGE_ADDRESS`, `PROXY_ADDRESS`, `MINIMAL_BRIDGE_ADDRESS` — deployed contracts
 - `OPERATION_ID` — backend-assigned operation id
 - `BURN_ID` — single-use burn consignment id (fundsOut)
 - `SOURCE_CHAIN_ID` / `DESTINATION_CHAIN_ID` — `uint256` chain ids used when building calldata
@@ -285,13 +285,13 @@ cast send $ROUTE_REGISTRY_ADDRESS "transferOwnership(address)" $PROXY_ADDRESS --
 
 Note: `RouteRegistry.bridge` is immutable. The step-by-step path either (a) deploys `RouteRegistry` first against a predicted Bridge address, or (b) is reserved for replacing Bridge against an existing registry — uncommon. Use `DeployAll` for greenfield deployments.
 
-### Option C — BaseBridge (integrators, e.g. Bitfinex)
+### Option C — MinimalBridge (integrators, e.g. Bitfinex)
 
 ```sh
-forge script script/deploy/DeployBaseBridge.s.sol --rpc-url $RPC_URL --broadcast --verify
+forge script script/deploy/DeployMinimalBridge.s.sol --rpc-url $RPC_URL --broadcast --verify
 ```
 
-Deploys `BaseBridge` with `TOKEN_ADDRESS`. The deployer becomes the initial owner; transfer to the integrator's multisig after deployment. `BaseBridge` has no dependency on `MultisigProxy`, `RouteRegistry`, or `CommissionManager` — use any multisig or EOA as owner.
+Deploys `MinimalBridge` with `TOKEN_ADDRESS`. The deployer becomes the initial owner; transfer to the integrator's multisig after deployment. `MinimalBridge` has no dependency on `MultisigProxy`, `RouteRegistry`, or `CommissionManager` — use any multisig or EOA as owner.
 
 ## Interaction scripts
 
@@ -341,7 +341,7 @@ forge script script/interact/BridgeFundsIn.s.sol --rpc-url $RPC_URL --broadcast
 ```
 src/
   BridgeBase.sol               — Abstract base: token, pause, shared event/errors
-  BaseBridge.sol               — Minimal bridge for integrators
+  MinimalBridge.sol            — Minimal bridge for integrators
   Bridge.sol                   — Production bridge (MultisigProxy owner, RouteRegistry, CommissionManager)
   RouteRegistry.sol            — Per-route plugin dispatcher (verifier + settlement module)
   CommissionManager.sol        — Standalone commission quotes, custody and withdrawal
@@ -365,7 +365,7 @@ src/
     RouteTypes.sol             — Shared FundsInContext / FundsOutContext structs
 
 script/
-  deploy/                      — DeployAll, DeployBridge, DeployBaseBridge,
+  deploy/                      — DeployAll, DeployBridge, DeployMinimalBridge,
                                  DeployRouteRegistry, DeployRGBVerifier,
                                  DeployRgbSettlementModule, DeployRgbPoolSettlementModule,
                                  DeployCommissionManager,
@@ -377,7 +377,7 @@ script/
 
 test/
   Bridge.t.sol                 — Bridge tests (routing through RouteRegistry, burnId, commission)
-  BaseBridge.t.sol             — BaseBridge tests
+  MinimalBridge.t.sol          — MinimalBridge tests
   RouteRegistry.t.sol          — RouteRegistry tests (setRoute, dispatch, enabled gating)
   RgbSettlementModule.t.sol    — canonical RGB ledger tests
   RgbPoolSettlementModule.t.sol — asymmetric RGB pool settlement tests

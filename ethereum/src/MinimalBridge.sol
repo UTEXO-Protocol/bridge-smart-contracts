@@ -6,13 +6,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {BridgeBase} from "./BridgeBase.sol";
 
-/// @title BaseBridge
+/// @title MinimalBridge
 /// @notice Minimal single-token bridge for lock/unlock operations.
 ///
 /// @dev - No TEE signature verification.
 ///      - `fundsOut` is owner-only; the owner is expected to be a multisig or
 ///        similar access control contract on the integrator's side.
-contract BaseBridge is BridgeBase {
+contract MinimalBridge is BridgeBase {
     using SafeERC20 for IERC20;
 
     // =========================================================================

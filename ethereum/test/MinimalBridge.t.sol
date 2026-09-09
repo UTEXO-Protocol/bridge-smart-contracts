@@ -2,18 +2,18 @@
 pragma solidity 0.8.35;
 
 import {Test, Vm} from "forge-std/Test.sol";
-import {BaseBridge} from "../src/BaseBridge.sol";
+import {MinimalBridge} from "../src/MinimalBridge.sol";
 import {BridgeBase} from "../src/BridgeBase.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
-contract BaseBridgeTest is Test {
+contract MinimalBridgeTest is Test {
     // Events re-declared locally for vm.expectEmit
     event FundsIn(address indexed sender, uint256 operationId, uint64 amount);
     event FundsOut(address indexed recipient, uint256 amount, uint256 indexed operationId, string sourceAddress);
 
-    BaseBridge bridge;
+    MinimalBridge bridge;
     MockERC20 token;
 
     address deployer = makeAddr("deployer");
@@ -29,7 +29,7 @@ contract BaseBridgeTest is Test {
         token = new MockERC20("Mock Token", "MOCK");
 
         vm.prank(deployer);
-        bridge = new BaseBridge(address(token));
+        bridge = new MinimalBridge(address(token));
 
         // deployer hands ownership over to the integrator multisig
         vm.prank(deployer);
@@ -55,7 +55,7 @@ contract BaseBridgeTest is Test {
 
     function test_constructor_revertsOnZeroToken() public {
         vm.expectRevert(BridgeBase.InvalidTokenAddress.selector);
-        new BaseBridge(address(0));
+        new MinimalBridge(address(0));
     }
 
     // ========================================================================
