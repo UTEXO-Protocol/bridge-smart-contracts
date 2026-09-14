@@ -6,7 +6,9 @@ marker, and always checks BridgeV2Mock as an append-only positive fixture.
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parents[1]
+BASELINE = SCRIPT_DIR / "Bridge.v1.json"
 MARKER = "bridgeProxyCompatibilityUUID()"
 
 
@@ -50,7 +52,7 @@ def check_selectors(proxy, implementation):
 
 
 def main():
-    baseline = json.loads((ROOT / "storage-layout/Bridge.v1.json").read_text())
+    baseline = json.loads(BASELINE.read_text())
     proxy = json.loads((ROOT / "out/BridgeProxy.sol/BridgeProxy.json").read_text())
     checked = set()
     for path in sorted((ROOT / "out").glob("*/*.json")):

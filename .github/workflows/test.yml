@@ -41,8 +41,8 @@ jobs:
       - name: Verify implementation layouts and proxy selectors
         working-directory: ethereum
         run: |
-          python3 script/test_upgrade_safety.py
-          python3 script/check_upgrade_safety.py
+          python3 script/storage-layout/test_storage-layout.py
+          python3 script/storage-layout/storage_layout.py
 
       - name: Run Forge tests
         working-directory: ethereum

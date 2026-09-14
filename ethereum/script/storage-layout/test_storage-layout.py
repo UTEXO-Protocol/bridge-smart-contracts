@@ -3,12 +3,12 @@ import json
 import unittest
 import sys
 sys.dont_write_bytecode = True
-from check_upgrade_safety import ROOT, check_layout, check_selectors
+from storage_layout import BASELINE, check_layout, check_selectors
 
 
-class UpgradeSafetyTest(unittest.TestCase):
+class StorageLayoutTest(unittest.TestCase):
     def setUp(self):
-        self.base = json.loads((ROOT / "storage-layout/Bridge.v1.json").read_text())
+        self.base = json.loads(BASELINE.read_text())
         self.new = copy.deepcopy(self.base)
 
     def test_append_allowed(self):
