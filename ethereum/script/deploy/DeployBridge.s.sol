@@ -3,9 +3,11 @@ pragma solidity 0.8.35;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {Bridge} from "../../src/Bridge.sol";
+import {BridgeProxy} from "../../src/BridgeProxy.sol";
 
 /// @title DeployBridge
-/// @notice Deploys the UTEXO Bridge. Deployer is the initial owner.
+/// @notice Deploys a new UTEXO Bridge implementation and canonical proxy.
+///         Deployer is the initial Bridge owner.
 ///         Transfer ownership to MultisigProxy after deployment (see DeployAll.s.sol
 ///         or call bridge.transferOwnership(proxy) from a follow-up script).
 ///
@@ -16,9 +18,9 @@ import {Bridge} from "../../src/Bridge.sol";
 ///                               For a fresh stack use `DeployAll.s.sol` — it
 ///                               predicts Bridge's CREATE address and wires the
 ///                               registry's `bridge_` immutable to it in the
-///                               same transaction batch. Standalone deploy is
-///                               for replacing Bridge while keeping the
-///                               existing registry (rare).
+///                               same transaction batch. This script is for a
+///                               fresh proxy only; upgrades use
+///                               DeployBridgeImplementation + governance.
 ///   COMMISSION_MANAGER        — CommissionManager contract (must already be deployed)
 ///   LZ_ADAPTER                — Optional initial LayerZero adapter address;
 ///                               omit or pass `0x0` if the adapter has not been
@@ -57,14 +59,30 @@ contract DeployBridge is Script {
         address lzAdapter = vm.envOr("LZ_ADAPTER", address(0));
         uint256 minFundsInAmount = vm.envUint("MIN_FUNDS_IN_AMOUNT");
         uint256 minFundsOutAmount = vm.envUint("MIN_FUNDS_OUT_AMOUNT");
+        address deployer = vm.addr(pk);
 
         vm.startBroadcast(pk);
-        bridge = new Bridge(
-            usdt0, routeRegistry, payable(commissionManager), lzAdapter, minFundsInAmount, minFundsOutAmount
+        Bridge implementation = new Bridge();
+        BridgeProxy proxy = new BridgeProxy(
+            address(implementation),
+            abi.encodeCall(
+                Bridge.initialize,
+                (
+                    usdt0,
+                    routeRegistry,
+                    payable(commissionManager),
+                    lzAdapter,
+                    minFundsInAmount,
+                    minFundsOutAmount,
+                    deployer
+                )
+            )
         );
+        bridge = Bridge(address(proxy));
         vm.stopBroadcast();
 
-        console2.log("Bridge deployed at:  ", address(bridge));
+        console2.log("Bridge proxy deployed at:       ", address(bridge));
+        console2.log("Bridge implementation deployed:", address(implementation));
         console2.log("Owner (deployer):    ", bridge.owner());
         console2.log("Token:               ", bridge.TOKEN());
         console2.log("RouteRegistry:       ", address(bridge.routeRegistry()));
