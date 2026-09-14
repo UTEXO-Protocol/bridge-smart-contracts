@@ -38,6 +38,12 @@ jobs:
         working-directory: ethereum
         run: forge build --sizes
 
+      - name: Verify implementation layouts and proxy selectors
+        working-directory: ethereum
+        run: |
+          python3 script/test_upgrade_safety.py
+          python3 script/check_upgrade_safety.py
+
       - name: Run Forge tests
         working-directory: ethereum
         run: forge test -vvv
