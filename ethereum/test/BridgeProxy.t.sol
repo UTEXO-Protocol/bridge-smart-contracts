@@ -15,6 +15,24 @@ contract IncompatibleImplementation {
     uint256 public value;
 }
 
+contract MissingOwnerImplementation {
+    function bridgeProxyCompatibilityUUID() external pure returns (bytes32) {
+        return keccak256("utexo.bridge.proxy.compatibility.v1");
+    }
+}
+
+contract RevertingOwnerImplementation is MissingOwnerImplementation {
+    function owner() external pure returns (address) {
+        revert("broken owner");
+    }
+}
+
+contract MalformedOwnerImplementation is MissingOwnerImplementation {
+    fallback() external {
+        assembly { return(0, 1) }
+    }
+}
+
 contract BridgeProxyTest is Test {
     Bridge internal implementation;
     BridgeProxy internal proxy;
@@ -164,6 +182,46 @@ contract BridgeProxyTest is Test {
         Bridge nextImplementation = new Bridge();
         vm.expectRevert(ERC1967Proxy.ERC1967ProxyUninitialized.selector);
         new BridgeProxy(address(nextImplementation), bytes(""));
+    }
+
+    function test_upgradeRejectsMissingRevertingAndMalformedOwner() public {
+        address[3] memory candidates = [
+            address(new MissingOwnerImplementation()),
+            address(new RevertingOwnerImplementation()),
+            address(new MalformedOwnerImplementation())
+        ];
+        for (uint256 i; i < candidates.length; ++i) {
+            vm.prank(owner);
+            vm.expectRevert();
+            proxy.upgradeToAndCall(candidates[i], bytes(""));
+            assertEq(proxy.implementation(), address(implementation));
+            assertEq(bridge.owner(), owner);
+        }
+        // Failed upgrades do not prevent a later valid upgrade.
+        BridgeV2Mock valid = new BridgeV2Mock();
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(valid), bytes(""));
+    }
+
+    function test_upgradeRollsBackZeroOrChangedOwnerAndInitializerWrites() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        address[2] memory owners = [address(0), makeAddr("unexpectedOwner")];
+        for (uint256 i; i < owners.length; ++i) {
+            vm.prank(owner);
+            vm.expectRevert(
+                abi.encodeWithSelector(BridgeProxy.IncompatibleBridgeImplementation.selector, address(candidate))
+            );
+            proxy.upgradeToAndCall(address(candidate), abi.encodeCall(BridgeV2Mock.initializeV2WithOwner, (owners[i])));
+            assertEq(proxy.implementation(), address(implementation));
+            assertEq(bridge.owner(), owner);
+        }
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), bytes(""));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 0);
+        // Reinitializer version was rolled back too.
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), abi.encodeCall(BridgeV2Mock.initializeV2, (42)));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 42);
     }
 
     function _initializationData() internal view returns (bytes memory) {

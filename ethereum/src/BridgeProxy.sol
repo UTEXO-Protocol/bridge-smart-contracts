@@ -14,6 +14,8 @@ import {IBridgeProxy} from "./interfaces/IBridgeProxy.sol";
 ///      do not expose UUPS upgrade functions. Bridge.owner() is the sole authority.
 ///      Future implementations must preserve a working owner() getter: upgrade
 ///      authorization depends on it and fails closed if the getter reverts.
+///      implementation() and upgradeToAndCall(address,bytes) selectors are
+///      reserved by this proxy and must not appear in an implementation ABI.
 contract BridgeProxy is ERC1967Proxy, IBridgeProxy {
     error UnauthorizedBridgeOwner(address caller);
     error IncompatibleBridgeImplementation(address implementation);
@@ -44,6 +46,11 @@ contract BridgeProxy is ERC1967Proxy, IBridgeProxy {
     {
         _requireCompatibleImplementation(newImplementation);
         ERC1967Utils.upgradeToAndCall(newImplementation, data);
+        // Check in proxy storage after the reinitializer. Any failure rolls
+        // back both the implementation slot and all initialization writes.
+        if (IERC5313(address(this)).owner() != msg.sender) {
+            revert IncompatibleBridgeImplementation(newImplementation);
+        }
     }
 
     function _requireCompatibleImplementation(address candidate) private view {

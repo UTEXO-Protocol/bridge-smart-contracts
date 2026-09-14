@@ -20,4 +20,9 @@ contract BridgeV2Mock is Bridge {
     function version() external pure returns (uint256) {
         return 2;
     }
+
+    function initializeV2WithOwner(address newOwner) external reinitializer(2) {
+        upgradeValue = 777;
+        _transferOwnership(newOwner);
+    }
 }
