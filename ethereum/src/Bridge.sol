@@ -6,7 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {BridgeBase} from "./BridgeBase.sol";
+import {BridgeBaseUpgradeable} from "./BridgeBaseUpgradeable.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
 import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
@@ -36,10 +36,15 @@ import {RollingOutflowLimiter} from "./libraries/RollingOutflowLimiter.sol";
 ///          same private body via `_fundsIn`.
 ///      - `lzAdapter` is mutable so federation governance can rotate adapter
 ///        deployments without redeploying the Bridge.
-contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
+contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using OutflowRateLimiter for OutflowRateLimiter.Bucket;
     using RollingOutflowLimiter for RollingOutflowLimiter.Window;
+
+    /// @dev Immutable implementation identity used to reject compatibility
+    ///      checks routed through another proxy. Immutables do not consume
+    ///      proxy storage or affect the upgrade storage layout.
+    address private immutable _IMPLEMENTATION_SELF = address(this);
 
     // =========================================================================
     // State
@@ -245,32 +250,34 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
         _;
     }
 
+    /// @inheritdoc IBridge
+    function bridgeProxyCompatibilityUUID() external view override returns (bytes32) {
+        if (address(this) != _IMPLEMENTATION_SELF) revert ProxyCompatibilityCheckMustBeDirect();
+        return keccak256("utexo.bridge.proxy.compatibility.v1");
+    }
+
     // =========================================================================
-    // Constructor
+    // Initialization
     // =========================================================================
 
-    /// @param usdt0_             USDT0 token address on this chain.
-    /// @param routeRegistry_     `RouteRegistry` deployment paired with this
-    ///                           Bridge.
-    /// @param commissionManager_ CommissionManager that receives protocol fees.
-    /// @param lzAdapter_         Initial trusted LayerZero adapter; pass
-    ///                           `address(0)` if it has not been deployed yet
-    ///                           (federation can wire it up later via
-    ///                           `setLZAdapter`).
-    /// @param minFundsInAmount_  Initial minimum accepted `fundsIn` deposit in
-    ///                           token smallest units. Must be non-zero; it can
-    ///                           be retuned later via `setMinFundsInAmount`.
-    /// @param minFundsOutAmount_ Initial minimum accepted `fundsOut` release in
-    ///                           token smallest units. Must be non-zero; it can
-    ///                           be retuned later via `setMinFundsOutAmount`.
-    constructor(
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @notice Atomically initializes proxy storage for the first Bridge implementation.
+    /// @dev Must be supplied as BridgeProxy constructor calldata; it can execute only once.
+    function initialize(
         address usdt0_,
         address routeRegistry_,
         address payable commissionManager_,
         address lzAdapter_,
         uint256 minFundsInAmount_,
-        uint256 minFundsOutAmount_
-    ) BridgeBase(usdt0_) {
+        uint256 minFundsOutAmount_,
+        address initialOwner_
+    ) external override initializer {
+        __BridgeBaseUpgradeable_init(usdt0_, initialOwner_);
+
         if (routeRegistry_ == address(0)) revert InvalidRouteRegistryAddress();
         if (commissionManager_ == address(0)) revert InvalidCommissionManagerAddress();
         if (minFundsInAmount_ == 0) revert InvalidMinFundsInAmount();
@@ -733,7 +740,7 @@ contract Bridge is BridgeBase, IBridge, ReentrancyGuard {
     }
 
     /// @inheritdoc IBridge
-    function renounceOwnership() public view override(BridgeBase, IBridge) onlyOwner {
+    function renounceOwnership() public view override(BridgeBaseUpgradeable, IBridge) onlyOwner {
         revert RenounceOwnershipBlocked();
     }
 
