@@ -561,6 +561,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             fundsOutParams.sourceChainId, fundsOutParams.destinationChainId, TOKEN, fundsOutParams.amount
         );
 
+        if (netAmount == 0) revert ZeroNetAmount();
+
         // Delegate route-specific finality verification + settlement-state
         // mutation to the configured plugins. The registry runs the verifier
         // (view-only) first; if it reverts, no settlement-module write happens.

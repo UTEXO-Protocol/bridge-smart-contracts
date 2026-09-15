@@ -21,6 +21,10 @@ import {FundsInContext, FundsOutContext, RouteConfig} from "./RouteTypes.sol";
 ///          `NullVerifier` / `NullSettlementModule` for routes that
 ///          deliberately omit a layer).
 ///
+///      Both plugin slots must point to deployed contracts; explicit
+///      `NullVerifier` / `NullSettlementModule` deployments represent routes
+///      that intentionally omit a layer.
+///
 ///      Plugin call ordering inside `beforeFundsOut` is fixed by this
 ///      interface: **verifier first** (view-only finality check), settlement
 ///      module **second** (state mutation). A reverting verifier shortcuts
@@ -44,6 +48,12 @@ interface IRouteRegistry {
     ///         explicit `NullSettlementModule` deployment instead.
     error ZeroSettlementModule();
 
+    /// @notice `finalityVerifier` does not contain deployed contract code.
+    error InvalidFinalityVerifier(address finalityVerifier);
+
+    /// @notice `settlementModule` does not contain deployed contract code.
+    error InvalidSettlementModule(address settlementModule);
+
     // =========================================================================
     // Events
     // =========================================================================
@@ -66,9 +76,10 @@ interface IRouteRegistry {
     // Owner-only: route administration
     // =========================================================================
 
-    /// @notice Adds or updates a route. Owner-only. Both plugin slots MUST be
-    ///         non-zero — explicit `NullVerifier` / `NullSettlementModule`
-    ///         deployments cover routes that deliberately opt out of a layer.
+    /// @notice Adds or updates a route. Owner-only. Both plugin slots MUST point
+    ///         to deployed contracts — explicit `NullVerifier` /
+    ///         `NullSettlementModule` deployments cover routes that deliberately
+    ///         opt out of a layer.
     /// @param sourceChainId    Source chain id of the route key.
     /// @param destChainId      Destination chain id of the route key.
     /// @param enabled          New `enabled` flag.

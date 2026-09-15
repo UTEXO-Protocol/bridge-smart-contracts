@@ -150,6 +150,22 @@ contract RouteRegistryTest is Test {
         registry.setRoute(SOURCE_CHAIN_ID, DEST_CHAIN_ID, true, address(verifier), address(0));
     }
 
+    function test_setRoute_revertsOnCodelessVerifier() public {
+        address codelessVerifier = makeAddr("codelessVerifier");
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(IRouteRegistry.InvalidFinalityVerifier.selector, codelessVerifier));
+        registry.setRoute(SOURCE_CHAIN_ID, DEST_CHAIN_ID, true, codelessVerifier, address(module));
+    }
+
+    function test_setRoute_revertsOnCodelessModule() public {
+        address codelessModule = makeAddr("codelessModule");
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(IRouteRegistry.InvalidSettlementModule.selector, codelessModule));
+        registry.setRoute(SOURCE_CHAIN_ID, DEST_CHAIN_ID, true, address(verifier), codelessModule);
+    }
+
     function test_setRoute_revertsIfNotOwner() public {
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));

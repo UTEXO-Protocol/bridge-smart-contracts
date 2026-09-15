@@ -31,6 +31,16 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
+contract ZeroNetCommissionManager {
+    function calculateFundsOutCommission(uint256, uint256, address, uint256 amount)
+        external
+        pure
+        returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)
+    {
+        return (amount, 0, 0);
+    }
+}
+
 contract BridgeTest is Test, BridgeProxyTestUtils {
     // Events re-declared locally for vm.expectEmit
     event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
@@ -1268,6 +1278,32 @@ contract BridgeTest is Test, BridgeProxyTestUtils {
 
         // The mint ledger is permanent (proof-of-mint), not a consumable balance.
         assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "record unchanged after release");
+    }
+
+    function test_fundsOut_revertsAndRollsBackWhenCommissionManagerReturnsZeroNetAmount() public {
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _ensureRgbSafetyCapacity(AMOUNT);
+
+        ZeroNetCommissionManager zeroNetManager = new ZeroNetCommissionManager();
+        vm.prank(multisig);
+        bridge.setCommissionManager(address(zeroNetManager));
+
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlement(_ids(opId));
+        uint256 burnId =
+            _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);
+        uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 totalLiquidityBefore = bridge.totalLockedLiquidity();
+
+        vm.expectRevert(IBridge.ZeroNetAmount.selector);
+        vm.prank(multisig);
+        _fundsOutWithBurnId(recipient, AMOUNT, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);
+
+        assertFalse(bridge.consumedBurnIds(burnId), "reverted release does not consume burn id");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore, "reverted release restores liquidity");
+        assertEq(bridge.totalLockedLiquidity(), totalLiquidityBefore, "reverted release restores total liquidity");
+        assertEq(usdt0.balanceOf(recipient), 0, "reverted release transfers no tokens");
     }
 
     function test_fundsOut_multipleFundsInIds() public {
