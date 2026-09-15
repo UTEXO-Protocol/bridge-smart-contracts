@@ -8,7 +8,9 @@ import {MultisigProxy} from "../src/MultisigProxy.sol";
 import {IMultisigProxy} from "../src/interfaces/IMultisigProxy.sol";
 import {IBridge} from "../src/interfaces/IBridge.sol";
 import {Bridge} from "../src/Bridge.sol";
-import {BridgeBase} from "../src/BridgeBase.sol";
+import {BridgeProxy} from "../src/BridgeProxy.sol";
+import {IBridgeProxy} from "../src/interfaces/IBridgeProxy.sol";
+import {BridgeBaseUpgradeable} from "../src/BridgeBaseUpgradeable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {CommissionManager} from "../src/CommissionManager.sol";
 import {RouteRegistry} from "../src/RouteRegistry.sol";
@@ -27,6 +29,8 @@ import {
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockBtcRelay} from "./mocks/MockBtcRelay.sol";
 import {MultisigHelper} from "./mocks/MultisigHelper.sol";
+import {BridgeProxyTestUtils} from "./mocks/BridgeProxyTestUtils.sol";
+import {BridgeV2Mock} from "./mocks/BridgeV2Mock.sol";
 import {EmergencyPause} from "../script/interact/EmergencyPause.s.sol";
 import {EmergencyUnpause} from "../script/interact/EmergencyUnpause.s.sol";
 
@@ -84,7 +88,7 @@ contract MockOutboundLZAdapter {
     }
 }
 
-contract MultisigProxyTest is Test {
+contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     using MultisigHelper for bytes32;
 
     // ---- Re-declared events ------------------------------------------------
@@ -145,6 +149,7 @@ contract MultisigProxyTest is Test {
         address finalityVerifier,
         address settlementModule
     );
+    event BridgeImplementationUpgraded(address indexed bridgeProxy, address indexed newImplementation);
 
     MultisigProxy proxy;
     Bridge bridge;
@@ -245,17 +250,18 @@ contract MultisigProxyTest is Test {
         vm.startPrank(deployer);
 
         uint64 currentNonce = vm.getNonce(deployer);
-        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
+        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 3);
 
         cm = new CommissionManager(predictedBridge, commissionReceiver);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
-        bridge = new Bridge(
+        bridge = _deployBridge(
             address(token),
             address(routeRegistry),
             payable(address(cm)),
             address(0),
             1, // minFundsInAmount: smallest non-zero floor for tests
-            1 // minFundsOutAmount: smallest non-zero floor for tests
+            1, // minFundsOutAmount: smallest non-zero floor for tests
+            deployer
         );
 
         rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
@@ -1683,7 +1689,7 @@ contract MultisigProxyTest is Test {
         (uint256[] memory epks, uint256 ebitmap) = _encSigSet2of3();
         bytes[] memory esigs = MultisigHelper.signAll(vm, encDigest, epks);
 
-        vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
+        vm.expectRevert(BridgeBaseUpgradeable.OutflowEnforcedPause.selector);
         proxy.fundsOutCall(params, encNonce, deadline, ebitmap, esigs);
     }
 
@@ -1821,6 +1827,107 @@ contract MultisigProxyTest is Test {
         vm.warp(block.timestamp + timelock);
         proxy.executeProposal(proposalId, abi.encode(newBridge));
         assertEq(proxy.bridge(), newBridge, "boundary proposal executes at the exact instant");
+    }
+
+    // ========================================================================
+    // Propose + Execute — Bridge proxy control
+    // ========================================================================
+
+    function test_proposeUpgradeBridgeImplementation_executesAfterTimelockAndPreservesState() public {
+        BridgeV2Mock nextImplementation = new BridgeV2Mock();
+        bytes memory initializationData = abi.encodeCall(BridgeV2Mock.initializeV2, (777));
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeUpgradeBridgeImplementation(
+            domainSep, address(bridge), address(nextImplementation), initializationData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+
+        bytes32 id = proxy.proposeUpgradeBridgeImplementation(
+            address(bridge),
+            address(nextImplementation),
+            initializationData,
+            nonce,
+            deadline,
+            bitmap,
+            MultisigHelper.signAll(vm, digest, pks)
+        );
+
+        uint256 balanceBefore = token.balanceOf(address(bridge));
+        uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.expectEmit(true, true, false, true, address(proxy));
+        emit BridgeImplementationUpgraded(address(bridge), address(nextImplementation));
+        proxy.executeProposal(id, abi.encode(address(bridge), address(nextImplementation), initializationData));
+
+        BridgeV2Mock upgraded = BridgeV2Mock(address(bridge));
+        assertEq(BridgeProxy(payable(address(bridge))).implementation(), address(nextImplementation));
+        assertEq(upgraded.version(), 2);
+        assertEq(upgraded.upgradeValue(), 777);
+        assertEq(upgraded.owner(), address(proxy));
+        assertEq(upgraded.TOKEN(), address(token));
+        assertEq(upgraded.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore);
+        assertEq(token.balanceOf(address(upgraded)), balanceBefore);
+    }
+
+    function test_proposeUpgradeBridgeImplementation_signatureBindsInitializationData() public {
+        BridgeV2Mock nextImplementation = new BridgeV2Mock();
+        bytes memory signedData = abi.encodeCall(BridgeV2Mock.initializeV2, (777));
+        bytes memory submittedData = abi.encodeCall(BridgeV2Mock.initializeV2, (778));
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeUpgradeBridgeImplementation(
+            domainSep, address(bridge), address(nextImplementation), signedData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+
+        vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
+        proxy.proposeUpgradeBridgeImplementation(
+            address(bridge),
+            address(nextImplementation),
+            submittedData,
+            nonce,
+            deadline,
+            bitmap,
+            MultisigHelper.signAll(vm, digest, pks)
+        );
+    }
+
+    function test_upgradeProposalCannotBeRedirectedAfterBridgeTargetChanges() public {
+        address signedBridge = address(bridge);
+        BridgeV2Mock nextImplementation = new BridgeV2Mock();
+        bytes memory initializationData = bytes("");
+        uint256 deadline = block.timestamp + 1 days;
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+
+        uint256 upgradeNonce = proxy.proposalNonce();
+        bytes32 upgradeDigest = MultisigHelper.digestProposeUpgradeBridgeImplementation(
+            domainSep, signedBridge, address(nextImplementation), initializationData, upgradeNonce, deadline
+        );
+        bytes32 upgradeId = proxy.proposeUpgradeBridgeImplementation(
+            signedBridge,
+            address(nextImplementation),
+            initializationData,
+            upgradeNonce,
+            deadline,
+            bitmap,
+            MultisigHelper.signAll(vm, upgradeDigest, pks)
+        );
+
+        address replacementBridge = makeAddr("replacementBridge");
+        uint256 updateNonce = proxy.proposalNonce();
+        bytes32 updateDigest =
+            MultisigHelper.digestProposeUpdateBridge(domainSep, replacementBridge, updateNonce, deadline);
+        bytes32 updateId = proxy.proposeUpdateBridge(
+            replacementBridge, updateNonce, deadline, bitmap, MultisigHelper.signAll(vm, updateDigest, pks)
+        );
+
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(updateId, abi.encode(replacementBridge));
+        vm.expectRevert(
+            abi.encodeWithSelector(IMultisigProxy.StaleBridgeTarget.selector, signedBridge, replacementBridge)
+        );
+        proxy.executeProposal(upgradeId, abi.encode(signedBridge, address(nextImplementation), initializationData));
     }
 
     // ========================================================================
@@ -1971,6 +2078,11 @@ contract MultisigProxyTest is Test {
     function test_federationGenericPathsCannotCallRebalanceLiquidity() public {
         bytes memory callData = abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams()));
         _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
+    }
+
+    function test_federationGenericPathsCannotUpgradeBridgeProxy() public {
+        bytes memory callData = abi.encodeCall(IBridgeProxy.upgradeToAndCall, (makeAddr("implementation"), bytes("")));
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeProxySelector.selector);
     }
 
     function test_federationGenericPathsCannotDesyncCommissionManager() public {

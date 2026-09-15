@@ -38,6 +38,12 @@ jobs:
         working-directory: ethereum
         run: forge build --sizes
 
+      - name: Verify implementation layouts and proxy selectors
+        working-directory: ethereum
+        run: |
+          python3 script/storage-layout/test_storage-layout.py
+          python3 script/storage-layout/storage_layout.py
+
       - name: Run Forge tests
         working-directory: ethereum
         run: forge test -vvv

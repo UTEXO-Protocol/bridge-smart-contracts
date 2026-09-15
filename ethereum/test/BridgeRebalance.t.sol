@@ -14,12 +14,13 @@ import {RgbSettlementModule} from "../src/settlement/RgbSettlementModule.sol";
 import {RgbOutboundSettlementModule} from "../src/settlement/RgbOutboundSettlementModule.sol";
 import {RgbPoolSettlementModule} from "../src/settlement/RgbPoolSettlementModule.sol";
 import {NullSettlementModule} from "../src/settlement/NullSettlementModule.sol";
-import {BridgeBase} from "../src/BridgeBase.sol";
+import {BridgeBaseUpgradeable} from "../src/BridgeBaseUpgradeable.sol";
 import {OutflowRateLimiter} from "../src/libraries/OutflowRateLimiter.sol";
 import {FundsInContext, FundsOutContext} from "../src/interfaces/RouteTypes.sol";
 
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockBtcRelay} from "./mocks/MockBtcRelay.sol";
+import {BridgeProxyTestUtils} from "./mocks/BridgeProxyTestUtils.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
@@ -36,7 +37,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///   (RGB → ARCH)     rebalance, debit-RGB     — RGBVerifier + RgbOutboundSettlementModule
 ///                    (burn-backed: BtcRelay proof + record check; credit leg
 ///                     writes nothing and emits no FundsIn)
-contract BridgeRebalanceTest is Test {
+contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
     event BridgeRebalance(
         bytes32 indexed operationId,
@@ -111,11 +112,11 @@ contract BridgeRebalanceTest is Test {
         // DeployAll-style deploy with predicted Bridge address (see Bridge.t.sol).
         vm.startPrank(deployer);
         uint64 currentNonce = vm.getNonce(deployer);
-        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
+        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 3);
 
         cm = new CommissionManager(predictedBridge, deployer);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
-        bridge = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 1);
+        bridge = _deployBridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 1, deployer);
 
         rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
         nullVerifier = new NullVerifier();
@@ -580,7 +581,7 @@ contract BridgeRebalanceTest is Test {
         uint256 sourceBefore = bridge.lockedLiquidity(ARCH_CHAIN_ID);
         uint256 destinationBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
 
-        vm.expectRevert(abi.encodeWithSelector(BridgeBase.AmountExceedsUint64.selector, amount));
+        vm.expectRevert(abi.encodeWithSelector(BridgeBaseUpgradeable.AmountExceedsUint64.selector, amount));
         _rebalance(p);
 
         assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), sourceBefore, "source debit rolled back");
@@ -955,7 +956,7 @@ contract BridgeRebalanceTest is Test {
         bridge.emergencyPauseAll();
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         vm.prank(multisig);
-        vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
+        vm.expectRevert(BridgeBaseUpgradeable.OutflowEnforcedPause.selector);
         bridge.rebalanceLiquidity(p);
     }
 

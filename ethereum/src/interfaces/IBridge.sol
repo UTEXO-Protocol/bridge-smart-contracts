@@ -4,6 +4,20 @@ pragma solidity 0.8.35;
 import {ICommissionManager} from "./ICommissionManager.sol";
 
 interface IBridge {
+    /// @notice Stable marker accepted by BridgeProxy implementations.
+    /// @dev Must be called directly on an implementation, never through delegatecall.
+    function bridgeProxyCompatibilityUUID() external view returns (bytes32);
+
+    function initialize(
+        address usdt0,
+        address routeRegistry,
+        address payable commissionManager,
+        address lzAdapter,
+        uint256 minFundsInAmount,
+        uint256 minFundsOutAmount,
+        address initialOwner
+    ) external;
+
     // =========================================================================
     // Errors
     // =========================================================================
@@ -12,6 +26,7 @@ interface IBridge {
     error InvalidDestinationChainId();
     error InvalidSourceChainId();
     error ZeroAmount();
+    error ZeroNetAmount();
     error AmountBelowMinimum(uint256 amount, uint256 minimum);
     error InsufficientReceived(uint256 received, uint256 tokenCommission);
     error InvalidMinFundsInAmount();
@@ -35,6 +50,7 @@ interface IBridge {
     error GlobalSafetyLimitExceeded(uint256 requested, uint256 spentInWindow, uint256 windowLimit);
     error InvalidOutflowPolicy(uint256 burstBps, uint256 refillBpsPerWindow, uint256 maxBps);
     error ZeroOutflowReference();
+    error ProxyCompatibilityCheckMustBeDirect();
 
     // =========================================================================
     // Events

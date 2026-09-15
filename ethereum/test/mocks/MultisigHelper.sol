@@ -48,6 +48,9 @@ library MultisigHelper {
 
     bytes32 internal constant PROPOSE_UPDATE_BRIDGE_TYPEHASH =
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
+    bytes32 internal constant PROPOSE_UPGRADE_BRIDGE_IMPLEMENTATION_TYPEHASH = keccak256(
+        "ProposeUpgradeBridgeImplementation(address bridgeProxy,address newImplementation,bytes initializationData,uint256 nonce,uint256 deadline)"
+    );
 
     bytes32 internal constant PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
@@ -313,6 +316,29 @@ library MultisigHelper {
     {
         return toTypedDataHash(
             domainSep, keccak256(abi.encode(PROPOSE_UPDATE_BRIDGE_TYPEHASH, newBridge, nonce, deadline))
+        );
+    }
+
+    function digestProposeUpgradeBridgeImplementation(
+        bytes32 domainSep,
+        address bridgeProxy,
+        address newImplementation,
+        bytes memory initializationData,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(
+            domainSep,
+            keccak256(
+                abi.encode(
+                    PROPOSE_UPGRADE_BRIDGE_IMPLEMENTATION_TYPEHASH,
+                    bridgeProxy,
+                    newImplementation,
+                    keccak256(initializationData),
+                    nonce,
+                    deadline
+                )
+            )
         );
     }
 

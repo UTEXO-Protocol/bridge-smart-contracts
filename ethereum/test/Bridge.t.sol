@@ -5,7 +5,7 @@ import {Test, Vm} from "forge-std/Test.sol";
 
 import {Bridge} from "../src/Bridge.sol";
 import {IBridge} from "../src/interfaces/IBridge.sol";
-import {BridgeBase} from "../src/BridgeBase.sol";
+import {BridgeBaseUpgradeable} from "../src/BridgeBaseUpgradeable.sol";
 import {CommissionManager} from "../src/CommissionManager.sol";
 import {RouteRegistry} from "../src/RouteRegistry.sol";
 import {IRouteRegistry} from "../src/interfaces/IRouteRegistry.sol";
@@ -25,12 +25,23 @@ import {MockBtcRelay} from "./mocks/MockBtcRelay.sol";
 import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
 import {MockSettlementModule} from "./mocks/MockSettlementModule.sol";
 import {MockDepositFloor} from "./mocks/MockDepositFloor.sol";
+import {BridgeProxyTestUtils} from "./mocks/BridgeProxyTestUtils.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-contract BridgeTest is Test {
+contract ZeroNetCommissionManager {
+    function calculateFundsOutCommission(uint256, uint256, address, uint256 amount)
+        external
+        pure
+        returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)
+    {
+        return (amount, 0, 0);
+    }
+}
+
+contract BridgeTest is Test, BridgeProxyTestUtils {
     // Events re-declared locally for vm.expectEmit
     event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
     event BridgeFundsIn(
@@ -127,17 +138,18 @@ contract BridgeTest is Test {
         // Routes are then registered by deployer before ownership transfer.
         vm.startPrank(deployer);
         uint64 currentNonce = vm.getNonce(deployer);
-        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
+        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 3);
 
         cm = new CommissionManager(predictedBridge, recipient);
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
-        bridge = new Bridge(
+        bridge = _deployBridge(
             address(usdt0),
             address(routeRegistry),
             payable(address(cm)),
             address(0),
             1, // minFundsInAmount: smallest non-zero floor; cases that need a higher floor deploy their own Bridge
-            1 // minFundsOutAmount: smallest non-zero floor for tests
+            1, // minFundsOutAmount: smallest non-zero floor for tests
+            deployer
         );
 
         rgbVerifier = new RGBVerifier(address(btcRelay), 6, 1, 5);
@@ -486,24 +498,34 @@ contract BridgeTest is Test {
     }
 
     function test_constructor_revertsOnZeroToken() public {
-        vm.expectRevert(BridgeBase.InvalidTokenAddress.selector);
-        new Bridge(address(0), address(routeRegistry), payable(address(cm)), address(0), 1, 1);
+        Bridge implementation = new Bridge();
+        vm.expectRevert(BridgeBaseUpgradeable.InvalidTokenAddress.selector);
+        _deployBridgeFromImplementation(
+            implementation, address(0), address(routeRegistry), payable(address(cm)), address(0), 1, 1, deployer
+        );
     }
 
     function test_constructor_revertsOnZeroRouteRegistry() public {
+        Bridge implementation = new Bridge();
         vm.expectRevert(IBridge.InvalidRouteRegistryAddress.selector);
-        new Bridge(address(usdt0), address(0), payable(address(cm)), address(0), 1, 1);
+        _deployBridgeFromImplementation(
+            implementation, address(usdt0), address(0), payable(address(cm)), address(0), 1, 1, deployer
+        );
     }
 
     function test_constructor_revertsOnZeroCommissionManager() public {
+        Bridge implementation = new Bridge();
         vm.expectRevert(IBridge.InvalidCommissionManagerAddress.selector);
-        new Bridge(address(usdt0), address(routeRegistry), payable(address(0)), address(0), 1, 1);
+        _deployBridgeFromImplementation(
+            implementation, address(usdt0), address(routeRegistry), payable(address(0)), address(0), 1, 1, deployer
+        );
     }
 
     function test_constructor_storesInitialLZAdapter() public {
         address initialAdapter = makeAddr("initial-adapter");
         vm.prank(deployer);
-        Bridge b = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), initialAdapter, 1, 1);
+        Bridge b =
+            _deployBridge(address(usdt0), address(routeRegistry), payable(address(cm)), initialAdapter, 1, 1, deployer);
         assertEq(b.lzAdapter(), initialAdapter, "lzAdapter set in constructor");
     }
 
@@ -651,13 +673,17 @@ contract BridgeTest is Test {
 
     function test_constructor_storesMinFundsInAmount() public {
         vm.prank(deployer);
-        Bridge b = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1234, 1);
+        Bridge b =
+            _deployBridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1234, 1, deployer);
         assertEq(b.minFundsInAmount(), 1234, "minFundsInAmount stored from constructor");
     }
 
     function test_constructor_revertsOnZeroMinFundsInAmount() public {
+        Bridge implementation = new Bridge();
         vm.expectRevert(IBridge.InvalidMinFundsInAmount.selector);
-        new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 0, 1);
+        _deployBridgeFromImplementation(
+            implementation, address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 0, 1, deployer
+        );
     }
 
     function test_setMinFundsInAmount_updatesAndEmits() public {
@@ -685,13 +711,17 @@ contract BridgeTest is Test {
 
     function test_constructor_storesMinFundsOutAmount() public {
         vm.prank(deployer);
-        Bridge b = new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 4321);
+        Bridge b =
+            _deployBridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 4321, deployer);
         assertEq(b.minFundsOutAmount(), 4321, "minFundsOutAmount stored from constructor");
     }
 
     function test_constructor_revertsOnZeroMinFundsOutAmount() public {
+        Bridge implementation = new Bridge();
         vm.expectRevert(IBridge.InvalidMinFundsOutAmount.selector);
-        new Bridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 0);
+        _deployBridgeFromImplementation(
+            implementation, address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 0, deployer
+        );
     }
 
     function test_setMinFundsOutAmount_updatesAndEmits() public {
@@ -1248,6 +1278,32 @@ contract BridgeTest is Test {
 
         // The mint ledger is permanent (proof-of-mint), not a consumable balance.
         assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "record unchanged after release");
+    }
+
+    function test_fundsOut_revertsAndRollsBackWhenCommissionManagerReturnsZeroNetAmount() public {
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _ensureRgbSafetyCapacity(AMOUNT);
+
+        ZeroNetCommissionManager zeroNetManager = new ZeroNetCommissionManager();
+        vm.prank(multisig);
+        bridge.setCommissionManager(address(zeroNetManager));
+
+        bytes memory proof = _proof();
+        bytes memory settlementData = _settlement(_ids(opId));
+        uint256 burnId =
+            _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);
+        uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 totalLiquidityBefore = bridge.totalLockedLiquidity();
+
+        vm.expectRevert(IBridge.ZeroNetAmount.selector);
+        vm.prank(multisig);
+        _fundsOutWithBurnId(recipient, AMOUNT, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);
+
+        assertFalse(bridge.consumedBurnIds(burnId), "reverted release does not consume burn id");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore, "reverted release restores liquidity");
+        assertEq(bridge.totalLockedLiquidity(), totalLiquidityBefore, "reverted release restores total liquidity");
+        assertEq(usdt0.balanceOf(recipient), 0, "reverted release transfers no tokens");
     }
 
     function test_fundsOut_multipleFundsInIds() public {
@@ -2480,7 +2536,7 @@ contract BridgeTest is Test {
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        vm.expectRevert(BridgeBase.InvalidRecipientAddress.selector);
+        vm.expectRevert(BridgeBaseUpgradeable.InvalidRecipientAddress.selector);
         vm.prank(multisig);
         _fundsOut(
             address(0), AMOUNT, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), _settlement(_ids(opId))
@@ -2491,7 +2547,7 @@ contract BridgeTest is Test {
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        vm.expectRevert(BridgeBase.AmountExceedBridgePool.selector);
+        vm.expectRevert(BridgeBaseUpgradeable.AmountExceedBridgePool.selector);
         vm.prank(multisig);
         _fundsOut(
             recipient, AMOUNT + 1, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), _settlement(_ids(opId))
@@ -2934,7 +2990,7 @@ contract BridgeTest is Test {
     }
 
     function test_renounceOwnership_alwaysReverts() public {
-        vm.expectRevert(BridgeBase.RenounceOwnershipBlocked.selector);
+        vm.expectRevert(BridgeBaseUpgradeable.RenounceOwnershipBlocked.selector);
         vm.prank(multisig);
         bridge.renounceOwnership();
     }
@@ -3944,7 +4000,7 @@ contract BridgeTest is Test {
         bytes32 expectedOpId = _deriveOpId(SOURCE_CHAIN_ID, sourceSender, 0, amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         uint256 userBefore = usdt0.balanceOf(user);
 
-        vm.expectRevert(abi.encodeWithSelector(BridgeBase.AmountExceedsUint64.selector, amount));
+        vm.expectRevert(abi.encodeWithSelector(BridgeBaseUpgradeable.AmountExceedsUint64.selector, amount));
         vm.prank(user);
         bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
@@ -4047,11 +4103,13 @@ contract BridgeTest is Test {
 
         vm.startPrank(deployer);
         uint64 currentNonce = vm.getNonce(deployer);
-        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 2);
+        address predictedBridge = vm.computeCreateAddress(deployer, currentNonce + 3);
 
         s.cm = new CommissionManager(predictedBridge, recipient);
         RouteRegistry feeRouteRegistry = new RouteRegistry(predictedBridge, deployer);
-        s.bridge = new Bridge(address(s.token), address(feeRouteRegistry), payable(address(s.cm)), address(0), 1, 1);
+        s.bridge = _deployBridge(
+            address(s.token), address(feeRouteRegistry), payable(address(s.cm)), address(0), 1, 1, deployer
+        );
 
         // Reuse the suite's RGB verifier (shares `btcRelay` + `_proof()`); a
         // fresh module is bound to this stack's route registry.
