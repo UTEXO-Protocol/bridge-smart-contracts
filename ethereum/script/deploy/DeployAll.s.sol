@@ -4,6 +4,7 @@ pragma solidity 0.8.35;
 import {Script, console2} from "forge-std/Script.sol";
 
 import {Bridge} from "../../src/Bridge.sol";
+import {BridgeProxy} from "../../src/BridgeProxy.sol";
 import {CommissionManager} from "../../src/CommissionManager.sol";
 import {MultisigProxy} from "../../src/MultisigProxy.sol";
 import {RouteRegistry} from "../../src/RouteRegistry.sol";
@@ -24,18 +25,19 @@ import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.so
 ///                                 immutable; deployer keeps ownership for
 ///                                 this transaction batch — ownership is
 ///                                 transferred to MultisigProxy at the end)
-///   n + 2  → Bridge             (uses the live RouteRegistry + CM)
-///   n + 3  → RGBVerifier        (wraps the BtcRelay)
-///   n + 4  → RgbSettlementModule (paired with RouteRegistry)
-///   n + 5  → NullVerifier       (explicit no-proof verifier for operational /
+///   n + 2  → Bridge implementation
+///   n + 3  → BridgeProxy        (canonical Bridge address; initialized atomically)
+///   n + 4  → RGBVerifier        (wraps the BtcRelay)
+///   n + 5  → RgbSettlementModule (paired with RouteRegistry)
+///   n + 6  → NullVerifier       (explicit no-proof verifier for operational /
 ///                                 non-RGB-source routes, e.g. Arch → RGB)
-///   n + 6  → RgbOutboundSettlementModule (debit-RGB / non-RGB-credit routes,
+///   n + 7  → RgbOutboundSettlementModule (debit-RGB / non-RGB-credit routes,
 ///                                 e.g. RGB mint/burn → RGB pool; wraps
 ///                                 RgbSettlementModule)
-///   n + 7  → RgbPoolSettlementModule (pool credits write nothing; pool
+///   n + 8  → RgbPoolSettlementModule (pool credits write nothing; pool
 ///                                 releases read mint/burn records)
-///   n + 8  → NullSettlementModule (stateless routes such as EVM ↔ Concordium)
-///   n + 9  → MultisigProxy
+///   n + 9  → NullSettlementModule (stateless routes such as EVM ↔ Concordium)
+///   n + 10 → MultisigProxy
 ///          → Bridge.setOutflowLimit for INITIAL_ENCLAVE_SOURCE_CHAIN_ID
 ///          → Bridge.setGlobalOutflowLimit
 ///          → (optional) CommissionManager config txs, each present only when
@@ -158,8 +160,9 @@ contract DeployAll is Script {
         address deployer = vm.addr(pk);
         uint64 startNonce = vm.getNonce(deployer);
 
-        // Bridge sits at nonce + 2 (CM, RouteRegistry, then Bridge).
-        address predictedBridge = vm.computeCreateAddress(deployer, startNonce + 2);
+        // The canonical Bridge proxy sits at nonce + 3 (CM, RouteRegistry,
+        // implementation, then proxy).
+        address predictedBridge = vm.computeCreateAddress(deployer, startNonce + 3);
 
         vm.startBroadcast(pk);
 
@@ -171,10 +174,16 @@ contract DeployAll is Script {
         // after the proxy has been deployed.
         routeRegistry = new RouteRegistry(predictedBridge, deployer);
 
-        // ---- 4. Bridge (nonce n+2) ---------------------------------------
-        bridge = new Bridge(usdt0, address(routeRegistry), payable(address(cm)), address(0), minFundsIn, minFundsOut);
+        // ---- 4. Bridge implementation + proxy (nonce n+2, n+3) -----------
+        Bridge bridgeImplementation = new Bridge();
+        bytes memory bridgeInitializationData = abi.encodeCall(
+            Bridge.initialize,
+            (usdt0, address(routeRegistry), payable(address(cm)), address(0), minFundsIn, minFundsOut, deployer)
+        );
+        BridgeProxy bridgeProxy = new BridgeProxy(address(bridgeImplementation), bridgeInitializationData);
+        bridge = Bridge(address(bridgeProxy));
 
-        // ---- 5. Route plugins (nonce n+3 .. n+8) -------------------------
+        // ---- 5. Route plugins (nonce n+4 .. n+9) -------------------------
         rgbVerifier = new RGBVerifier(btcRelay, minSourceConf, maxLatestConf, minConfGap);
         rgbModule = new RgbSettlementModule(address(routeRegistry));
         // NullVerifier: explicit no-proof verifier for operational / non-RGB-
@@ -195,7 +204,7 @@ contract DeployAll is Script {
         // an external delivery layer still use an explicit non-zero module.
         nullModule = new NullSettlementModule();
 
-        // ---- 6. MultisigProxy (nonce n+9) --------------------------------
+        // ---- 6. MultisigProxy (nonce n+10) -------------------------------
         proxy = new MultisigProxy(
             address(bridge),
             address(cm),
@@ -244,6 +253,7 @@ contract DeployAll is Script {
         console2.log("Immutable commission recipient:", cm.commissionRecipient());
         console2.log("RouteRegistry deployed at:      ", address(routeRegistry));
         console2.log("Bridge deployed at:             ", address(bridge));
+        console2.log("Bridge implementation at:      ", address(bridgeImplementation));
         console2.log("RGBVerifier deployed at:        ", address(rgbVerifier));
         console2.log("  minSourceConfirmations:       ", rgbVerifier.minSourceConfirmations());
         console2.log("  maxLatestConfirmations:       ", rgbVerifier.maxLatestConfirmations());
@@ -281,6 +291,7 @@ contract DeployAll is Script {
 
         // ---- 11. Invariant checks ---------------------------------------
         require(address(bridge) == predictedBridge, "Bridge address prediction mismatch");
+        require(bridgeProxy.implementation() == address(bridgeImplementation), "Bridge implementation mismatch");
         require(routeRegistry.bridge() == address(bridge), "RouteRegistry.bridge mismatch");
         require(rgbModule.routeRegistry() == address(routeRegistry), "RgbSettlementModule.routeRegistry mismatch");
         require(

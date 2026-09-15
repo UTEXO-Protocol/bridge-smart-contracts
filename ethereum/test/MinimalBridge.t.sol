@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import {Test} from "forge-std/Test.sol";
-import {BaseBridge} from "../src/BaseBridge.sol";
+import {Test, Vm} from "forge-std/Test.sol";
+import {MinimalBridge} from "../src/MinimalBridge.sol";
 import {BridgeBase} from "../src/BridgeBase.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
-contract BaseBridgeTest is Test {
+contract MinimalBridgeTest is Test {
     // Events re-declared locally for vm.expectEmit
-    event FundsIn(address indexed sender, uint256 indexed operationId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 operationId, uint64 amount);
     event FundsOut(address indexed recipient, uint256 amount, uint256 indexed operationId, string sourceAddress);
 
-    BaseBridge bridge;
+    MinimalBridge bridge;
     MockERC20 token;
 
     address deployer = makeAddr("deployer");
@@ -22,14 +22,14 @@ contract BaseBridgeTest is Test {
     address owner = makeAddr("owner");
 
     string constant SRC_ADDR = "rgb:sender/utxo1src";
-    uint256 constant AMOUNT = 100e18;
+    uint256 constant AMOUNT = 1e18;
     uint256 constant OPERATION_ID = 42;
 
     function setUp() public {
         token = new MockERC20("Mock Token", "MOCK");
 
         vm.prank(deployer);
-        bridge = new BaseBridge(address(token));
+        bridge = new MinimalBridge(address(token));
 
         // deployer hands ownership over to the integrator multisig
         vm.prank(deployer);
@@ -55,7 +55,7 @@ contract BaseBridgeTest is Test {
 
     function test_constructor_revertsOnZeroToken() public {
         vm.expectRevert(BridgeBase.InvalidTokenAddress.selector);
-        new BaseBridge(address(0));
+        new MinimalBridge(address(0));
     }
 
     // ========================================================================
@@ -73,11 +73,55 @@ contract BaseBridgeTest is Test {
     }
 
     function test_fundsIn_emitsFundsIn() public {
-        vm.expectEmit(true, true, false, true);
-        emit FundsIn(user, OPERATION_ID, AMOUNT);
+        vm.expectEmit(true, false, false, true);
+        emit FundsIn(user, OPERATION_ID, uint64(AMOUNT));
 
         vm.prank(user);
         bridge.fundsIn(AMOUNT, OPERATION_ID);
+    }
+
+    function test_fundsIn_operationIdIsNonIndexedEventData() public {
+        bytes32 fundsInTopic = keccak256("FundsIn(address,uint256,uint64)");
+        vm.recordLogs();
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, OPERATION_ID);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(bridge) && logs[i].topics[0] == fundsInTopic) {
+                assertEq(logs[i].topics.length, 2, "only signature and sender are indexed");
+                assertEq(address(uint160(uint256(logs[i].topics[1]))), user, "sender topic");
+                (uint256 operationId, uint64 amount) = abi.decode(logs[i].data, (uint256, uint64));
+                assertEq(operationId, OPERATION_ID, "operation id is event data");
+                assertEq(amount, AMOUNT, "amount is event data");
+                return;
+            }
+        }
+        fail("FundsIn event not found");
+    }
+
+    function test_fundsIn_acceptsUint64Maximum() public {
+        uint256 amount = type(uint64).max;
+        token.mint(user, amount);
+
+        vm.expectEmit(true, false, false, true);
+        emit FundsIn(user, OPERATION_ID, type(uint64).max);
+
+        vm.prank(user);
+        bridge.fundsIn(amount, OPERATION_ID);
+    }
+
+    function test_fundsIn_revertsAboveUint64WithoutPullingTokens() public {
+        uint256 amount = uint256(type(uint64).max) + 1;
+        token.mint(user, amount);
+        uint256 userBefore = token.balanceOf(user);
+
+        vm.expectRevert(abi.encodeWithSelector(BridgeBase.AmountExceedsUint64.selector, amount));
+        vm.prank(user);
+        bridge.fundsIn(amount, OPERATION_ID);
+
+        assertEq(token.balanceOf(user), userBefore);
+        assertEq(token.balanceOf(address(bridge)), 0);
     }
 
     function test_fundsIn_anyUserCanCall() public {
@@ -314,7 +358,7 @@ contract BaseBridgeTest is Test {
     // Fuzz
     // ========================================================================
 
-    function testFuzz_fundsIn_validAmount(uint128 amount) public {
+    function testFuzz_fundsIn_validAmount(uint64 amount) public {
         vm.assume(amount > 0);
         token.mint(user, amount);
 
@@ -324,7 +368,7 @@ contract BaseBridgeTest is Test {
         assertEq(token.balanceOf(address(bridge)), uint256(amount));
     }
 
-    function testFuzz_fundsOut_anyAmountUpToPool(uint128 lockAmount, uint128 releaseAmount) public {
+    function testFuzz_fundsOut_anyAmountUpToPool(uint64 lockAmount, uint64 releaseAmount) public {
         vm.assume(lockAmount > 0);
         vm.assume(releaseAmount <= lockAmount);
         token.mint(user, lockAmount);

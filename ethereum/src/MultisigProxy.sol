@@ -5,6 +5,7 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IMultisigProxy} from "./interfaces/IMultisigProxy.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
+import {IBridgeProxy} from "./interfaces/IBridgeProxy.sol";
 import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
 
@@ -150,6 +151,10 @@ contract MultisigProxy is IMultisigProxy {
     bytes4 private constant _SEL_FUNDS_OUT = IBridge.fundsOut.selector;
     bytes4 private constant _SEL_REBALANCE_LIQUIDITY = IBridge.rebalanceLiquidity.selector;
 
+    /// @notice Proxy-control selectors are reserved for dedicated typed,
+    ///         timelocked operations and blocked from every generic lane.
+    bytes4 private constant _SEL_UPGRADE_TO_AND_CALL = IBridgeProxy.upgradeToAndCall.selector;
+
     /// @notice CommissionManager rotation is reserved for the typed operation,
     ///         which keeps the Bridge and proxy targets synchronized atomically.
     bytes4 private constant _SEL_SET_COMMISSION_MANAGER = IBridge.setCommissionManager.selector;
@@ -186,6 +191,9 @@ contract MultisigProxy is IMultisigProxy {
     );
     bytes32 private constant _PROPOSE_UPDATE_BRIDGE_TYPEHASH =
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_UPGRADE_BRIDGE_IMPLEMENTATION_TYPEHASH = keccak256(
+        "ProposeUpgradeBridgeImplementation(address bridgeProxy,address newImplementation,bytes initializationData,uint256 nonce,uint256 deadline)"
+    );
     bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_SET_EMERGENCY_GUARDIAN_TYPEHASH =
@@ -677,6 +685,43 @@ contract MultisigProxy is IMultisigProxy {
 
         return
             _propose(OperationType.UpdateBridge, abi.encode(newBridge), nonce, deadline, structHash, fedBitmap, fedSigs);
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeUpgradeBridgeImplementation(
+        address bridgeProxy,
+        address newImplementation,
+        bytes calldata initializationData,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        if (bridgeProxy != bridge) revert StaleBridgeTarget(bridgeProxy, bridge);
+        if (newImplementation.code.length == 0 || newImplementation == bridgeProxy) {
+            revert InvalidBridgeImplementation(newImplementation);
+        }
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                _PROPOSE_UPGRADE_BRIDGE_IMPLEMENTATION_TYPEHASH,
+                bridgeProxy,
+                newImplementation,
+                keccak256(initializationData),
+                nonce,
+                deadline
+            )
+        );
+
+        return _propose(
+            OperationType.UpgradeBridgeImplementation,
+            abi.encode(bridgeProxy, newImplementation, initializationData),
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
+        );
     }
 
     /// @inheritdoc IMultisigProxy
@@ -1283,6 +1328,15 @@ contract MultisigProxy is IMultisigProxy {
             (bool ok, bytes memory ret) = target.call(abi.encodeWithSelector(_SEL_TRANSFER_OWNERSHIP, newOwner));
             _propagateRevert(ok, ret);
             emit ManagedOwnershipTransferStarted(target, newOwner);
+        } else if (opType == OperationType.UpgradeBridgeImplementation) {
+            (address bridgeProxy, address newImplementation, bytes memory initializationData) =
+                abi.decode(opData, (address, address, bytes));
+            if (bridgeProxy != bridge) revert StaleBridgeTarget(bridgeProxy, bridge);
+            if (newImplementation.code.length == 0 || newImplementation == bridgeProxy) {
+                revert InvalidBridgeImplementation(newImplementation);
+            }
+            IBridgeProxy(bridgeProxy).upgradeToAndCall(newImplementation, initializationData);
+            emit BridgeImplementationUpgraded(bridgeProxy, newImplementation);
         } else {
             revert UnknownOperationType();
         }
@@ -1477,6 +1531,9 @@ contract MultisigProxy is IMultisigProxy {
         _requireNotBridgeReleaseSelector(selector);
         if (selector == _SEL_SET_COMMISSION_MANAGER) revert ForbiddenCommissionManagerSelector(selector);
         if (selector == _SEL_TRANSFER_OWNERSHIP) revert ForbiddenOwnershipSelector(selector);
+        if (selector == _SEL_UPGRADE_TO_AND_CALL) {
+            revert ForbiddenBridgeProxySelector(selector);
+        }
     }
 
     /// @dev Restricts typed ownership migration to the proxy's current managed

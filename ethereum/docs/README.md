@@ -301,7 +301,7 @@ Note: `RouteRegistry.bridge` and `CommissionManager.bridgeAddress` must point to
 ### Bridge implementation upgrades
 
 1. Run `DeployBridgeImplementation.s.sol` to deploy a new locked implementation.
-2. Run `python3 script/check_upgrade_safety.py` after building the exact candidate artifact; review it against the frozen deployed baseline (see `storage-layout/README.md`). Prepare any versioned reinitializer calldata (`0x` if none). Upgrades must preserve the current owner: the proxy checks `owner()` after initialization and reverts the complete upgrade if the getter fails or returns a different address. Transfer ownership separately using the two-step ownership flow.
+2. Run `python3 script/storage-layout/storage_layout.py` after building the exact candidate artifact; review it against the frozen deployed baseline (see `docs/Storage Layout.md`). Prepare any versioned reinitializer calldata (`0x` if none). Upgrades must preserve the current owner: the proxy checks `owner()` after initialization and reverts the complete upgrade if the getter fails or returns a different address. Transfer ownership separately using the two-step ownership flow.
 3. Run `MultisigProposeUpgradeBridge.s.sol`; the signed proposal binds the current proxy, new implementation, and `keccak256(UPGRADE_CALLDATA)`.
 4. After the timelock, execute the printed `opData` through `executeProposal`.
 5. Verify the implementation slot, Bridge state, token balance, and a post-upgrade funds-in/out smoke test.

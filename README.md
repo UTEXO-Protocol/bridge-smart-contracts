@@ -26,7 +26,8 @@ The EVM-side contracts in this repository are deployed on Arbitrum. Cross-chain 
         │                       │      FinalityVerifier + SettlementModule          │
         │                       └──────────────────┬───────────────────┘            │
         │                                          │                                │
-        │                                       Bridge                              │
+        │                                  BridgeProxy                              │
+        │                               (Bridge implementation)                     │
         │                                          │                                │
         │                              CommissionManager                            │
         │                                          ▲                                │
@@ -38,7 +39,7 @@ The EVM-side contracts in this repository are deployed on Arbitrum. Cross-chain 
 
 **Arbitrum — main contracts:**
 
-- **`Bridge`** — the value-holding contract. Locks the bridged ERC-20 on `fundsIn`, releases it on `fundsOut`. Route-agnostic by design: it delegates all finality-verification and per-route bookkeeping to the registered plugin contracts (see `RouteRegistry` below), so adding a new destination chain (RGB, Arch, another EVM rollup, …) is a deploy-the-plugins + register-the-route operation rather than a Bridge upgrade. Emits the events that the backend watches to drive cross-chain actions. Owned by `MultisigProxy`.
+- **`BridgeProxy` + `Bridge` implementation** — the canonical value-holding address is a custom ERC-1967 proxy. It locks the bridged ERC-20 on `fundsIn` and releases it on `fundsOut`, while federation-approved implementation upgrades preserve its address and state. Upgrade control is restricted to typed, timelocked `MultisigProxy` operations. Route additions still use plugins and normally require no Bridge upgrade.
 
 - **`RouteRegistry`** — the routing brain. For every supported `(sourceChainId, destChainId)` pair it stores two addresses: a `FinalityVerifier` and a `SettlementModule`. The `Bridge` calls into the registry on every transfer; the registry forwards to the right plugins. Routes are registered, paused, and rotated through federation governance (granular `SetRoute` proposals on `MultisigProxy`). Owned by `MultisigProxy`; `bridge` is immutable, so rotating the registry itself means redeploy + `UpdateRouteRegistry`.
 

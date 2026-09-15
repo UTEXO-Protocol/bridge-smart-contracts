@@ -23,9 +23,9 @@ import {FundsInContext, FundsOutContext, RouteConfig} from "./interfaces/RouteTy
 ///        1. `IFinalityVerifier.verify(ctx, proof)`    — view-only;
 ///        2. `ISettlementModule.beforeFundsOut(ctx, settlementData)` — mutates.
 ///
-///      The registry rejects `address(0)` for either plugin slot in
-///      `setRoute`. Routes that intentionally need no source-side proof or
-///      no per-route state register an explicit `NullVerifier` /
+///      The registry requires both plugin slots in `setRoute` to point to
+///      deployed contracts. Routes that intentionally need no source-side
+///      proof or no per-route state register an explicit `NullVerifier` /
 ///      `NullSettlementModule` deployment — the trust-model decision is then
 ///      auditable on-chain rather than hidden behind an empty slot.
 ///
@@ -78,8 +78,8 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // Owner-only: route administration
     // =========================================================================
 
-    /// @notice Adds or updates a route. Plugin slots MUST be non-zero —
-    ///         use explicit `NullVerifier` / `NullSettlementModule`
+    /// @notice Adds or updates a route. Plugin slots MUST point to deployed
+    ///         contracts — use explicit `NullVerifier` / `NullSettlementModule`
     ///         deployments when a route deliberately opts out of a layer.
     ///         Federation can pause a route in place by setting
     ///         `enabled = false`; the plugin references stay registered
@@ -98,6 +98,8 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     ) external override onlyOwner {
         if (finalityVerifier == address(0)) revert ZeroFinalityVerifier();
         if (settlementModule == address(0)) revert ZeroSettlementModule();
+        if (finalityVerifier.code.length == 0) revert InvalidFinalityVerifier(finalityVerifier);
+        if (settlementModule.code.length == 0) revert InvalidSettlementModule(settlementModule);
 
         _routes[_routeKey(sourceChainId, destChainId)] =
             RouteConfig({enabled: enabled, finalityVerifier: finalityVerifier, settlementModule: settlementModule});

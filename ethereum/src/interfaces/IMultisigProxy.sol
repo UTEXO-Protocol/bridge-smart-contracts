@@ -77,6 +77,7 @@ interface IMultisigProxy {
     error ZeroTarget();
     error ForbiddenCommissionManagerSelector(bytes4 selector);
     error ForbiddenBridgeReleaseSelector(bytes4 selector);
+    error ForbiddenBridgeProxySelector(bytes4 selector);
     error ForbiddenOwnershipSelector(bytes4 selector);
     error InvalidManagedOwnershipTarget(address target);
     error ZeroNewOwner();
@@ -84,6 +85,8 @@ interface IMultisigProxy {
     error LZAdapterNotSet();
     error InvalidLZAdapter();
     error UnauthorizedEmergencyGuardian(address caller);
+    error StaleBridgeTarget(address signedBridge, address currentBridge);
+    error InvalidBridgeImplementation(address implementation);
 
     // =========================================================================
     // Types
@@ -108,7 +111,8 @@ interface IMultisigProxy {
         DisableLZAdapter, // 15 — clear the routing target (explicit disable, distinct from UpdateLZAdapter rotation)
         AdminExecuteRouteRegistry, // 16 — generic call into RouteRegistry (acceptOwnership, config, …)
         TransferManagedOwnership, // 17 — typed Ownable2Step transfer for an allowlisted governance target
-        SetEmergencyGuardian // 18 — rotate or disable the direct emergency guardian
+        SetEmergencyGuardian, // 18 — rotate or disable the direct emergency guardian
+        UpgradeBridgeImplementation // 19 — upgrade the canonical ERC-1967 Bridge proxy
     }
 
     enum ProposalStatus {
@@ -194,6 +198,7 @@ interface IMultisigProxy {
     event NativeCommissionWithdrawn(uint256 amount, address indexed recipient);
     event TimelockDurationUpdated(uint256 newDuration);
     event EmergencyGuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
+    event BridgeImplementationUpgraded(address indexed bridgeProxy, address indexed newImplementation);
 
     // =========================================================================
     // TEE-authorized
@@ -303,6 +308,19 @@ interface IMultisigProxy {
     /// @dev opData = abi.encode(address newBridge)
     function proposeUpdateBridge(
         address newBridge,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    /// @notice Propose upgrading the currently configured Bridge proxy.
+    /// @dev The signed proxy address prevents a pending proposal from being
+    ///      redirected if `bridge` changes before execution.
+    function proposeUpgradeBridgeImplementation(
+        address bridgeProxy,
+        address newImplementation,
+        bytes calldata initializationData,
         uint256 nonce,
         uint256 deadline,
         uint256 fedBitmap,

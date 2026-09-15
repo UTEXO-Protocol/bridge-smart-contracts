@@ -1,0 +1,43 @@
+{
+  "storage": [
+    {"label":"TOKEN","slot":"0","offset":0,"type":"address","numberOfBytes":"20"},
+    {"label":"_outflowPaused","slot":"0","offset":20,"type":"bool","numberOfBytes":"1"},
+    {"label":"__gap","slot":"1","offset":0,"type":"uint256[49]","numberOfBytes":"1568"},
+    {"label":"commissionManager","slot":"50","offset":0,"type":"contract ICommissionManager","numberOfBytes":"20"},
+    {"label":"routeRegistry","slot":"51","offset":0,"type":"address","numberOfBytes":"20"},
+    {"label":"lzAdapter","slot":"52","offset":0,"type":"address","numberOfBytes":"20"},
+    {"label":"consumedBurnIds","slot":"53","offset":0,"type":"mapping(uint256 => bool)","numberOfBytes":"32"},
+    {"label":"sourceSenderNonces","slot":"54","offset":0,"type":"mapping(uint256 => mapping(bytes32 => uint256))","numberOfBytes":"32"},
+    {"label":"lockedLiquidity","slot":"55","offset":0,"type":"mapping(uint256 => uint256)","numberOfBytes":"32"},
+    {"label":"totalLockedLiquidity","slot":"56","offset":0,"type":"uint256","numberOfBytes":"32"},
+    {"label":"chainBuckets","slot":"57","offset":0,"type":"mapping(uint256 => struct OutflowRateLimiter.Bucket)","numberOfBytes":"32"},
+    {"label":"globalBucket","slot":"58","offset":0,"type":"struct OutflowRateLimiter.Bucket","numberOfBytes":"64"},
+    {"label":"_chainSafetyWindows","slot":"60","offset":0,"type":"mapping(uint256 => struct RollingOutflowLimiter.Window)","numberOfBytes":"32"},
+    {"label":"_globalSafetyWindow","slot":"61","offset":0,"type":"struct RollingOutflowLimiter.Window","numberOfBytes":"896"},
+    {"label":"minFundsInAmount","slot":"89","offset":0,"type":"uint256","numberOfBytes":"32"},
+    {"label":"minFundsOutAmount","slot":"90","offset":0,"type":"uint256","numberOfBytes":"32"}
+  ],
+  "structs": [
+    {
+      "label": "struct OutflowRateLimiter.Bucket",
+      "numberOfBytes": "64",
+      "members": [
+        {"label":"tokens","slot":"0","offset":0,"type":"uint128","numberOfBytes":"16"},
+        {"label":"lastUpdated","slot":"0","offset":16,"type":"uint32","numberOfBytes":"4"},
+        {"label":"isEnabled","slot":"0","offset":20,"type":"bool","numberOfBytes":"1"},
+        {"label":"capacity","slot":"1","offset":0,"type":"uint128","numberOfBytes":"16"},
+        {"label":"rate","slot":"1","offset":16,"type":"uint128","numberOfBytes":"16"}
+      ]
+    },
+    {
+      "label": "struct RollingOutflowLimiter.Window",
+      "numberOfBytes": "896",
+      "members": [
+        {"label":"spent","slot":"0","offset":0,"type":"uint256","numberOfBytes":"32"},
+        {"label":"lastEpoch","slot":"1","offset":0,"type":"uint256","numberOfBytes":"32"},
+        {"label":"initialized","slot":"2","offset":0,"type":"bool","numberOfBytes":"1"},
+        {"label":"slots","slot":"3","offset":0,"type":"uint256[25]","numberOfBytes":"800"}
+      ]
+    }
+  ]
+}
