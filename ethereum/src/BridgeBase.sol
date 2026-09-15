@@ -7,7 +7,7 @@ import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeE
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /// @title BridgeBase
-/// @notice Abstract base contract shared by BaseBridge and Bridge.
+/// @notice Abstract base contract shared by MinimalBridge and Bridge.
 ///
 /// @dev Provides:
 ///      - Single accepted token (immutable, set at deploy).
@@ -40,7 +40,7 @@ abstract contract BridgeBase is Ownable2Step, Pausable {
     /// @dev The `FundsIn` event is declared by each concrete bridge, because
     ///      the two variants use different `operationId` types: the production
     ///      `Bridge` derives a `bytes32` id on-chain (see `IBridge`), while the
-    ///      minimal `BaseBridge` echoes a caller-supplied `uint256` id.
+    ///      `MinimalBridge` echoes a caller-supplied `uint256` id.
 
     /// @notice Emitted when the outflow (withdrawal) path is frozen.
     /// @dev The inflow path reuses OpenZeppelin `Pausable`, which emits its own
@@ -57,6 +57,7 @@ abstract contract BridgeBase is Ownable2Step, Pausable {
     error InvalidTokenAddress();
     error InvalidRecipientAddress();
     error AmountExceedBridgePool();
+    error AmountExceedsUint64(uint256 amount);
     error RenounceOwnershipBlocked();
 
     /// @notice Thrown by `whenOutflowNotPaused` when the outflow path is frozen.
@@ -106,7 +107,8 @@ abstract contract BridgeBase is Ownable2Step, Pausable {
     /// @notice Emergency freeze of BOTH inflow and outflow, set atomically.
     /// @dev No-timelock control for incident response. On the production
     ///      `Bridge` it is reached through the federation-signed
-    ///      `MultisigProxy.emergencyPause` (multisig only, no propose step).
+    ///      `MultisigProxy.emergencyPause` (federation signatures, no propose
+    ///      step) or its configured emergency guardian path.
     ///      Each flag is set idempotently, so the call does not revert if one
     ///      side is already frozen (e.g. inflow already paused via the planned
     ///      path). Freezing `fundsOut` also freezes the enclave/TEE release

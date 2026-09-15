@@ -6,13 +6,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {BridgeBase} from "./BridgeBase.sol";
 
-/// @title BaseBridge
+/// @title MinimalBridge
 /// @notice Minimal single-token bridge for lock/unlock operations.
 ///
 /// @dev - No TEE signature verification.
 ///      - `fundsOut` is owner-only; the owner is expected to be a multisig or
 ///        similar access control contract on the integrator's side.
-contract BaseBridge is BridgeBase {
+contract MinimalBridge is BridgeBase {
     using SafeERC20 for IERC20;
 
     // =========================================================================
@@ -23,7 +23,7 @@ contract BaseBridge is BridgeBase {
     /// @param sender      Address that deposited the tokens.
     /// @param operationId Backend-assigned operation identifier.
     /// @param amount      Amount of tokens locked.
-    event FundsIn(address indexed sender, uint256 indexed operationId, uint256 amount);
+    event FundsIn(address indexed sender, uint256 operationId, uint64 amount);
 
     /// @notice Emitted when tokens are released from the bridge.
     /// @param recipient       Recipient on this chain.
@@ -47,9 +47,11 @@ contract BaseBridge is BridgeBase {
     /// @param amount      Amount of tokens to lock.
     /// @param operationId Backend-assigned operation identifier included in the event.
     function fundsIn(uint256 amount, uint256 operationId) external whenNotPaused {
+        if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
+
         IERC20(TOKEN).safeTransferFrom(msg.sender, address(this), amount);
 
-        emit FundsIn(msg.sender, operationId, amount);
+        emit FundsIn(msg.sender, operationId, uint64(amount));
     }
 
     // =========================================================================

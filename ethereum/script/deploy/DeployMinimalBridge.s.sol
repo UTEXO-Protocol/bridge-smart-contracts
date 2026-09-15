@@ -2,10 +2,10 @@
 pragma solidity 0.8.35;
 
 import {Script, console2} from "forge-std/Script.sol";
-import {BaseBridge} from "../../src/BaseBridge.sol";
+import {MinimalBridge} from "../../src/MinimalBridge.sol";
 
-/// @title DeployBaseBridge
-/// @notice Deploys the minimal BaseBridge.
+/// @title DeployMinimalBridge
+/// @notice Deploys MinimalBridge.
 ///         Deployer becomes the initial owner. Transfer ownership to the integrator's
 ///         multisig/EOA after deployment.
 ///
@@ -14,18 +14,18 @@ import {BaseBridge} from "../../src/BaseBridge.sol";
 ///   TOKEN_ADDRESS — accepted ERC-20 token
 ///
 /// Usage:
-///   forge script script/deploy/DeployBaseBridge.s.sol \
+///   forge script script/deploy/DeployMinimalBridge.s.sol \
 ///     --rpc-url $RPC_URL --broadcast --verify
-contract DeployBaseBridge is Script {
-    function run() external returns (BaseBridge bridge) {
+contract DeployMinimalBridge is Script {
+    function run() external returns (MinimalBridge bridge) {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address token = vm.envAddress("USDT0_ADDRESS");
 
         vm.startBroadcast(pk);
-        bridge = new BaseBridge(token);
+        bridge = new MinimalBridge(token);
         vm.stopBroadcast();
 
-        console2.log("BaseBridge deployed at:", address(bridge));
+        console2.log("MinimalBridge deployed at:", address(bridge));
         console2.log("Owner (deployer):      ", bridge.owner());
         console2.log("Token:                 ", bridge.TOKEN());
     }

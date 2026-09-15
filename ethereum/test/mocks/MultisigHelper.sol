@@ -48,9 +48,15 @@ library MultisigHelper {
 
     bytes32 internal constant PROPOSE_UPDATE_BRIDGE_TYPEHASH =
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
+    bytes32 internal constant PROPOSE_UPGRADE_BRIDGE_IMPLEMENTATION_TYPEHASH = keccak256(
+        "ProposeUpgradeBridgeImplementation(address bridgeProxy,address newImplementation,bytes initializationData,uint256 nonce,uint256 deadline)"
+    );
 
     bytes32 internal constant PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
+
+    bytes32 internal constant PROPOSE_SET_EMERGENCY_GUARDIAN_TYPEHASH =
+        keccak256("ProposeSetEmergencyGuardian(address newGuardian,uint256 nonce,uint256 deadline)");
 
     bytes32 internal constant PROPOSE_TRANSFER_MANAGED_OWNERSHIP_TYPEHASH =
         keccak256("ProposeTransferManagedOwnership(address target,address newOwner,uint256 nonce,uint256 deadline)");
@@ -313,6 +319,29 @@ library MultisigHelper {
         );
     }
 
+    function digestProposeUpgradeBridgeImplementation(
+        bytes32 domainSep,
+        address bridgeProxy,
+        address newImplementation,
+        bytes memory initializationData,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(
+            domainSep,
+            keccak256(
+                abi.encode(
+                    PROPOSE_UPGRADE_BRIDGE_IMPLEMENTATION_TYPEHASH,
+                    bridgeProxy,
+                    newImplementation,
+                    keccak256(initializationData),
+                    nonce,
+                    deadline
+                )
+            )
+        );
+    }
+
     function digestProposeSetTimelockDuration(bytes32 domainSep, uint256 newDuration, uint256 nonce, uint256 deadline)
         internal
         pure
@@ -320,6 +349,16 @@ library MultisigHelper {
     {
         return toTypedDataHash(
             domainSep, keccak256(abi.encode(PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH, newDuration, nonce, deadline))
+        );
+    }
+
+    function digestProposeSetEmergencyGuardian(bytes32 domainSep, address newGuardian, uint256 nonce, uint256 deadline)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return toTypedDataHash(
+            domainSep, keccak256(abi.encode(PROPOSE_SET_EMERGENCY_GUARDIAN_TYPEHASH, newGuardian, nonce, deadline))
         );
     }
 

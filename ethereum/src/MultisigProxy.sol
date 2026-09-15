@@ -5,6 +5,7 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IMultisigProxy} from "./interfaces/IMultisigProxy.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
+import {IBridgeProxy} from "./interfaces/IBridgeProxy.sol";
 import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
 
@@ -34,6 +35,11 @@ contract MultisigProxy is IMultisigProxy {
 
     address public bridge;
     address public commissionManager;
+
+    /// @notice Direct emergency operator configured at deployment and rotatable
+    ///         through timelocked federation governance. `address(0)` disables
+    ///         the guardian path after deployment.
+    address public emergencyGuardian;
 
     /// @notice Routing target for `AdminExecuteAdapter` proposals. Settable via
     ///         `UpdateLZAdapter` after the adapter is deployed; `address(0)`
@@ -145,6 +151,10 @@ contract MultisigProxy is IMultisigProxy {
     bytes4 private constant _SEL_FUNDS_OUT = IBridge.fundsOut.selector;
     bytes4 private constant _SEL_REBALANCE_LIQUIDITY = IBridge.rebalanceLiquidity.selector;
 
+    /// @notice Proxy-control selectors are reserved for dedicated typed,
+    ///         timelocked operations and blocked from every generic lane.
+    bytes4 private constant _SEL_UPGRADE_TO_AND_CALL = IBridgeProxy.upgradeToAndCall.selector;
+
     /// @notice CommissionManager rotation is reserved for the typed operation,
     ///         which keeps the Bridge and proxy targets synchronized atomically.
     bytes4 private constant _SEL_SET_COMMISSION_MANAGER = IBridge.setCommissionManager.selector;
@@ -181,8 +191,13 @@ contract MultisigProxy is IMultisigProxy {
     );
     bytes32 private constant _PROPOSE_UPDATE_BRIDGE_TYPEHASH =
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_UPGRADE_BRIDGE_IMPLEMENTATION_TYPEHASH = keccak256(
+        "ProposeUpgradeBridgeImplementation(address bridgeProxy,address newImplementation,bytes initializationData,uint256 nonce,uint256 deadline)"
+    );
     bytes32 private constant _PROPOSE_SET_TIMELOCK_DURATION_TYPEHASH =
         keccak256("ProposeSetTimelockDuration(uint256 newDuration,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_SET_EMERGENCY_GUARDIAN_TYPEHASH =
+        keccak256("ProposeSetEmergencyGuardian(address newGuardian,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_TRANSFER_MANAGED_OWNERSHIP_TYPEHASH =
         keccak256("ProposeTransferManagedOwnership(address target,address newOwner,uint256 nonce,uint256 deadline)");
 
@@ -236,6 +251,7 @@ contract MultisigProxy is IMultisigProxy {
     constructor(
         address bridge_,
         address commissionManager_,
+        address emergencyGuardian_,
         address[] memory enclaveSigners_,
         uint256 enclaveThreshold_,
         uint256 initialEnclaveSourceChain_,
@@ -246,6 +262,7 @@ contract MultisigProxy is IMultisigProxy {
     ) {
         if (bridge_ == address(0)) revert ZeroBridge();
         if (commissionManager_ == address(0)) revert ZeroCommissionManager();
+        if (emergencyGuardian_ == address(0)) revert ZeroEmergencyGuardian();
         if (enclaveSigners_.length == 0) revert NoSigners();
         if (initialEnclaveSourceChain_ == 0) revert UnknownSourceChain(0);
         _requireValidThreshold(enclaveThreshold_, enclaveSigners_.length);
@@ -263,6 +280,7 @@ contract MultisigProxy is IMultisigProxy {
 
         bridge = bridge_;
         commissionManager = commissionManager_;
+        emergencyGuardian = emergencyGuardian_;
         _enclaveSigners[initialEnclaveSourceChain_] = enclaveSigners_;
         enclaveThreshold[initialEnclaveSourceChain_] = enclaveThreshold_;
         _enclaveSourceChains.push(initialEnclaveSourceChain_);
@@ -519,8 +537,7 @@ contract MultisigProxy is IMultisigProxy {
         // Emergency freeze of BOTH inflow and outflow — no timelock, federation
         // signatures only. Also halts the enclave/TEE release path (it routes
         // through Bridge.fundsOut, now gated by whenOutflowNotPaused).
-        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyPauseAll()"));
-        _propagateRevert(ok, ret);
+        _emergencyPauseBridge();
 
         emit EmergencyPaused(nonce, fedBitmap);
     }
@@ -536,10 +553,23 @@ contract MultisigProxy is IMultisigProxy {
         emergencyNonce++;
 
         // Lift the emergency freeze on BOTH inflow and outflow.
-        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyUnpauseAll()"));
-        _propagateRevert(ok, ret);
+        _emergencyUnpauseBridge();
 
         emit EmergencyUnpaused(nonce, fedBitmap);
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function guardianEmergencyPause() external {
+        if (msg.sender != emergencyGuardian) revert UnauthorizedEmergencyGuardian(msg.sender);
+        _emergencyPauseBridge();
+        emit GuardianEmergencyPaused(msg.sender);
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function guardianEmergencyUnpause() external {
+        if (msg.sender != emergencyGuardian) revert UnauthorizedEmergencyGuardian(msg.sender);
+        _emergencyUnpauseBridge();
+        emit GuardianEmergencyUnpaused(msg.sender);
     }
 
     // =========================================================================
@@ -658,6 +688,43 @@ contract MultisigProxy is IMultisigProxy {
     }
 
     /// @inheritdoc IMultisigProxy
+    function proposeUpgradeBridgeImplementation(
+        address bridgeProxy,
+        address newImplementation,
+        bytes calldata initializationData,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        if (bridgeProxy != bridge) revert StaleBridgeTarget(bridgeProxy, bridge);
+        if (newImplementation.code.length == 0 || newImplementation == bridgeProxy) {
+            revert InvalidBridgeImplementation(newImplementation);
+        }
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                _PROPOSE_UPGRADE_BRIDGE_IMPLEMENTATION_TYPEHASH,
+                bridgeProxy,
+                newImplementation,
+                keccak256(initializationData),
+                nonce,
+                deadline
+            )
+        );
+
+        return _propose(
+            OperationType.UpgradeBridgeImplementation,
+            abi.encode(bridgeProxy, newImplementation, initializationData),
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
     function proposeSetTimelockDuration(
         uint256 newDuration,
         uint256 nonce,
@@ -671,6 +738,23 @@ contract MultisigProxy is IMultisigProxy {
 
         return _propose(
             OperationType.SetTimelockDuration, abi.encode(newDuration), nonce, deadline, structHash, fedBitmap, fedSigs
+        );
+    }
+
+    /// @inheritdoc IMultisigProxy
+    function proposeSetEmergencyGuardian(
+        address newGuardian,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_SET_EMERGENCY_GUARDIAN_TYPEHASH, newGuardian, nonce, deadline)
+        );
+
+        return _propose(
+            OperationType.SetEmergencyGuardian, abi.encode(newGuardian), nonce, deadline, structHash, fedBitmap, fedSigs
         );
     }
 
@@ -1148,6 +1232,11 @@ contract MultisigProxy is IMultisigProxy {
             if (newDuration >= MAX_PROPOSAL_LIFETIME) revert TimelockTooLong();
             timelockDuration = newDuration;
             emit TimelockDurationUpdated(newDuration);
+        } else if (opType == OperationType.SetEmergencyGuardian) {
+            address newGuardian = abi.decode(opData, (address));
+            address oldGuardian = emergencyGuardian;
+            emergencyGuardian = newGuardian;
+            emit EmergencyGuardianUpdated(oldGuardian, newGuardian);
         } else if (opType == OperationType.AdminExecuteCommissionManager) {
             // opData = raw CommissionManager callData. Enforce (again, at the
             // execution boundary) that standard withdrawals use their typed
@@ -1239,9 +1328,32 @@ contract MultisigProxy is IMultisigProxy {
             (bool ok, bytes memory ret) = target.call(abi.encodeWithSelector(_SEL_TRANSFER_OWNERSHIP, newOwner));
             _propagateRevert(ok, ret);
             emit ManagedOwnershipTransferStarted(target, newOwner);
+        } else if (opType == OperationType.UpgradeBridgeImplementation) {
+            (address bridgeProxy, address newImplementation, bytes memory initializationData) =
+                abi.decode(opData, (address, address, bytes));
+            if (bridgeProxy != bridge) revert StaleBridgeTarget(bridgeProxy, bridge);
+            if (newImplementation.code.length == 0 || newImplementation == bridgeProxy) {
+                revert InvalidBridgeImplementation(newImplementation);
+            }
+            IBridgeProxy(bridgeProxy).upgradeToAndCall(newImplementation, initializationData);
+            emit BridgeImplementationUpgraded(bridgeProxy, newImplementation);
         } else {
             revert UnknownOperationType();
         }
+    }
+
+    /// @dev Shared Bridge dispatch for both federation- and guardian-authorized
+    ///      emergency pauses.
+    function _emergencyPauseBridge() private {
+        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyPauseAll()"));
+        _propagateRevert(ok, ret);
+    }
+
+    /// @dev Shared Bridge dispatch for both federation- and guardian-authorized
+    ///      emergency unpauses.
+    function _emergencyUnpauseBridge() private {
+        (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyUnpauseAll()"));
+        _propagateRevert(ok, ret);
     }
 
     // =========================================================================
@@ -1419,6 +1531,9 @@ contract MultisigProxy is IMultisigProxy {
         _requireNotBridgeReleaseSelector(selector);
         if (selector == _SEL_SET_COMMISSION_MANAGER) revert ForbiddenCommissionManagerSelector(selector);
         if (selector == _SEL_TRANSFER_OWNERSHIP) revert ForbiddenOwnershipSelector(selector);
+        if (selector == _SEL_UPGRADE_TO_AND_CALL) {
+            revert ForbiddenBridgeProxySelector(selector);
+        }
     }
 
     /// @dev Restricts typed ownership migration to the proxy's current managed

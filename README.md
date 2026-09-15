@@ -26,7 +26,8 @@ The EVM-side contracts in this repository are deployed on Arbitrum. Cross-chain 
         │                       │      FinalityVerifier + SettlementModule          │
         │                       └──────────────────┬───────────────────┘            │
         │                                          │                                │
-        │                                       Bridge                              │
+        │                                  BridgeProxy                              │
+        │                               (Bridge implementation)                     │
         │                                          │                                │
         │                              CommissionManager                            │
         │                                          ▲                                │
@@ -38,7 +39,7 @@ The EVM-side contracts in this repository are deployed on Arbitrum. Cross-chain 
 
 **Arbitrum — main contracts:**
 
-- **`Bridge`** — the value-holding contract. Locks the bridged ERC-20 on `fundsIn`, releases it on `fundsOut`. Route-agnostic by design: it delegates all finality-verification and per-route bookkeeping to the registered plugin contracts (see `RouteRegistry` below), so adding a new destination chain (RGB, Arch, another EVM rollup, …) is a deploy-the-plugins + register-the-route operation rather than a Bridge upgrade. Emits the events that the backend watches to drive cross-chain actions. Owned by `MultisigProxy`.
+- **`BridgeProxy` + `Bridge` implementation** — the canonical value-holding address is a custom ERC-1967 proxy. It locks the bridged ERC-20 on `fundsIn` and releases it on `fundsOut`, while federation-approved implementation upgrades preserve its address and state. Upgrade control is restricted to typed, timelocked `MultisigProxy` operations. Route additions still use plugins and normally require no Bridge upgrade.
 
 - **`RouteRegistry`** — the routing brain. For every supported `(sourceChainId, destChainId)` pair it stores two addresses: a `FinalityVerifier` and a `SettlementModule`. The `Bridge` calls into the registry on every transfer; the registry forwards to the right plugins. Routes are registered, paused, and rotated through federation governance (granular `SetRoute` proposals on `MultisigProxy`). Owned by `MultisigProxy`; `bridge` is immutable, so rotating the registry itself means redeploy + `UpdateRouteRegistry`.
 
@@ -48,7 +49,7 @@ The EVM-side contracts in this repository are deployed on Arbitrum. Cross-chain 
 
 - **`CommissionManager`** — a dedicated fee-accounting contract that holds the protocol's commissions strictly separated from bridge liquidity. The `Bridge` consults it on every transfer to determine the per-route commission (token vs. native; charged on `FundsIn` vs. `FundsOut`) and forwards the fee to it. Withdrawal is gated by federation governance through `MultisigProxy`. Owned by `MultisigProxy`.
 
-- **`MultisigProxy`** — the authorization layer. Owns `Bridge`, `RouteRegistry`, and `CommissionManager`. Two independent signer sets and two execution paths: TEE-authorized routine operations (`FundsOut`) execute immediately on M-of-N enclave signatures; federation-authorized administrative operations (signer rotation, configuration changes, commission withdrawal, route registration, contract address updates) go through a two-phase propose → timelock → execute flow. Emergency pause/unpause is the only federation operation that is instant.
+- **`MultisigProxy`** — the authorization layer. Owns `Bridge`, `RouteRegistry`, and `CommissionManager`. It has two independent signer sets plus a direct emergency path: TEE-authorized routine operations (`FundsOut`) execute immediately on M-of-N enclave signatures; federation-authorized administrative operations (signer rotation, configuration changes, commission withdrawal, route registration, contract address updates) go through a two-phase propose → timelock → execute flow. Federation emergency pause/unpause is instant, and a separately configured emergency guardian may perform the same actions directly without multisig signatures.
 
 ### Signing model
 
@@ -59,6 +60,8 @@ There are two independent signer sets:
 **Enclave signers (TEE)** — authorize routine value-transfer operations. For `FundsOut`, M-of-N signatures are required. In turn, `FundsIn` does not perform any TEE signature verification, so anyone can call it.
 
 **Federation signers (governance)** — authorize administrative operations: signer rotation, configuration changes, commission withdrawal, and updates to the addresses of `Bridge` / `CommissionManager`. All federation operations go through a two-phase timelock (propose → wait → execute), except emergency pause/unpause which are instant.
+
+**Emergency guardian** — a single address initialized when `MultisigProxy` is deployed. It may immediately pause or unpause both bridge directions without signatures. Federation can rotate it or set it to `address(0)` through timelocked governance.
 
 Private keys are held inside Enclaves and cannot be extracted. Key persistence is handled through attested enclave-to-enclave cloning.
 

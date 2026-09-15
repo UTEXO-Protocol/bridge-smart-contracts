@@ -11,6 +11,10 @@ broadcast/
 
 # Docs
 docs/
+!docs/
+docs/*
+!docs/README.md
+!docs/Storage Layout.md
 
 # Dotenv files — ignore all variants but keep templates committed
 .env
