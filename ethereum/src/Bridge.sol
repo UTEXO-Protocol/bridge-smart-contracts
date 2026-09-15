@@ -560,7 +560,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         (uint256 tokenCommission,, uint256 netAmount) = commissionManager.calculateFundsOutCommission(
             fundsOutParams.sourceChainId, fundsOutParams.destinationChainId, TOKEN, fundsOutParams.amount
         );
-        
+
         if (netAmount == 0) revert ZeroNetAmount();
 
         // Delegate route-specific finality verification + settlement-state
