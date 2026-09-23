@@ -50,6 +50,13 @@ contract RGBVerifier is IFinalityVerifier {
     ///         latest block.
     error InsufficientConfirmationGap(uint256 sourceConfirmations, uint256 latestConfirmations, uint256 requiredGap);
 
+    /// @notice The release carried a non-empty `sourceAddress`. RGB has no
+    ///         source-address concept, so the field MUST be the empty string on
+    ///         every RGB route. Enforced here rather than left to convention:
+    ///         `sourceAddress` is hashed into `burnId`, so a non-empty value
+    ///         would let the same burn derive a different replay key.
+    error UnexpectedSourceAddress();
+
     // =========================================================================
     // Storage / configuration
     // =========================================================================
@@ -99,7 +106,8 @@ contract RGBVerifier is IFinalityVerifier {
     // =========================================================================
 
     /// @inheritdoc IFinalityVerifier
-    /// @dev Decodes `proof` as two `(height, commitmentHash)` pairs:
+    /// @dev Rejects a non-empty `ctx.sourceAddress` (RGB has no such concept),
+    ///      then decodes `proof` as two `(height, commitmentHash)` pairs:
     ///        `abi.encode(sourceHeight, sourceCommit, latestHeight, latestCommit)`
     ///      - the source pair identifies the block that packaged the RGB
     ///        burn/lock;
@@ -112,7 +120,11 @@ contract RGBVerifier is IFinalityVerifier {
     ///        - the latest block is at most `maxLatestConfirmations` deep (fresh relay);
     ///        - the source is buried at least `minConfirmationGap` blocks beneath
     ///          the fresh latest block.
-    function verify(FundsOutContext calldata, bytes calldata proof) external view override {
+    function verify(FundsOutContext calldata ctx, bytes calldata proof) external view override {
+        // RGB has no source-address concept; keep the field canonical so the
+        // same burn always derives the same `burnId`.
+        if (bytes(ctx.sourceAddress).length != 0) revert UnexpectedSourceAddress();
+
         (uint256 sourceHeight, bytes32 sourceCommit, uint256 latestHeight, bytes32 latestCommit) =
             abi.decode(proof, (uint256, bytes32, uint256, bytes32));
 

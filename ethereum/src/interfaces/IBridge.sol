@@ -41,6 +41,7 @@ interface IBridge {
     error NotLZAdapter();
     error InvalidLZAdapter();
     error InvalidBurnId(uint256 provided, uint256 expected);
+    error ZeroSourceBurnTxId();
     error BurnIdAlreadyConsumed(uint256 burnId);
     error NativeValueMismatch();
     error NativeCommissionOutOfBounds(uint256 provided, uint256 minimum, uint256 maximum);
@@ -267,14 +268,18 @@ interface IBridge {
     /// @param recipient          Recipient on this chain.
     /// @param amount             Gross amount to release (pre-commission).
     /// @param burnId             Bridge-derived replay guard. Must equal the
-    ///                           Bridge's canonical hash of the release fields,
-    ///                           including `proof` and `settlementData`.
+    ///                           Bridge's canonical settlement hash shared by
+    ///                           `fundsOut` and `rebalanceLiquidity`. It includes
+    ///                           `settlementData` and `sourceBurnTxId`, but not
+    ///                           the moving finality `proof` or recipient.
     /// @param sourceChainId      Source chain id.
     /// @param destinationChainId Destination chain id; part of the
     ///                           CommissionManager route key.
     /// @param sourceAddress      Sender address on the source chain.
     /// @param proof              Opaque per-route data for `IFinalityVerifier`.
     /// @param settlementData     Opaque per-route data for `ISettlementModule`.
+    /// @param sourceBurnTxId     Source-chain identifier of the burn being
+    ///                           settled
     struct FundsOutParams {
         address recipient;
         uint256 amount;
@@ -284,6 +289,7 @@ interface IBridge {
         string sourceAddress;
         bytes proof;
         bytes settlementData;
+        bytes32 sourceBurnTxId;
     }
 
     /// @notice Release tokens to a recipient. Only callable by owner
@@ -315,6 +321,12 @@ interface IBridge {
     ///                           `beforeFundsOut` (debit-leg settlement check).
     /// @param settlementDataIn   Opaque payload for the route module's
     ///                           `onFundsIn` (credit-leg settlement write).
+    /// @param sourceBurnTxId     Source-chain identifier of the debit-leg burn.
+    ///                           Same role and encoding as the `fundsOut` field,
+    ///                           and hashed into `burnId` by the same formula,
+    ///                           so a release and a rebalance settling the same
+    ///                           burn derive the SAME id and the second one is
+    ///                           rejected as a replay.
     struct RebalanceParams {
         uint256 amount;
         uint256 burnId;
@@ -325,6 +337,7 @@ interface IBridge {
         bytes proof;
         bytes settlementDataOut;
         bytes settlementDataIn;
+        bytes32 sourceBurnTxId;
     }
 
     /// @notice Migrate isolated liquidity between two chain buckets without

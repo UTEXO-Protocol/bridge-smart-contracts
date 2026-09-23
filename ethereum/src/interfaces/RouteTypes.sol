@@ -73,6 +73,14 @@ struct FundsInContext {
 ///                           physical `Bridge.fundsOut` token release. The
 ///                           Bridge constructs this value and RouteRegistry
 ///                           authenticates the Bridge as its caller.
+/// @param sourceBurnTxId     Source-chain identifier of the burn this release
+///                           settles — the RGB OpId of the burn transition, or
+///                           the transaction id on other source chains. Unique
+///                           per burn event, and the only field that identifies
+///                           WHICH burn is being settled; `burnId` folds it in.
+///                           Attested by the enclave, not verified on-chain.
+///                           Bridge rejects zero globally; enclaves validate
+///                           its source-chain meaning and canonical derivation.
 struct FundsOutContext {
     address token;
     address recipient;
@@ -82,6 +90,7 @@ struct FundsOutContext {
     uint256 destChainId;
     string sourceAddress;
     bool isRebalance;
+    bytes32 sourceBurnTxId;
 }
 
 /// @notice Per-route configuration stored in `RouteRegistry`.
