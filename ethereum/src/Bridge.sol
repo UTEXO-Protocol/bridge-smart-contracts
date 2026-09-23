@@ -137,21 +137,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///         so settling one source-chain burn twice — once as a physical
     ///         release and once as an accounting-only migration — derives the
     ///         same id and the second call is rejected as a replay.
-    ///
-    ///         `sourceBurnTxId` is what makes the id distinct: the release
-    ///         intent alone does not identify a burn. Three fields are
-    ///         deliberately absent:
-    ///           - `proof`, because it carries the relay-head pair, which moves
-    ///             as the relay advances and would let one settlement derive
-    ///             different ids over time;
-    ///           - `recipient`, because `rebalanceLiquidity` has none (it always
-    ///             releases to this contract), so keeping it would guarantee the
-    ///             two paths never collide;
-    ///           - the rebalance credit-leg fields (`destinationAddress`,
-    ///             `settlementDataIn`), which describe where value goes, not
-    ///             which burn it came from.
-    ///         All three remain covered by the enclave's EIP-712 signature, so
-    ///         dropping them from the replay key costs no integrity.
     bytes32 public constant BURN_TYPEHASH = keccak256(
         "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
