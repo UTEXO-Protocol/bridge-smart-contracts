@@ -751,9 +751,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (params.recipient == address(0)) revert InvalidRecipientAddress();
         if (params.sourceChainId == 0) revert InvalidSourceChainId();
         if (params.destinationChainId == 0) revert InvalidDestinationChainId();
-        // The only field naming WHICH source-chain burn this settles. It is
-        // what makes `burnId` distinct, so a zero value would let two unrelated
-        // settlements derive the same replay key.
         if (params.sourceBurnTxId == bytes32(0)) revert ZeroSourceBurnTxId();
 
         uint256 sourceAddressLength = bytes(params.sourceAddress).length;
