@@ -8,6 +8,7 @@ import {RgbPoolSettlementModule} from "../src/settlement/RgbPoolSettlementModule
 import {RgbSettlementModule} from "../src/settlement/RgbSettlementModule.sol";
 
 contract RgbPoolSettlementModuleTest is Test {
+    bytes32 constant SRC_BURN_TX_ID = keccak256("unit-burn-tx");
     address private routeRegistry = makeAddr("routeRegistry");
     address private attacker = makeAddr("attacker");
     address private token = makeAddr("token");
@@ -59,7 +60,8 @@ contract RgbPoolSettlementModuleTest is Test {
             sourceChainId: sourceChainId,
             destChainId: ARBITRUM_CHAIN_ID,
             sourceAddress: "rgb:source",
-            isRebalance: false
+            isRebalance: false,
+            sourceBurnTxId: SRC_BURN_TX_ID
         });
     }
 

@@ -18,6 +18,7 @@ import {FundsInContext, FundsOutContext} from "../src/interfaces/RouteTypes.sol"
 ///         them, or compare against `ctx.amount` — solvency and replay are owned
 ///         by the Bridge (`lockedLiquidity` / `consumedBurnIds`).
 contract RgbSettlementModuleTest is Test {
+    bytes32 constant SRC_BURN_TX_ID = keccak256("unit-burn-tx");
     RgbSettlementModule module;
 
     address routeRegistry = makeAddr("routeRegistry");
@@ -90,8 +91,9 @@ contract RgbSettlementModuleTest is Test {
             burnId: BURN_ID,
             sourceChainId: rgbChainId,
             destChainId: EVM_CHAIN_ID,
-            sourceAddress: "rgb:sender/utxo1src",
-            isRebalance: false
+            sourceAddress: "",
+            isRebalance: false,
+            sourceBurnTxId: SRC_BURN_TX_ID
         });
     }
 
