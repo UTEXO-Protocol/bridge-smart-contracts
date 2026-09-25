@@ -13,15 +13,15 @@ library MultisigHelper {
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
     bytes32 internal constant TEE_FUNDS_OUT_TYPEHASH = keccak256(
-        "TeeFundsOut(address recipient,uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint256 nonce,uint256 deadline)"
+        "TeeFundsOut(address recipient,uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)"
     );
 
     bytes32 internal constant TEE_LZ_FUNDS_OUT_TYPEHASH = keccak256(
-        "TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)"
+        "TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)"
     );
 
     bytes32 internal constant TEE_REBALANCE_TYPEHASH = keccak256(
-        "TeeRebalance(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,string destinationAddress,bytes proof,bytes settlementDataOut,bytes settlementDataIn,uint256 nonce,uint256 deadline)"
+        "TeeRebalance(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,string destinationAddress,bytes proof,bytes settlementDataOut,bytes settlementDataIn,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)"
     );
 
     bytes32 internal constant EMERGENCY_PAUSE_TYPEHASH = keccak256("EmergencyPause(uint256 nonce,uint256 deadline)");
@@ -140,6 +140,7 @@ library MultisigHelper {
                     keccak256(bytes(p.sourceAddress)),
                     keccak256(p.proof),
                     keccak256(p.settlementData),
+                    p.sourceBurnTxId,
                     nonce,
                     deadline
                 )
@@ -155,6 +156,11 @@ library MultisigHelper {
         pure
         returns (bytes32)
     {
+        bytes32 sourceAddressHash = keccak256(bytes(p.sourceAddress));
+        bytes32 destinationAddressHash = keccak256(bytes(p.destinationAddress));
+        bytes32 proofHash = keccak256(p.proof);
+        bytes32 outHash = keccak256(p.settlementDataOut);
+        bytes32 inHash = keccak256(p.settlementDataIn);
         return toTypedDataHash(
             domainSep,
             keccak256(
@@ -165,16 +171,9 @@ library MultisigHelper {
                         p.burnId,
                         p.sourceChainId,
                         p.destinationChainId,
-                        keccak256(bytes(p.sourceAddress))
+                        sourceAddressHash
                     ),
-                    abi.encode(
-                        keccak256(bytes(p.destinationAddress)),
-                        keccak256(p.proof),
-                        keccak256(p.settlementDataOut),
-                        keccak256(p.settlementDataIn),
-                        nonce,
-                        deadline
-                    )
+                    abi.encode(destinationAddressHash, proofHash, outHash, inHash, p.sourceBurnTxId, nonce, deadline)
                 )
             )
         );
@@ -189,6 +188,10 @@ library MultisigHelper {
         uint256 nonce,
         uint256 deadline
     ) internal pure returns (bytes32) {
+        bytes32 sourceAddressHash = keccak256(bytes(p.sourceAddress));
+        bytes32 proofHash = keccak256(p.proof);
+        bytes32 settlementDataHash = keccak256(p.settlementData);
+        bytes32 extraOptionsHash = keccak256(p.extraOptions);
         return toTypedDataHash(
             domainSep,
             keccak256(
@@ -199,15 +202,16 @@ library MultisigHelper {
                         p.burnId,
                         p.sourceChainId,
                         p.destinationChainId,
-                        keccak256(bytes(p.sourceAddress)),
-                        keccak256(p.proof)
+                        sourceAddressHash,
+                        proofHash
                     ),
                     abi.encode(
-                        keccak256(p.settlementData),
+                        settlementDataHash,
                         p.dstEid,
                         p.recipient,
                         p.minAmountLD,
-                        keccak256(p.extraOptions),
+                        extraOptionsHash,
+                        p.sourceBurnTxId,
                         nonce,
                         deadline
                     )

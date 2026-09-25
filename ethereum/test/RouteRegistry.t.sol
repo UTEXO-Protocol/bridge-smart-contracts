@@ -16,6 +16,7 @@ import {MockSettlementModule} from "./mocks/MockSettlementModule.sol";
 ///         simulated via `vm.prank(bridge)`; verifier / module are real
 ///         test stubs (mocks) so the dispatch path is exercised end-to-end.
 contract RouteRegistryTest is Test {
+    bytes32 constant SRC_BURN_TX_ID = keccak256("unit-burn-tx");
     // Events re-declared for vm.expectEmit
     event RouteSet(
         uint256 indexed sourceChainId,
@@ -79,7 +80,8 @@ contract RouteRegistryTest is Test {
             sourceChainId: SOURCE_CHAIN_ID,
             destChainId: DEST_CHAIN_ID,
             sourceAddress: "rgb:sender/utxo1src",
-            isRebalance: false
+            isRebalance: false,
+            sourceBurnTxId: SRC_BURN_TX_ID
         });
     }
 

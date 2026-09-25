@@ -171,13 +171,13 @@ contract MultisigProxy is IMultisigProxy {
 
     // TEE — typed enclave release operations
     bytes32 private constant _TEE_FUNDS_OUT_TYPEHASH = keccak256(
-        "TeeFundsOut(address recipient,uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint256 nonce,uint256 deadline)"
+        "TeeFundsOut(address recipient,uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)"
     );
     bytes32 private constant _TEE_LZ_FUNDS_OUT_TYPEHASH = keccak256(
-        "TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,uint256 nonce,uint256 deadline)"
+        "TeeLzFundsOut(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,uint32 dstEid,bytes32 recipient,uint256 minAmountLD,bytes extraOptions,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)"
     );
     bytes32 private constant _TEE_REBALANCE_TYPEHASH = keccak256(
-        "TeeRebalance(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,string destinationAddress,bytes proof,bytes settlementDataOut,bytes settlementDataIn,uint256 nonce,uint256 deadline)"
+        "TeeRebalance(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,string destinationAddress,bytes proof,bytes settlementDataOut,bytes settlementDataIn,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)"
     );
 
     // Federation propose — typed EIP-712 structs per operation (Bridge side)
@@ -336,19 +336,24 @@ contract MultisigProxy is IMultisigProxy {
         pure
         returns (bytes32)
     {
+        // Pre-hash the dynamic fields into locals first: each `bytes`/`string`
+        // argument otherwise keeps an (offset, length) pair live across the
+        // whole expression, which overflows the stack under via-ir.
+        bytes32 sourceAddressHash = keccak256(bytes(params.sourceAddress));
+        bytes32 proofHash = keccak256(params.proof);
+        bytes32 settlementDataHash = keccak256(params.settlementData);
+
         return keccak256(
-            abi.encode(
-                _TEE_FUNDS_OUT_TYPEHASH,
-                params.recipient,
-                params.amount,
-                params.burnId,
-                params.sourceChainId,
-                params.destinationChainId,
-                keccak256(bytes(params.sourceAddress)),
-                keccak256(params.proof),
-                keccak256(params.settlementData),
-                nonce,
-                deadline
+            bytes.concat(
+                abi.encode(
+                    _TEE_FUNDS_OUT_TYPEHASH,
+                    params.recipient,
+                    params.amount,
+                    params.burnId,
+                    params.sourceChainId,
+                    params.destinationChainId
+                ),
+                abi.encode(sourceAddressHash, proofHash, settlementDataHash, params.sourceBurnTxId, nonce, deadline)
             )
         );
     }
@@ -396,6 +401,15 @@ contract MultisigProxy is IMultisigProxy {
         pure
         returns (bytes32)
     {
+        // Pre-hash the dynamic fields into locals first: each `bytes`/`string`
+        // argument otherwise keeps an (offset, length) pair live across the
+        // whole expression, which overflows the stack under via-ir.
+        bytes32 sourceAddressHash = keccak256(bytes(params.sourceAddress));
+        bytes32 destinationAddressHash = keccak256(bytes(params.destinationAddress));
+        bytes32 proofHash = keccak256(params.proof);
+        bytes32 settlementDataOutHash = keccak256(params.settlementDataOut);
+        bytes32 settlementDataInHash = keccak256(params.settlementDataIn);
+
         return keccak256(
             bytes.concat(
                 abi.encode(
@@ -404,13 +418,14 @@ contract MultisigProxy is IMultisigProxy {
                     params.burnId,
                     params.sourceChainId,
                     params.destinationChainId,
-                    keccak256(bytes(params.sourceAddress))
+                    sourceAddressHash
                 ),
                 abi.encode(
-                    keccak256(bytes(params.destinationAddress)),
-                    keccak256(params.proof),
-                    keccak256(params.settlementDataOut),
-                    keccak256(params.settlementDataIn),
+                    destinationAddressHash,
+                    proofHash,
+                    settlementDataOutHash,
+                    settlementDataInHash,
+                    params.sourceBurnTxId,
                     nonce,
                     deadline
                 )
@@ -451,31 +466,37 @@ contract MultisigProxy is IMultisigProxy {
         // Release to the adapter, then bridge exactly what the adapter received,
         // so the release and the cross-chain send are bound on-chain. The Bridge
         // recipient is forced to the adapter (not taken from params).
-        uint256 delivered;
-        {
-            address token = IBridgeToken(bridge).TOKEN();
-            uint256 balanceBefore = IERC20(token).balanceOf(adapter);
-            IBridge(bridge)
-                .fundsOut(
-                    IBridge.FundsOutParams({
-                    recipient: adapter,
-                    amount: params.amount,
-                    burnId: params.burnId,
-                    sourceChainId: params.sourceChainId,
-                    destinationChainId: params.destinationChainId,
-                    sourceAddress: params.sourceAddress,
-                    proof: params.proof,
-                    settlementData: params.settlementData
-                })
-                );
-            delivered = IERC20(token).balanceOf(adapter) - balanceBefore;
-        }
+        uint256 delivered = _releaseToAdapter(params, adapter);
 
         ILZAdapterSendOut(adapter).sendOut{value: msg.value}(
             params.dstEid, params.recipient, delivered, params.minAmountLD, params.extraOptions
         );
 
         emit LzFundsOutExecuted(params.sourceChainId, nonce, enclaveBitmap, params.dstEid, params.recipient, delivered);
+    }
+
+    /// @dev Release leg of `lzFundsOutCall`, isolated in its own frame to keep
+    ///      the caller within stack limits. Forces the Bridge recipient to the
+    ///      adapter (never taken from `params`) and returns the balance the
+    ///      adapter ACTUALLY received, so the release and the onward send are
+    ///      bound on-chain.
+    function _releaseToAdapter(LzFundsOutParams calldata params, address adapter) private returns (uint256 delivered) {
+        IBridge.FundsOutParams memory releaseParams = IBridge.FundsOutParams({
+            recipient: adapter,
+            amount: params.amount,
+            burnId: params.burnId,
+            sourceChainId: params.sourceChainId,
+            destinationChainId: params.destinationChainId,
+            sourceAddress: params.sourceAddress,
+            proof: params.proof,
+            settlementData: params.settlementData,
+            sourceBurnTxId: params.sourceBurnTxId
+        });
+
+        address token = IBridgeToken(bridge).TOKEN();
+        uint256 balanceBefore = IERC20(token).balanceOf(adapter);
+        IBridge(bridge).fundsOut(releaseParams);
+        delivered = IERC20(token).balanceOf(adapter) - balanceBefore;
     }
 
     /// @dev EIP-712 struct hash for `TeeLzFundsOut`. Isolated in its own frame
@@ -489,6 +510,14 @@ contract MultisigProxy is IMultisigProxy {
         // field is a 32-byte word (dynamic ones are pre-hashed), so the result
         // is byte-identical to encoding all fields at once, but each half is
         // shallow enough to compile without the optimizer (e.g. `forge coverage`).
+        // Pre-hash the dynamic fields into locals first: each `bytes`/`string`
+        // argument otherwise keeps an (offset, length) pair live across the
+        // whole expression, which overflows the stack under via-ir.
+        bytes32 sourceAddressHash = keccak256(bytes(params.sourceAddress));
+        bytes32 proofHash = keccak256(params.proof);
+        bytes32 settlementDataHash = keccak256(params.settlementData);
+        bytes32 extraOptionsHash = keccak256(params.extraOptions);
+
         return keccak256(
             bytes.concat(
                 abi.encode(
@@ -497,15 +526,16 @@ contract MultisigProxy is IMultisigProxy {
                     params.burnId,
                     params.sourceChainId,
                     params.destinationChainId,
-                    keccak256(bytes(params.sourceAddress)),
-                    keccak256(params.proof)
+                    sourceAddressHash,
+                    proofHash
                 ),
                 abi.encode(
-                    keccak256(params.settlementData),
+                    settlementDataHash,
                     params.dstEid,
                     params.recipient,
                     params.minAmountLD,
-                    keccak256(params.extraOptions),
+                    extraOptionsHash,
+                    params.sourceBurnTxId,
                     nonce,
                     deadline
                 )

@@ -130,36 +130,28 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         "UtexoFundsInOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,uint256 senderNonce,address token,uint256 grossAmount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataHash,uint256 chainId)"
     );
 
-    /// @notice Domain-separated type hash for the `fundsOut` replay key.
-    ///         Binds common release intent fields to this Bridge deployment and
-    ///         formula version, including the exact verifier proof the enclave
-    ///         signed for the release.
-    bytes32 public constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
-        "UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)"
+    /// @notice Domain-separated type hash for the settlement replay key shared
+    ///         by `fundsOut` and `rebalanceLiquidity`.
+    ///
+    ///         Both paths derive `burnId` under THIS hash from the same fields,
+    ///         so settling one source-chain burn twice — once as a physical
+    ///         release and once as an accounting-only migration — derives the
+    ///         same id and the second call is rejected as a replay.
+    bytes32 public constant BURN_TYPEHASH = keccak256(
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
 
     /// @notice Domain-separated type hash for the credit-leg `operationId` of a
     ///         `rebalanceLiquidity` call. Distinct from
     ///         `FUNDS_IN_OPERATION_TYPEHASH` so a rebalance id can never collide
-    ///         with a deposit id. Folds in the canonical `burnId` (itself a hash
-    ///         of the FULL intent, including the debit-side `proof` and
-    ///         `settlementDataOut`), so two rebalances that differ only on the
-    ///         debit side — same source/amount/destination but a different burn —
-    ///         still derive distinct `operationId`s. Without this, a credit leg
-    ///         whose `settlementDataIn` is empty (e.g. RGB→Arch) would collide.
+    ///         with a deposit id. Folds in the canonical `burnId` (the shared
+    ///         settlement replay key, including `settlementDataOut` and
+    ///         `sourceBurnTxId` but excluding the moving finality `proof`), so
+    ///         two rebalances backed by different source burns still derive
+    ///         distinct `operationId`s. Without this, a credit leg whose
+    ///         `settlementDataIn` is empty (e.g. RGB→Arch) would collide.
     bytes32 public constant REBALANCE_OPERATION_TYPEHASH = keccak256(
         "UtexoRebalanceOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,address token,uint256 amount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataInHash,uint256 burnId,uint256 chainId)"
-    );
-
-    /// @notice Domain-separated type hash for the `rebalanceLiquidity` replay
-    ///         key. Derived purely from the rebalance intent — no nonce is
-    ///         folded in, so it matches `fundsOut`'s replay model exactly: an
-    ///         identical intent can never execute twice, while legitimately
-    ///         distinct rebalances differ in the intent itself (the destination
-    ///         RGB OpId carried in `settlementDataIn` for mint-side credits, or
-    ///         the Bitcoin `proof` + referenced records for burn-backed debits).
-    bytes32 public constant REBALANCE_BURN_ID_TYPEHASH = keccak256(
-        "UtexoRebalanceBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 destinationAddressHash,bytes32 proofHash,bytes32 settlementDataOutHash,bytes32 settlementDataInHash)"
     );
 
     /// @inheritdoc IBridge
@@ -177,9 +169,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     address public override lzAdapter;
 
     /// @notice Set of Bridge-derived burn identifiers already consumed by a
-    ///         successful `fundsOut` or `rebalanceLiquidity`. Shared namespace:
-    ///         the two paths derive ids under distinct type hashes, and one
-    ///         consumed id can never authorise a second release or rebalance.
+    ///         successful `fundsOut` or `rebalanceLiquidity`. Both paths use the
+    ///         same `BURN_TYPEHASH` and field set, so the same canonical source
+    ///         burn derives the same id on either path and can settle only once.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
     /// @notice Per-`(sourceChainId, sourceSender)` monotonic nonce. Folded into
@@ -576,7 +568,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
                 sourceChainId: fundsOutParams.sourceChainId,
                 destChainId: fundsOutParams.destinationChainId,
                 sourceAddress: fundsOutParams.sourceAddress,
-                isRebalance: false
+                isRebalance: false,
+                sourceBurnTxId: fundsOutParams.sourceBurnTxId
             }),
                 fundsOutParams.proof,
                 fundsOutParams.settlementData
@@ -607,7 +600,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             fundsOutParams.burnId,
             fundsOutParams.sourceChainId,
             fundsOutParams.destinationChainId,
-            fundsOutParams.sourceAddress
+            fundsOutParams.sourceAddress,
+            fundsOutParams.settlementData
         );
     }
 
@@ -639,18 +633,12 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         // `_fundsIn`, no nonce stream is consumed here (see the replay guard).
         bytes32 sourceSender = _hashCalldataString(params.sourceAddress);
 
-        // Replay guard, same model as `fundsOut`: the caller-supplied id must
-        // equal the canonical hash of the full intent, and a consumed id can
-        // never execute again. No nonce is folded in — an identical intent can
-        // therefore never run twice, exactly as `fundsOut` behaves. Legitimately
-        // distinct rebalances differ in the intent itself: the destination RGB
-        // OpId in `settlementDataIn` (mint-side credit) or the Bitcoin proof +
-        // referenced records in `proof`/`settlementDataOut` (burn-backed debit).
-        // True single-burn uniqueness (one RGB burn settled at most once across
-        // fundsOut and rebalance combined) is NOT provable on-chain — the proof
-        // only attests a Bitcoin block exists — and remains the enclave's
-        // responsibility, the same accepted residual as the RGB→EVM fundsOut
-        // path.
+        // Shared replay guard: `fundsOut` and `rebalanceLiquidity` derive the
+        // same id from the canonical debit fields under `BURN_TYPEHASH`. The
+        // moving finality proof and credit-leg fields are intentionally absent;
+        // `sourceBurnTxId` identifies the source burn. Enclaves are responsible
+        // for deriving every included field canonically from the fully validated
+        // consignment and for never attesting a second intent for the same burn.
         uint256 expectedBurnId = _deriveRebalanceBurnId(params);
         if (params.burnId != expectedBurnId) revert InvalidBurnId(params.burnId, expectedBurnId);
         if (consumedBurnIds[params.burnId]) revert BurnIdAlreadyConsumed(params.burnId);
@@ -689,7 +677,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
                 sourceChainId: params.sourceChainId,
                 destChainId: params.destinationChainId,
                 sourceAddress: params.sourceAddress,
-                isRebalance: true
+                isRebalance: true,
+                sourceBurnTxId: params.sourceBurnTxId
             }),
                 params.proof,
                 params.settlementDataOut
@@ -737,7 +726,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             params.destinationChainId,
             params.amount,
             params.sourceAddress,
-            params.destinationAddress
+            params.destinationAddress,
+            params.settlementDataOut,
+            params.settlementDataIn
         );
     }
 
@@ -763,6 +754,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (params.recipient == address(0)) revert InvalidRecipientAddress();
         if (params.sourceChainId == 0) revert InvalidSourceChainId();
         if (params.destinationChainId == 0) revert InvalidDestinationChainId();
+        if (params.sourceBurnTxId == bytes32(0)) revert ZeroSourceBurnTxId();
 
         uint256 sourceAddressLength = bytes(params.sourceAddress).length;
         if (sourceAddressLength > MAX_ADDRESS_LENGTH) {
@@ -783,7 +775,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (params.sourceChainId == 0) revert InvalidSourceChainId();
         if (params.destinationChainId == 0) revert InvalidDestinationChainId();
         if (params.sourceChainId == params.destinationChainId) revert RebalanceSameChain(params.sourceChainId);
-        if (bytes(params.destinationAddress).length == 0) revert InvalidDestinationAddress();
+        if (params.sourceBurnTxId == bytes32(0)) revert ZeroSourceBurnTxId();
 
         uint256 sourceAddressLength = bytes(params.sourceAddress).length;
         if (sourceAddressLength > MAX_ADDRESS_LENGTH) {
@@ -800,36 +792,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (params.settlementDataIn.length > MAX_SETTLEMENT_DATA_LENGTH) {
             revert SettlementDataTooLong(params.settlementDataIn.length, MAX_SETTLEMENT_DATA_LENGTH);
         }
-    }
-
-    /// @dev Canonical rebalance replay key = domain-separated hash of the full
-    ///      rebalance intent (no nonce). Encoded in two `abi.encode` halves
-    ///      joined with `bytes.concat` (every field is one 32-byte word; dynamic
-    ///      fields are pre-hashed), keeping each half shallow enough to compile
-    ///      without the optimizer.
-    function _deriveRebalanceBurnId(RebalanceParams calldata params) private view returns (uint256) {
-        return uint256(
-            keccak256(
-                bytes.concat(
-                    abi.encode(
-                        REBALANCE_BURN_ID_TYPEHASH,
-                        address(this),
-                        block.chainid,
-                        TOKEN,
-                        params.amount,
-                        params.sourceChainId,
-                        params.destinationChainId
-                    ),
-                    abi.encode(
-                        _hashCalldataString(params.sourceAddress),
-                        _hashCalldataString(params.destinationAddress),
-                        _hashCalldataBytes(params.proof),
-                        _hashCalldataBytes(params.settlementDataOut),
-                        _hashCalldataBytes(params.settlementDataIn)
-                    )
-                )
-            )
-        );
     }
 
     /// @dev Canonical credit-leg `operationId` for a rebalance. Mirrors
@@ -906,7 +868,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (amount < minFundsInAmount) {
             revert AmountBelowMinimum(amount, minFundsInAmount);
         }
-        if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
         if (bytes(destinationAddress).length > MAX_ADDRESS_LENGTH) {
             revert AddressTooLong(bytes(destinationAddress).length, MAX_ADDRESS_LENGTH);
         }
@@ -1048,7 +1009,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             nativeToCollect, // native commission actually credited to the pool
             ctx.sourceChainId,
             ctx.destChainId,
-            ctx.destAddress
+            ctx.destAddress,
+            settlementData
         );
 
         // Return the drift buffer LAST: after every state write and after the
@@ -1185,51 +1147,67 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         );
     }
 
-    /// @dev Canonical `burnId` = domain-separated hash of the release intent.
-    ///      Route-specific burn identity should be placed in `settlementData`
-    ///      when a route has one; Bridge commits to it via `settlementDataHash`.
+    /// @dev Canonical `burnId` = domain-separated hash of the settlement intent.
+    ///      Identical formula for both paths — see `BURN_TYPEHASH`.
     function _deriveBurnId(FundsOutParams calldata params) private view returns (uint256) {
         return _deriveBurnIdFromFields(
-            params.recipient,
             params.amount,
             params.sourceChainId,
             params.destinationChainId,
             params.sourceAddress,
-            params.proof,
-            params.settlementData
+            params.settlementData,
+            params.sourceBurnTxId
         );
     }
 
+    /// @dev Rebalance uses the SAME formula; `settlementDataOut` is the
+    ///      debit-leg blob, the exact counterpart of `fundsOut`'s
+    ///      `settlementData`.
+    function _deriveRebalanceBurnId(RebalanceParams calldata params) private view returns (uint256) {
+        return _deriveBurnIdFromFields(
+            params.amount,
+            params.sourceChainId,
+            params.destinationChainId,
+            params.sourceAddress,
+            params.settlementDataOut,
+            params.sourceBurnTxId
+        );
+    }
+
+    /// @dev Dynamic fields are hashed over their RAW bytes (never their ABI
+    ///      encoding), matching EIP-712 treatment of dynamic types. An empty
+    ///      value therefore hashes to
+    ///      `0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470`,
+    ///      not to `bytes32(0)`. Off-chain signers must reproduce this exactly.
     function _deriveBurnIdFromFields(
-        address recipient,
         uint256 amount,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string calldata sourceAddress,
-        bytes calldata proof,
-        bytes calldata settlementData
+        bytes calldata settlementData,
+        bytes32 sourceBurnTxId
     ) private view returns (uint256) {
         return uint256(
             keccak256(
                 abi.encode(
-                    FUNDS_OUT_BURN_ID_TYPEHASH,
+                    BURN_TYPEHASH,
                     address(this),
                     block.chainid,
                     TOKEN,
-                    recipient,
                     amount,
                     sourceChainId,
                     destinationChainId,
                     _hashCalldataString(sourceAddress),
-                    _hashCalldataBytes(proof),
-                    _hashCalldataBytes(settlementData)
+                    _hashCalldataBytes(settlementData),
+                    sourceBurnTxId
                 )
             )
         );
     }
 
     function _hashCalldataString(string calldata value) private pure returns (bytes32 result) {
-        assembly {
+        // memory-safe: allocates above the free memory pointer and advances it.
+        assembly ("memory-safe") {
             let ptr := mload(0x40)
             calldatacopy(ptr, value.offset, value.length)
             result := keccak256(ptr, value.length)
@@ -1238,7 +1216,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     }
 
     function _hashCalldataBytes(bytes calldata value) private pure returns (bytes32 result) {
-        assembly {
+        // memory-safe: allocates above the free memory pointer and advances it.
+        assembly ("memory-safe") {
             let ptr := mload(0x40)
             calldatacopy(ptr, value.offset, value.length)
             result := keccak256(ptr, value.length)

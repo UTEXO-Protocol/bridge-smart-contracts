@@ -46,7 +46,9 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         uint256 destinationChainId,
         uint256 amount,
         string sourceAddress,
-        string destinationAddress
+        string destinationAddress,
+        bytes settlementDataOut,
+        bytes settlementDataIn
     );
 
     Bridge bridge;
@@ -72,10 +74,11 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     uint256 constant RGB_MINTBURN_CHAIN_ID = 1_000_003; // RGB mint/burn network (variant C: same module)
     uint256 constant PRODUCTION_RGB_MINT_BURN_CHAIN_ID = 96;
     uint256 constant PRODUCTION_RGB_POOL_CHAIN_ID = 97;
-    string constant RGB_DST_ADDR = "rgb:asset1qp0y3mq6h5k8d9f2e4j7n6c3w/utxo1abc123";
+    string constant RGB_DST_ADDR = "";
     string constant ARCH_DST_ADDR = "arch:bridge-wallet";
-    string constant RGB_SRC_ADDR = "rgb:burner/utxo1burn";
+    string constant RGB_SRC_ADDR = ""; // RGB has no source-address concept
     string constant ARCH_SRC_ADDR = "arch:burner";
+    bytes32 constant SRC_BURN_TX_ID = keccak256("rebalance-burn-tx-default");
     uint256 constant AMOUNT = 1e18;
 
     /// @dev Balanced policy that consumes the full configurable budget:
@@ -91,9 +94,6 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     uint256 constant LATEST_HEIGHT = 850_005;
     bytes32 constant LATEST_COMMIT = keccak256("test-btc-latest-commitment");
     uint256 constant LATEST_CONFIRMATIONS = 1;
-    bytes32 constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
-        "UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)"
-    );
 
     // Seed deposit ids (captured in setUp): RGB-pool and RGB-mint/burn deposits.
     bytes32 rgbSeedOpId;
@@ -231,28 +231,23 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         return abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
     }
 
-    /// @dev Mirror of `Bridge._deriveRebalanceBurnId` (no nonce — derived purely
-    ///      from the rebalance intent).
+    /// @dev Mirror of `Bridge._deriveRebalanceBurnId`. Shares `BURN_TYPEHASH`
+    ///      with `fundsOut`: the debit-leg blob and the source burn id are what
+    ///      make the key distinct, the credit-leg fields are not part of it.
     function _deriveRebalanceBurnId(IBridge.RebalanceParams memory p) internal view returns (uint256) {
         return uint256(
             keccak256(
-                bytes.concat(
-                    abi.encode(
-                        bridge.REBALANCE_BURN_ID_TYPEHASH(),
-                        address(bridge),
-                        block.chainid,
-                        address(usdt0),
-                        p.amount,
-                        p.sourceChainId,
-                        p.destinationChainId
-                    ),
-                    abi.encode(
-                        keccak256(bytes(p.sourceAddress)),
-                        keccak256(bytes(p.destinationAddress)),
-                        keccak256(p.proof),
-                        keccak256(p.settlementDataOut),
-                        keccak256(p.settlementDataIn)
-                    )
+                abi.encode(
+                    bridge.BURN_TYPEHASH(),
+                    address(bridge),
+                    block.chainid,
+                    address(usdt0),
+                    p.amount,
+                    p.sourceChainId,
+                    p.destinationChainId,
+                    keccak256(bytes(p.sourceAddress)),
+                    keccak256(p.settlementDataOut),
+                    p.sourceBurnTxId
                 )
             )
         );
@@ -295,13 +290,14 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
             destinationAddress: RGB_DST_ADDR,
             proof: "",
             settlementDataOut: _emptySettlement(),
-            settlementDataIn: abi.encode(rgbOpId)
+            settlementDataIn: abi.encode(rgbOpId),
+            sourceBurnTxId: bytes32(rgbOpId)
         });
         p.burnId = _deriveRebalanceBurnId(p);
     }
 
     /// @dev RGB → Arch rebalance params (debit-RGB: burn-backed), canonical
-    ///      burnId filled in from the full intent.
+    ///      burnId filled in from the shared settlement replay fields.
     function _rgbToArchParams(uint256 amount, bytes32 referencedOpId)
         internal
         view
@@ -316,7 +312,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
             destinationAddress: ARCH_DST_ADDR,
             proof: _proof(),
             settlementDataOut: _settlement(referencedOpId),
-            settlementDataIn: ""
+            settlementDataIn: "",
+            sourceBurnTxId: referencedOpId
         });
         p.burnId = _deriveRebalanceBurnId(p);
     }
@@ -339,7 +336,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
             destinationAddress: RGB_DST_ADDR,
             proof: _proof(),
             settlementDataOut: _settlement(referencedOpId),
-            settlementDataIn: abi.encode(poolRgbOpId)
+            settlementDataIn: abi.encode(poolRgbOpId),
+            sourceBurnTxId: referencedOpId
         });
         p.burnId = _deriveRebalanceBurnId(p);
     }
@@ -362,7 +360,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
             destinationAddress: RGB_DST_ADDR,
             proof: "",
             settlementDataOut: _emptySettlement(),
-            settlementDataIn: abi.encode(mintBurnRgbOpId)
+            settlementDataIn: abi.encode(mintBurnRgbOpId),
+            sourceBurnTxId: bytes32(mintBurnRgbOpId)
         });
         p.burnId = _deriveRebalanceBurnId(p);
     }
@@ -386,7 +385,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
             destinationAddress: RGB_DST_ADDR,
             proof: _proof(),
             settlementDataOut: _settlement(referencedOpId),
-            settlementDataIn: ""
+            settlementDataIn: "",
+            sourceBurnTxId: referencedOpId
         });
         p.burnId = _deriveRebalanceBurnId(p);
     }
@@ -405,7 +405,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
             destinationAddress: RGB_DST_ADDR,
             proof: "",
             settlementDataOut: _emptySettlement(),
-            settlementDataIn: abi.encode(rgbOpId)
+            settlementDataIn: abi.encode(rgbOpId),
+            sourceBurnTxId: bytes32(rgbOpId)
         });
         p.burnId = _deriveRebalanceBurnId(p);
     }
@@ -417,20 +418,21 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         bytes memory proof,
         bytes memory settlementData
     ) internal view returns (uint256) {
+        recipient_; // no longer part of the key
+        proof; // no longer part of the key
         return uint256(
             keccak256(
                 abi.encode(
-                    FUNDS_OUT_BURN_ID_TYPEHASH,
+                    bridge.BURN_TYPEHASH(),
                     address(bridge),
                     block.chainid,
                     address(usdt0),
-                    recipient_,
                     amount,
                     sourceChainId,
                     SOURCE_CHAIN_ID,
                     keccak256(bytes(RGB_SRC_ADDR)),
-                    keccak256(proof),
-                    keccak256(settlementData)
+                    keccak256(settlementData),
+                    SRC_BURN_TX_ID
                 )
             )
         );
@@ -462,7 +464,7 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
             _countBridgeLogs(
                 logs,
                 keccak256(
-                    "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,string)"
+                    "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,string,bytes)"
                 )
             ),
             1,
@@ -493,7 +495,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
                 destinationChainId: SOURCE_CHAIN_ID,
                 sourceAddress: RGB_SRC_ADDR,
                 proof: proof,
-                settlementData: settlementData
+                settlementData: settlementData,
+                sourceBurnTxId: SRC_BURN_TX_ID
             })
         );
 
@@ -556,7 +559,17 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         vm.expectEmit(true, false, false, true);
         emit FundsIn(multisig, mintOpId, uint64(AMOUNT));
         vm.expectEmit(true, true, false, true);
-        emit BridgeRebalance(expectedOpId, p.burnId, ARCH_CHAIN_ID, RGB_CHAIN_ID, AMOUNT, ARCH_SRC_ADDR, RGB_DST_ADDR);
+        emit BridgeRebalance(
+            expectedOpId,
+            p.burnId,
+            ARCH_CHAIN_ID,
+            RGB_CHAIN_ID,
+            AMOUNT,
+            ARCH_SRC_ADDR,
+            RGB_DST_ADDR,
+            p.settlementDataOut,
+            p.settlementDataIn
+        );
 
         _rebalance(p);
 
@@ -801,14 +814,11 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     }
 
     function test_rebalance_revert_burnBackedIdenticalIntentReplay() public {
-        // Same on-chain replay protection as fundsOut: an IDENTICAL burn-backed
-        // intent (same proof + referenced records + all fields) derives the same
-        // burnId → consumed guard reverts. Before the nonce was removed,
-        // incrementing it re-enabled this replay.
-        //
-        // NB: this does NOT prove single-real-burn uniqueness (same Bitcoin burn
-        // reused via a DIFFERENT intent, or across fundsOut+rebalance) — that is
-        // the documented enclave-trust residual, not enforceable on-chain.
+        // Same on-chain replay protection as fundsOut: an identical canonical
+        // debit intent derives the same burnId, regardless of the moving proof,
+        // so the consumed guard rejects the second attempt. Enclaves own the
+        // trust assumption that all included fields are reconstructed
+        // canonically from the validated consignment.
         IBridge.RebalanceParams memory p = _rgbToArchParams(AMOUNT, rgbSeedOpId);
         _rebalance(p);
 
@@ -820,7 +830,7 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     function test_rebalance_operationId_uniquePerBurnEvenWithEmptySettlementIn() public {
         // Two RGB→Arch rebalances identical on the credit side (same source,
         // amount, destination, empty settlementDataIn) but backed by DIFFERENT
-        // burns (different proof + referenced records) must NOT collide on
+        // burns (different sourceBurnTxId + referenced records) must NOT collide on
         // operationId — the event that drives the Arch destination flow.
         // operationId folds in burnId, so debit-side differences propagate.
 
@@ -845,7 +855,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         vm.warp(block.timestamp + bridge.BUCKET_REFILL_WINDOW() + 1);
         _rebalance(second);
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        bytes32 rebalanceTopic = keccak256("BridgeRebalance(bytes32,uint256,uint256,uint256,uint256,string,string)");
+        bytes32 rebalanceTopic =
+            keccak256("BridgeRebalance(bytes32,uint256,uint256,uint256,uint256,string,string,bytes,bytes)");
         bytes32 firstOpId;
         bytes32 secondOpId;
         bool haveFirst;
@@ -933,12 +944,17 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         bridge.rebalanceLiquidity(p);
     }
 
-    function test_rebalance_revert_emptyDestinationAddress() public {
+    function test_rebalance_rgbCreditAcceptsEmptyDestinationAddress() public {
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         p.destinationAddress = "";
-        vm.prank(multisig);
-        vm.expectRevert(IBridge.InvalidDestinationAddress.selector);
-        bridge.rebalanceLiquidity(p);
+        bytes32 expectedOperationId = _deriveRebalanceOpId(p);
+
+        _rebalance(p);
+
+        assertEq(rgbModule.fundsInRecords(expectedOperationId), AMOUNT, "empty-address RGB credit recorded");
+        assertEq(
+            rgbModule.fundsInRecordChainIds(expectedOperationId), RGB_CHAIN_ID, "record tagged with RGB destination"
+        );
     }
 
     function test_rebalance_revert_routeNotEnabled() public {
@@ -1003,7 +1019,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
             sourceChainId: RGB_CHAIN_ID,
             destChainId: ARCH_CHAIN_ID,
             sourceAddress: RGB_SRC_ADDR,
-            isRebalance: true
+            isRebalance: true,
+            sourceBurnTxId: SRC_BURN_TX_ID
         });
 
         vm.prank(address(routeRegistry));
@@ -1063,7 +1080,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
                 sourceChainId: RGB_CHAIN_ID,
                 destChainId: ARCH_CHAIN_ID,
                 sourceAddress: RGB_SRC_ADDR,
-                isRebalance: true
+                isRebalance: true,
+                sourceBurnTxId: SRC_BURN_TX_ID
             }),
             _emptySettlement()
         );
@@ -1091,5 +1109,82 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         new RgbOutboundSettlementModule(address(0), address(rgbModule));
         vm.expectRevert(RgbOutboundSettlementModule.InvalidRgbModule.selector);
         new RgbOutboundSettlementModule(address(routeRegistry), address(0));
+    }
+
+    // ========================================================================
+    // shared replay namespace across fundsOut and rebalanceLiquidity
+    //
+    // Both paths derive `burnId` under the same `BURN_TYPEHASH` from the same
+    // fields, so one source-chain burn settles at most once no matter which
+    // path is used. Before this, the two derivations used separate typehashes
+    // and the same burn could be settled twice.
+    // ========================================================================
+
+    /// @notice A rebalance and a release describing the same burn derive the
+    ///         same `burnId`, so the second one is rejected as a replay.
+    function test_sameBurnCannotSettleViaBothRebalanceAndFundsOut() public {
+        IBridge.RebalanceParams memory p = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        _rebalance(p);
+        assertTrue(bridge.consumedBurnIds(p.burnId), "rebalance consumed the id");
+
+        // Same burn, same amount, same route — now as a physical release.
+        vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, p.burnId));
+        vm.prank(multisig);
+        bridge.fundsOut(
+            IBridge.FundsOutParams({
+                recipient: recipient,
+                amount: p.amount,
+                burnId: p.burnId,
+                sourceChainId: p.sourceChainId,
+                destinationChainId: p.destinationChainId,
+                sourceAddress: p.sourceAddress,
+                proof: p.proof,
+                settlementData: p.settlementDataOut,
+                sourceBurnTxId: p.sourceBurnTxId
+            })
+        );
+    }
+
+    /// @notice The credit-leg blob is deliberately outside the key: it says where
+    ///         value goes, not which burn produced it. Two rebalances of the same
+    ///         burn therefore collide even with different destination OpIds.
+    function test_rebalanceBurnIdIgnoresCreditLegData() public {
+        IBridge.RebalanceParams memory a = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        IBridge.RebalanceParams memory b = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        b.settlementDataIn = abi.encode(uint256(0xFEED));
+        assertEq(_deriveRebalanceBurnId(b), a.burnId, "credit-leg data does not change the key");
+    }
+
+    /// @notice Distinct burns stay distinct: the source burn id is what separates
+    ///         them once `proof` and the credit-leg fields are out of the key.
+    function test_rebalanceBurnIdSeparatesDistinctBurns() public view {
+        IBridge.RebalanceParams memory a = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        IBridge.RebalanceParams memory b = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        b.sourceBurnTxId = keccak256("a-different-rgb-burn");
+        assertTrue(_deriveRebalanceBurnId(b) != a.burnId, "a different burn derives a different id");
+    }
+
+    /// @notice Bridge refuses a settlement that does not name its source burn.
+    ///         The guard is route-agnostic on purpose: every chain supplies a
+    ///         burn id, and it is the only field that keeps `burnId` distinct on
+    ///         routes whose `settlementData` is empty.
+    function test_rebalanceRevertsOnZeroSourceBurnTxId() public {
+        IBridge.RebalanceParams memory p = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        p.sourceBurnTxId = bytes32(0);
+        p.burnId = _deriveRebalanceBurnId(p);
+
+        vm.expectRevert(IBridge.ZeroSourceBurnTxId.selector);
+        _rebalance(p);
+    }
+
+    /// @notice An empty `sourceAddress` hashes to keccak256 of the empty byte
+    ///         string, not to zero. Pinned so an off-chain signer that encodes it
+    ///         differently fails here rather than on-chain with InvalidBurnId.
+    function test_emptySourceAddressHashesToKnownConstant() public pure {
+        assertEq(
+            keccak256(bytes("")),
+            bytes32(0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470),
+            "empty string hash"
+        );
     }
 }

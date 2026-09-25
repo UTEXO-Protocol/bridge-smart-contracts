@@ -137,6 +137,7 @@ interface IMultisigProxy {
         bytes32 recipient;
         uint256 minAmountLD;
         bytes extraOptions;
+        bytes32 sourceBurnTxId;
     }
 
     struct Proposal {

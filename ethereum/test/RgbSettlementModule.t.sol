@@ -18,6 +18,7 @@ import {FundsInContext, FundsOutContext} from "../src/interfaces/RouteTypes.sol"
 ///         them, or compare against `ctx.amount` — solvency and replay are owned
 ///         by the Bridge (`lockedLiquidity` / `consumedBurnIds`).
 contract RgbSettlementModuleTest is Test {
+    bytes32 constant SRC_BURN_TX_ID = keccak256("unit-burn-tx");
     RgbSettlementModule module;
 
     address routeRegistry = makeAddr("routeRegistry");
@@ -70,7 +71,7 @@ contract RgbSettlementModuleTest is Test {
             senderNonce: 0,
             sourceChainId: EVM_CHAIN_ID,
             destChainId: rgbChainId,
-            destAddress: "rgb:asset/utxo1abc"
+            destAddress: ""
         });
     }
 
@@ -90,8 +91,9 @@ contract RgbSettlementModuleTest is Test {
             burnId: BURN_ID,
             sourceChainId: rgbChainId,
             destChainId: EVM_CHAIN_ID,
-            sourceAddress: "rgb:sender/utxo1src",
-            isRebalance: false
+            sourceAddress: "",
+            isRebalance: false,
+            sourceBurnTxId: SRC_BURN_TX_ID
         });
     }
 
@@ -166,6 +168,18 @@ contract RgbSettlementModuleTest is Test {
         vm.prank(routeRegistry);
         vm.expectRevert(RgbSettlementModule.InvalidRgbOpId.selector);
         module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), abi.encode(uint256(0)));
+    }
+
+    function test_onFundsIn_revertsOnNonEmptyDestinationAddress() public {
+        FundsInContext memory ctx = _fundsInCtx(TX_ID_1, AMOUNT);
+        ctx.destAddress = "rgb:unexpected";
+
+        vm.prank(routeRegistry);
+        vm.expectRevert(RgbSettlementModule.UnexpectedDestinationAddress.selector);
+        module.onFundsIn(ctx, abi.encode(RGB_OP_ID));
+
+        assertEq(module.fundsInRecords(TX_ID_1), 0, "record not written");
+        assertEq(module.fundsInRecordChainIds(TX_ID_1), 0, "network tag not written");
     }
 
     function test_onFundsIn_revertsOnDuplicateOperationId() public {

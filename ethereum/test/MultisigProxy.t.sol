@@ -140,7 +140,8 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string sourceAddress
+        string sourceAddress,
+        bytes settlementData
     );
     event RouteSet(
         uint256 indexed sourceChainId,
@@ -193,8 +194,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     // Chain identifiers + canonical fundsOut args
     uint256 constant SOURCE_CHAIN_ID = 31337; // foundry block.chainid
     uint256 constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
-    string constant DST_ADDR = "rgb:asset/utxo1abc";
-    string constant SRC_ADDR = "rgb:sender/utxo1src";
+    string constant DST_ADDR = "";
+    string constant SRC_ADDR = ""; // RGB has no source-address concept
+    bytes32 constant SRC_BURN_TX_ID = keccak256("multisig-burn-tx-default");
     uint256 constant AMOUNT = 1e18;
 
     /// @dev Balanced policy that consumes the full configurable budget:
@@ -204,8 +206,8 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     uint256 constant TX_ID = 42;
     uint256 constant RGB_OP_ID = 0xABCDEF;
     uint256 constant BURN_ID = 9_001;
-    bytes32 constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
-        "UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)"
+    bytes32 constant BURN_TYPEHASH = keccak256(
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
     uint256 constant LZ_NATIVE_FEE = 0.01 ether;
     uint32 constant DST_EID = 30110;
@@ -368,20 +370,21 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         bytes memory proof,
         bytes memory settlementData
     ) internal view returns (uint256) {
+        bridgeRecipient; // no longer part of the key
+        proof; // no longer part of the key
         return uint256(
             keccak256(
                 abi.encode(
-                    FUNDS_OUT_BURN_ID_TYPEHASH,
+                    BURN_TYPEHASH,
                     address(bridge),
                     block.chainid,
                     address(token),
-                    bridgeRecipient,
                     amount,
                     sourceChainId,
                     destinationChainId,
                     keccak256(bytes(sourceAddress)),
-                    keccak256(proof),
-                    keccak256(settlementData)
+                    keccak256(settlementData),
+                    SRC_BURN_TX_ID
                 )
             )
         );
@@ -428,7 +431,8 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
             destinationChainId: SOURCE_CHAIN_ID,
             sourceAddress: SRC_ADDR,
             proof: proof,
-            settlementData: settlementData
+            settlementData: settlementData,
+            sourceBurnTxId: SRC_BURN_TX_ID
         });
     }
 
@@ -461,7 +465,8 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
             dstEid: DST_EID,
             recipient: LZ_RECIPIENT,
             minAmountLD: 0,
-            extraOptions: hex"0003010011010000000000000000000000000000ea60"
+            extraOptions: hex"0003010011010000000000000000000000000000ea60",
+            sourceBurnTxId: SRC_BURN_TX_ID
         });
     }
 
@@ -1235,28 +1240,29 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
             destinationAddress: DST_ADDR,
             proof: proof,
             settlementDataOut: _settlement(_fundsInIds()),
-            settlementDataIn: abi.encode(RGB_OP_ID + 7)
+            settlementDataIn: abi.encode(RGB_OP_ID + 7),
+            sourceBurnTxId: SRC_BURN_TX_ID
         });
 
-        p.burnId = uint256(
+        p.burnId = _deriveRebalanceBurnId(p);
+    }
+
+    /// @dev Mirror of `Bridge._deriveRebalanceBurnId` — the same shared formula
+    ///      `fundsOut` uses, in its own frame to keep callers stack-shallow.
+    function _deriveRebalanceBurnId(IBridge.RebalanceParams memory p) internal view returns (uint256) {
+        return uint256(
             keccak256(
-                bytes.concat(
-                    abi.encode(
-                        bridge.REBALANCE_BURN_ID_TYPEHASH(),
-                        address(bridge),
-                        block.chainid,
-                        address(token),
-                        p.amount,
-                        p.sourceChainId,
-                        p.destinationChainId
-                    ),
-                    abi.encode(
-                        keccak256(bytes(p.sourceAddress)),
-                        keccak256(bytes(p.destinationAddress)),
-                        keccak256(p.proof),
-                        keccak256(p.settlementDataOut),
-                        keccak256(p.settlementDataIn)
-                    )
+                abi.encode(
+                    bridge.BURN_TYPEHASH(),
+                    address(bridge),
+                    block.chainid,
+                    address(token),
+                    p.amount,
+                    p.sourceChainId,
+                    p.destinationChainId,
+                    keccak256(bytes(p.sourceAddress)),
+                    keccak256(p.settlementDataOut),
+                    p.sourceBurnTxId
                 )
             )
         );
@@ -2749,7 +2755,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
         vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
-            recipient, AMOUNT, netAmount, tokenCommission, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            recipient,
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            params.burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            params.settlementData
         );
         vm.expectEmit(true, true, false, true);
         emit FundsOutExecuted(RGB_CHAIN_ID, nonce, bitmap);
@@ -2833,7 +2847,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
-            address(adapter), AMOUNT, netAmount, tokenCommission, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            params.burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            params.settlementData
         );
         vm.expectEmit(true, false, false, true, address(adapter));
         emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
@@ -3091,7 +3113,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
-            address(adapter), AMOUNT, netAmount, tokenCommission, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            params.burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            params.settlementData
         );
         vm.expectEmit(true, false, false, true, address(adapter));
         emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
@@ -3184,7 +3214,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
-            address(adapter), AMOUNT, netAmount, tokenCommission, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            params.burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            params.settlementData
         );
         vm.expectEmit(true, false, false, true, address(adapter));
         emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
@@ -3285,7 +3323,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         // Leg 1: the Bridge recipient is forced to the adapter (not in params).
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
-            address(adapter), AMOUNT, netAmount, tokenCommission, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            params.burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            params.settlementData
         );
         // Leg 2: sendOut carries the NET delivered amount, not the gross AMOUNT.
         bytes32 sendOutGuid = keccak256(abi.encode("mock-send-out", DST_EID, LZ_RECIPIENT, netAmount));

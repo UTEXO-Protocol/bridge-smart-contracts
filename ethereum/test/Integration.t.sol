@@ -98,9 +98,10 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
 
     // Non-zero RGB OpId threaded through the RGB-route settlementData on fundsIn.
     uint256 constant RGB_OP_ID = 0xABCDEF;
-    bytes32 constant FUNDS_OUT_BURN_ID_TYPEHASH = keccak256(
-        "UtexoFundsOutBurnId(address bridge,uint256 chainId,address token,address recipient,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 proofHash,bytes32 settlementDataHash)"
+    bytes32 constant BURN_TYPEHASH = keccak256(
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
+    bytes32 constant SRC_BURN_TX_ID = keccak256("integration-burn-tx-default");
 
     // RGB proof = two (height, commit) pairs: a deep source block (RGB
     // burn/lock) and a fresh latest block (relay head). gap = 6 - 1 = 5.
@@ -126,7 +127,8 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string sourceAddress
+        string sourceAddress,
+        bytes settlementData
     );
 
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
@@ -144,20 +146,21 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes memory proof,
         bytes memory settlementData
     ) internal view returns (uint256) {
+        recipient_; // no longer part of the key
+        proof; // no longer part of the key
         return uint256(
             keccak256(
                 abi.encode(
-                    FUNDS_OUT_BURN_ID_TYPEHASH,
+                    BURN_TYPEHASH,
                     address(bridge),
                     block.chainid,
                     address(token),
-                    recipient_,
                     amount,
                     sourceChainId,
                     destinationChainId,
                     keccak256(bytes(sourceAddress)),
-                    keccak256(proof),
-                    keccak256(settlementData)
+                    keccak256(settlementData),
+                    SRC_BURN_TX_ID
                 )
             )
         );
@@ -332,10 +335,10 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         // Ten equal deposits make the release below exactly 10% of isolated
         // and global TVL — the configured bucket burst.
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, "rgb:asset1qp0y3mq/utxo1abc", abi.encode(RGB_OP_ID));
+        bytes32 opId = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, "", abi.encode(RGB_OP_ID));
         for (uint256 i = 1; i < 10; i++) {
             vm.prank(user);
-            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, "rgb:asset1qp0y3mq/utxo1abc", abi.encode(RGB_OP_ID + i));
+            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, "", abi.encode(RGB_OP_ID + i));
         }
 
         uint256 tokenCommissionIn = tInQuote * 10;
@@ -367,7 +370,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
 
         bytes memory proof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
         bytes memory settlementData = abi.encode(fundsInIds, fundsInAmounts);
-        string memory sourceAddress = "rgb:sender/utxo1src";
+        string memory sourceAddress = ""; // RGB has no source-address concept
         uint256 burnId =
             _deriveBurnId(recipient, netBridgedIn, RGB_CHAIN_ID, SOURCE_CHAIN_ID, sourceAddress, proof, settlementData);
 
@@ -379,7 +382,8 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
             SOURCE_CHAIN_ID,
             sourceAddress,
             proof,
-            settlementData
+            settlementData,
+            SRC_BURN_TX_ID
         );
 
         uint256 outNonce = proxy.teeNonce(RGB_CHAIN_ID);
@@ -392,7 +396,15 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
-            recipient, netBridgedIn, netOut, tokenCommissionOut, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, sourceAddress
+            recipient,
+            netBridgedIn,
+            netOut,
+            tokenCommissionOut,
+            burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            sourceAddress,
+            settlementData
         );
 
         proxy.fundsOutCall(params, outNonce, outDeadline, 3, teeSigs);
@@ -492,9 +504,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         vm.deal(user, nativeQuote);
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn{value: nativeQuote}(
-            USER_DEPOSIT, RGB_CHAIN_ID, "rgb:asset1qp0y3mq/utxo1abc", abi.encode(RGB_OP_ID)
-        );
+        bytes32 opId = bridge.fundsIn{value: nativeQuote}(USER_DEPOSIT, RGB_CHAIN_ID, "", abi.encode(RGB_OP_ID));
 
         assertEq(token.balanceOf(address(bridge)), USER_DEPOSIT, "bridge got full token amount");
         assertEq(token.balanceOf(address(cm)), 0, "cm no token commission");
@@ -575,7 +585,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
     // Shared helpers for the FundsIn (mint) / FundsOut (burn) e2e groups
     // =========================================================================
 
-    string constant RGB_INVOICE = "rgb:asset1qp0y3mq/utxo1abc";
+    string constant RGB_INVOICE = "";
 
     struct ReleaseState {
         uint256 teeNonce;
@@ -673,7 +683,15 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes memory settlementData = abi.encode(ids, amts);
         burnId = _deriveBurnId(recipient, releaseAmount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, srcAddr, proof, settlementData);
         params = IBridge.FundsOutParams(
-            recipient, releaseAmount, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, srcAddr, proof, settlementData
+            recipient,
+            releaseAmount,
+            burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            srcAddr,
+            proof,
+            settlementData,
+            SRC_BURN_TX_ID
         );
     }
 
@@ -863,8 +881,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID + 100));
 
         // Outflow is a separate flag - a withdraw still succeeds.
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn, netIn, "rgb:src", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
         ReleaseState memory beforeState = _releaseState(burnId);
         _submitFundsOut(params, 0, new bytes[](0));
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
@@ -888,12 +905,13 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
         uint256 netOut = netIn - outFee;
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn, netIn, "rgb:src", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
 
         ReleaseState memory beforeState = _releaseState(burnId);
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit BridgeFundsOut(recipient, netIn, netOut, outFee, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, "rgb:src");
+        emit BridgeFundsOut(
+            recipient, netIn, netOut, outFee, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, "", params.settlementData
+        );
         _submitFundsOut(params, 0, new bytes[](0));
 
         _assertSuccessfulRelease(params, beforeState, outFee);
@@ -920,8 +938,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes32 opId = _depositN(10, RGB_OP_ID);
         uint256 netIn = _netIn();
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn, netIn, "rgb:src", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
         _submitFundsOut(params, 0, new bytes[](0));
 
         ReleaseState memory afterFirst = _releaseState(burnId);
@@ -946,8 +963,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes32 opId = _depositN(10, RGB_OP_ID);
         uint256 netIn = _netIn();
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn, netIn, "rgb:src", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = block.timestamp + 1 hours;
         bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
@@ -968,7 +984,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 poolPlusOne = token.balanceOf(address(bridge)) + 1;
 
         (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn, poolPlusOne, "rgb:src", _validProof());
+            _buildFundsOut(opId, netIn, poolPlusOne, "", _validProof());
 
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = block.timestamp + 1 hours;
@@ -991,8 +1007,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
 
         // Use the fresh (1-confirmation) block as the source: below the 6 required.
         bytes memory shallowProof = abi.encode(LATEST_HEIGHT, LATEST_COMMIT, LATEST_HEIGHT, LATEST_COMMIT);
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn, netIn, "rgb:src", shallowProof);
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", shallowProof);
 
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = block.timestamp + 1 hours;
@@ -1016,7 +1031,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
 
         bytes32 fakeOpId = keccak256("nonexistent-deposit");
         (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(fakeOpId, netIn, netIn, "rgb:src", _validProof());
+            _buildFundsOut(fakeOpId, netIn, netIn, "", _validProof());
 
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = block.timestamp + 1 hours;
@@ -1038,7 +1053,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 netIn = _netIn();
 
         (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn + 1, netIn, "rgb:src", _validProof());
+            _buildFundsOut(opId, netIn + 1, netIn, "", _validProof());
 
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = block.timestamp + 1 hours;
@@ -1061,8 +1076,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         vm.prank(address(proxy));
         bridge.emergencyPauseAll();
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn, netIn, "rgb:src", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
 
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = block.timestamp + 1 hours;
@@ -1083,8 +1097,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes32 opId = _depositN(10, RGB_OP_ID);
         uint256 netIn = _netIn();
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn, netIn, "rgb:src", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = block.timestamp + 1 hours;
         bytes[] memory sigs = _signEnclave2of3(MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline));
@@ -1158,11 +1171,12 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         assertEq(rgbModule.fundsInRecords(opId), netIn, "mint record excludes full inbound fee");
 
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT + outBaseFee;
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn, netIn, "rgb:src", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
         ReleaseState memory beforeState = _releaseState(burnId);
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit BridgeFundsOut(recipient, netIn, netIn - outFee, outFee, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, "rgb:src");
+        emit BridgeFundsOut(
+            recipient, netIn, netIn - outFee, outFee, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, "", params.settlementData
+        );
         _submitFundsOut(params, 0, new bytes[](0));
         _assertSuccessfulRelease(params, beforeState, outFee);
         assertEq(rgbModule.fundsInRecords(opId), netIn, "release preserves mint record");

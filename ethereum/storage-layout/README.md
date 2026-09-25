@@ -1,10 +1,10 @@
 # Bridge upgrade baseline
 
-`Bridge.v1.json` is the frozen initial proxy storage baseline. It is currently
+`script/storage-layout/Bridge.v1.json` is the frozen initial proxy storage baseline. It is currently
 the pre-release v1 layout; record the deployed proxy, chain and implementation
 in the release record when v1 ships. Do not regenerate this file to make CI pass.
 
-After `forge build`, run `python3 script/check_upgrade_safety.py`. It discovers
+After `forge build`, run `python3 script/storage-layout/storage_layout.py`. It discovers
 every concrete production artifact under `src/` exposing the compatibility
 marker, regardless of contract name, and checks `BridgeV2Mock` as an append-only
 positive fixture. Deploy only artifacts included in this check.

@@ -8,6 +8,7 @@ import {FundsOutContext} from "../src/interfaces/RouteTypes.sol";
 import {MockBtcRelay} from "./mocks/MockBtcRelay.sol";
 
 contract RGBVerifierTest is Test {
+    bytes32 constant SRC_BURN_TX_ID = keccak256("unit-burn-tx");
     MockBtcRelay btcRelay;
     RGBVerifier verifier;
 
@@ -52,8 +53,9 @@ contract RGBVerifierTest is Test {
             burnId: BURN_ID,
             sourceChainId: SOURCE_CHAIN_ID,
             destChainId: DEST_CHAIN_ID,
-            sourceAddress: "rgb:sender/utxo1src",
-            isRebalance: false
+            sourceAddress: "",
+            isRebalance: false,
+            sourceBurnTxId: SRC_BURN_TX_ID
         });
     }
 
