@@ -140,7 +140,8 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string sourceAddress
+        string sourceAddress,
+        bytes settlementData
     );
     event RouteSet(
         uint256 indexed sourceChainId,
@@ -193,7 +194,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     // Chain identifiers + canonical fundsOut args
     uint256 constant SOURCE_CHAIN_ID = 31337; // foundry block.chainid
     uint256 constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
-    string constant DST_ADDR = "rgb:asset/utxo1abc";
+    string constant DST_ADDR = "";
     string constant SRC_ADDR = ""; // RGB has no source-address concept
     bytes32 constant SRC_BURN_TX_ID = keccak256("multisig-burn-tx-default");
     uint256 constant AMOUNT = 1e18;
@@ -2754,7 +2755,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
         vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
-            recipient, AMOUNT, netAmount, tokenCommission, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            recipient,
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            params.burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            params.settlementData
         );
         vm.expectEmit(true, true, false, true);
         emit FundsOutExecuted(RGB_CHAIN_ID, nonce, bitmap);
@@ -2838,7 +2847,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
-            address(adapter), AMOUNT, netAmount, tokenCommission, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            params.burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            params.settlementData
         );
         vm.expectEmit(true, false, false, true, address(adapter));
         emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
@@ -3096,7 +3113,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
-            address(adapter), AMOUNT, netAmount, tokenCommission, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            params.burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            params.settlementData
         );
         vm.expectEmit(true, false, false, true, address(adapter));
         emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
@@ -3189,7 +3214,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
-            address(adapter), AMOUNT, netAmount, tokenCommission, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            params.burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            params.settlementData
         );
         vm.expectEmit(true, false, false, true, address(adapter));
         emit SendOut(sendOutGuid, DST_EID, LZ_RECIPIENT, netAmount);
@@ -3290,7 +3323,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         // Leg 1: the Bridge recipient is forced to the adapter (not in params).
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
-            address(adapter), AMOUNT, netAmount, tokenCommission, params.burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            address(adapter),
+            AMOUNT,
+            netAmount,
+            tokenCommission,
+            params.burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            params.settlementData
         );
         // Leg 2: sendOut carries the NET delivered amount, not the gross AMOUNT.
         bytes32 sendOutGuid = keccak256(abi.encode("mock-send-out", DST_EID, LZ_RECIPIENT, netAmount));

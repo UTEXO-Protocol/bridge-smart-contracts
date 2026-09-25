@@ -46,7 +46,9 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         uint256 destinationChainId,
         uint256 amount,
         string sourceAddress,
-        string destinationAddress
+        string destinationAddress,
+        bytes settlementDataOut,
+        bytes settlementDataIn
     );
 
     Bridge bridge;
@@ -72,7 +74,7 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     uint256 constant RGB_MINTBURN_CHAIN_ID = 1_000_003; // RGB mint/burn network (variant C: same module)
     uint256 constant PRODUCTION_RGB_MINT_BURN_CHAIN_ID = 96;
     uint256 constant PRODUCTION_RGB_POOL_CHAIN_ID = 97;
-    string constant RGB_DST_ADDR = "rgb:asset1qp0y3mq6h5k8d9f2e4j7n6c3w/utxo1abc123";
+    string constant RGB_DST_ADDR = "";
     string constant ARCH_DST_ADDR = "arch:bridge-wallet";
     string constant RGB_SRC_ADDR = ""; // RGB has no source-address concept
     string constant ARCH_SRC_ADDR = "arch:burner";
@@ -462,7 +464,7 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
             _countBridgeLogs(
                 logs,
                 keccak256(
-                    "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,string)"
+                    "BridgeFundsIn(bytes32,bytes32,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,string,bytes)"
                 )
             ),
             1,
@@ -557,7 +559,17 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         vm.expectEmit(true, false, false, true);
         emit FundsIn(multisig, mintOpId, uint64(AMOUNT));
         vm.expectEmit(true, true, false, true);
-        emit BridgeRebalance(expectedOpId, p.burnId, ARCH_CHAIN_ID, RGB_CHAIN_ID, AMOUNT, ARCH_SRC_ADDR, RGB_DST_ADDR);
+        emit BridgeRebalance(
+            expectedOpId,
+            p.burnId,
+            ARCH_CHAIN_ID,
+            RGB_CHAIN_ID,
+            AMOUNT,
+            ARCH_SRC_ADDR,
+            RGB_DST_ADDR,
+            p.settlementDataOut,
+            p.settlementDataIn
+        );
 
         _rebalance(p);
 
@@ -843,7 +855,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         vm.warp(block.timestamp + bridge.BUCKET_REFILL_WINDOW() + 1);
         _rebalance(second);
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        bytes32 rebalanceTopic = keccak256("BridgeRebalance(bytes32,uint256,uint256,uint256,uint256,string,string)");
+        bytes32 rebalanceTopic =
+            keccak256("BridgeRebalance(bytes32,uint256,uint256,uint256,uint256,string,string,bytes,bytes)");
         bytes32 firstOpId;
         bytes32 secondOpId;
         bool haveFirst;
@@ -931,12 +944,17 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         bridge.rebalanceLiquidity(p);
     }
 
-    function test_rebalance_revert_emptyDestinationAddress() public {
+    function test_rebalance_rgbCreditAcceptsEmptyDestinationAddress() public {
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         p.destinationAddress = "";
-        vm.prank(multisig);
-        vm.expectRevert(IBridge.InvalidDestinationAddress.selector);
-        bridge.rebalanceLiquidity(p);
+        bytes32 expectedOperationId = _deriveRebalanceOpId(p);
+
+        _rebalance(p);
+
+        assertEq(rgbModule.fundsInRecords(expectedOperationId), AMOUNT, "empty-address RGB credit recorded");
+        assertEq(
+            rgbModule.fundsInRecordChainIds(expectedOperationId), RGB_CHAIN_ID, "record tagged with RGB destination"
+        );
     }
 
     function test_rebalance_revert_routeNotEnabled() public {

@@ -127,7 +127,8 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string sourceAddress
+        string sourceAddress,
+        bytes settlementData
     );
 
     event CommissionWithdrawn(address indexed token, uint256 amount, address indexed recipient);
@@ -334,10 +335,10 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         // Ten equal deposits make the release below exactly 10% of isolated
         // and global TVL — the configured bucket burst.
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, "rgb:asset1qp0y3mq/utxo1abc", abi.encode(RGB_OP_ID));
+        bytes32 opId = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, "", abi.encode(RGB_OP_ID));
         for (uint256 i = 1; i < 10; i++) {
             vm.prank(user);
-            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, "rgb:asset1qp0y3mq/utxo1abc", abi.encode(RGB_OP_ID + i));
+            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, "", abi.encode(RGB_OP_ID + i));
         }
 
         uint256 tokenCommissionIn = tInQuote * 10;
@@ -395,7 +396,15 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit BridgeFundsOut(
-            recipient, netBridgedIn, netOut, tokenCommissionOut, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, sourceAddress
+            recipient,
+            netBridgedIn,
+            netOut,
+            tokenCommissionOut,
+            burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            sourceAddress,
+            settlementData
         );
 
         proxy.fundsOutCall(params, outNonce, outDeadline, 3, teeSigs);
@@ -495,9 +504,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         vm.deal(user, nativeQuote);
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn{value: nativeQuote}(
-            USER_DEPOSIT, RGB_CHAIN_ID, "rgb:asset1qp0y3mq/utxo1abc", abi.encode(RGB_OP_ID)
-        );
+        bytes32 opId = bridge.fundsIn{value: nativeQuote}(USER_DEPOSIT, RGB_CHAIN_ID, "", abi.encode(RGB_OP_ID));
 
         assertEq(token.balanceOf(address(bridge)), USER_DEPOSIT, "bridge got full token amount");
         assertEq(token.balanceOf(address(cm)), 0, "cm no token commission");
@@ -578,7 +585,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
     // Shared helpers for the FundsIn (mint) / FundsOut (burn) e2e groups
     // =========================================================================
 
-    string constant RGB_INVOICE = "rgb:asset1qp0y3mq/utxo1abc";
+    string constant RGB_INVOICE = "";
 
     struct ReleaseState {
         uint256 teeNonce;
@@ -902,7 +909,9 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
 
         ReleaseState memory beforeState = _releaseState(burnId);
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit BridgeFundsOut(recipient, netIn, netOut, outFee, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, "");
+        emit BridgeFundsOut(
+            recipient, netIn, netOut, outFee, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, "", params.settlementData
+        );
         _submitFundsOut(params, 0, new bytes[](0));
 
         _assertSuccessfulRelease(params, beforeState, outFee);
@@ -1165,7 +1174,9 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
         ReleaseState memory beforeState = _releaseState(burnId);
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit BridgeFundsOut(recipient, netIn, netIn - outFee, outFee, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, "");
+        emit BridgeFundsOut(
+            recipient, netIn, netIn - outFee, outFee, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, "", params.settlementData
+        );
         _submitFundsOut(params, 0, new bytes[](0));
         _assertSuccessfulRelease(params, beforeState, outFee);
         assertEq(rgbModule.fundsInRecords(opId), netIn, "release preserves mint record");

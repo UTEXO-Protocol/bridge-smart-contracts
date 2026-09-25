@@ -1180,7 +1180,8 @@ contract BridgeOutflowTest is BridgeTestBase {
             0,
             SOURCE_CHAIN_ID,
             RGB_CHAIN_ID,
-            DST_ADDR
+            DST_ADDR,
+            _rgbData()
         );
 
         // Execute the real direct fundsIn path: user → Bridge → RouteRegistry → RGB module → CM.
@@ -1252,7 +1253,8 @@ contract BridgeOutflowTest is BridgeTestBase {
             nativeCommission,
             SOURCE_CHAIN_ID,
             RGB_CHAIN_ID,
-            DST_ADDR
+            DST_ADDR,
+            _rgbData()
         );
 
         // Execute exact-value native commission path; token principal stays whole.
@@ -1319,7 +1321,15 @@ contract BridgeOutflowTest is BridgeTestBase {
 
         vm.expectEmit(true, true, false, true);
         emit BridgeFundsOut(
-            recipient, releaseAmount, netAmount, tokenCommission, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR
+            recipient,
+            releaseAmount,
+            netAmount,
+            tokenCommission,
+            burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            settlementData
         );
 
         // Release less than the recorded mint. The settlement module no longer
@@ -1593,7 +1603,8 @@ contract BridgeOutflowTest is BridgeTestBase {
             burnId,
             alternateSourceChainId,
             alternateDestinationChainId,
-            alternateSourceAddress
+            alternateSourceAddress,
+            settlementData
         );
 
         vm.prank(multisig);
@@ -1693,7 +1704,8 @@ contract BridgeOutflowTest is BridgeTestBase {
             0,
             SOURCE_CHAIN_ID,
             RGB_CHAIN_ID,
-            DST_ADDR
+            DST_ADDR,
+            _rgbData()
         );
 
         vm.prank(user);
@@ -1708,9 +1720,9 @@ contract BridgeOutflowTest is BridgeTestBase {
         assertEq(rgbModule.fundsInRecords(opId), recordBefore + AMOUNT, "record created only by fundsIn");
     }
 
-    // Bridge only rejects an empty destination address, so a
-    // non-empty string is accepted and emitted without format validation.
-    function test_fundsIn_acceptsInvalidButNonEmptyDestinationAddress() public {
+    // Bridge remains route-agnostic, but the RGB settlement module requires
+    // the canonical empty destination address.
+    function test_fundsIn_rgbRejectsNonEmptyDestinationAddress() public {
         string memory invalidDestination = "not-rgb-destination";
         bytes32 expectedOpId = _deriveOpId(
             SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, AMOUNT, RGB_CHAIN_ID, invalidDestination, _rgbData()
@@ -1723,29 +1735,14 @@ contract BridgeOutflowTest is BridgeTestBase {
         assertEq(bridgeBefore, 0, "pre bridge token");
         assertEq(recordBefore, 0, "pre record");
 
-        vm.expectEmit(true, false, false, true, address(bridge));
-        emit FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
-        vm.expectEmit(true, true, true, true, address(bridge));
-        emit BridgeFundsIn(
-            expectedOpId,
-            bytes32(uint256(uint160(user))),
-            user,
-            0,
-            AMOUNT,
-            AMOUNT,
-            0,
-            0,
-            SOURCE_CHAIN_ID,
-            RGB_CHAIN_ID,
-            invalidDestination
-        );
-
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, invalidDestination, _rgbData());
+        vm.expectRevert(RgbSettlementModule.UnexpectedDestinationAddress.selector);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, invalidDestination, _rgbData());
 
-        assertEq(usdt0.balanceOf(user), userBefore - AMOUNT, "user fundsIn spent");
-        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + AMOUNT, "bridge credited");
-        assertEq(rgbModule.fundsInRecords(opId), recordBefore + AMOUNT, "record created");
+        assertEq(usdt0.balanceOf(user), userBefore, "user balance rolled back");
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore, "bridge balance rolled back");
+        assertEq(rgbModule.fundsInRecords(expectedOpId), recordBefore, "record not created");
+        assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))), 0, "nonce rolled back");
     }
 
     // The token commission is forwarded before the onFundsIn hook, so a
@@ -1794,7 +1791,8 @@ contract BridgeOutflowTest is BridgeTestBase {
             nativeCommission,
             SOURCE_CHAIN_ID,
             RGB_CHAIN_ID,
-            DST_ADDR
+            DST_ADDR,
+            _rgbData()
         );
 
         vm.prank(user);
@@ -1876,7 +1874,8 @@ contract BridgeOutflowTest is BridgeTestBase {
             0,
             SOURCE_CHAIN_ID,
             RGB_CHAIN_ID,
-            DST_ADDR
+            DST_ADDR,
+            _rgbData()
         );
 
         vm.prank(user);
@@ -2120,7 +2119,18 @@ contract BridgeOutflowTest is BridgeTestBase {
         emit FundsIn(user, RGB_OP_ID, uint64(received));
         vm.expectEmit(false, true, true, true);
         emit BridgeFundsIn(
-            bytes32(0), sourceSender, user, 0, AMOUNT, received, 0, 0, SOURCE_CHAIN_ID, RGB_CHAIN_ID, DST_ADDR
+            bytes32(0),
+            sourceSender,
+            user,
+            0,
+            AMOUNT,
+            received,
+            0,
+            0,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData()
         );
 
         vm.prank(user);
