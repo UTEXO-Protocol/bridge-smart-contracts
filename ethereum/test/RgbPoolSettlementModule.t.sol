@@ -47,7 +47,7 @@ contract RgbPoolSettlementModuleTest is Test {
             senderNonce: 0,
             sourceChainId: ARBITRUM_CHAIN_ID,
             destChainId: destinationChainId,
-            destAddress: "rgb:destination"
+            destAddress: ""
         });
     }
 

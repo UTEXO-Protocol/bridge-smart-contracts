@@ -71,7 +71,7 @@ contract RgbSettlementModuleTest is Test {
             senderNonce: 0,
             sourceChainId: EVM_CHAIN_ID,
             destChainId: rgbChainId,
-            destAddress: "rgb:asset/utxo1abc"
+            destAddress: ""
         });
     }
 
@@ -168,6 +168,18 @@ contract RgbSettlementModuleTest is Test {
         vm.prank(routeRegistry);
         vm.expectRevert(RgbSettlementModule.InvalidRgbOpId.selector);
         module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), abi.encode(uint256(0)));
+    }
+
+    function test_onFundsIn_revertsOnNonEmptyDestinationAddress() public {
+        FundsInContext memory ctx = _fundsInCtx(TX_ID_1, AMOUNT);
+        ctx.destAddress = "rgb:unexpected";
+
+        vm.prank(routeRegistry);
+        vm.expectRevert(RgbSettlementModule.UnexpectedDestinationAddress.selector);
+        module.onFundsIn(ctx, abi.encode(RGB_OP_ID));
+
+        assertEq(module.fundsInRecords(TX_ID_1), 0, "record not written");
+        assertEq(module.fundsInRecordChainIds(TX_ID_1), 0, "network tag not written");
     }
 
     function test_onFundsIn_revertsOnDuplicateOperationId() public {

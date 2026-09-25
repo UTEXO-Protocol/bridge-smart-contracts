@@ -62,7 +62,8 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         uint256 nativeCommission,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string destinationAddress
+        string destinationAddress,
+        bytes settlementData
     );
     event BridgeFundsOut(
         address indexed recipient,
@@ -72,7 +73,8 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string sourceAddress
+        string sourceAddress,
+        bytes settlementData
     );
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
     event LZAdapterDisabled(address indexed oldAdapter);
@@ -100,7 +102,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
 
     uint256 constant SOURCE_CHAIN_ID = 31337; // foundry block.chainid
     uint256 constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
-    string constant DST_ADDR = "rgb:asset1qp0y3mq6h5k8d9f2e4j7n6c3w/utxo1abc123";
+    string constant DST_ADDR = "";
     string constant SRC_ADDR = ""; // RGB has no source-address concept
     uint256 constant AMOUNT = 1e18;
     uint256 constant TX_ID = 42;

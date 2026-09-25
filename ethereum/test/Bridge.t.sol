@@ -484,10 +484,13 @@ contract BridgeTest is BridgeTestBase {
 
     function test_fundsIn_acceptsDestinationAddressAtMaxLength() public {
         uint256 max = bridge.MAX_ADDRESS_LENGTH();
+        MockSettlementModule permissiveModule = new MockSettlementModule();
+        vm.prank(deployer);
+        routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(permissiveModule));
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, _str(max), _rgbData());
-        assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "deposit at the address-length cap is accepted");
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, _str(max), _rgbData());
+        assertEq(permissiveModule.onFundsInCount(), 1, "generic route accepts the address-length cap");
     }
 
     function test_fundsIn_revertsOnSettlementDataTooLong() public {
@@ -695,7 +698,18 @@ contract BridgeTest is BridgeTestBase {
         emit FundsIn(mockAdapter, RGB_OP_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
-            expectedOpId, sourceSender, mockAdapter, 0, AMOUNT, AMOUNT, 0, 0, customSrc, RGB_CHAIN_ID, DST_ADDR
+            expectedOpId,
+            sourceSender,
+            mockAdapter,
+            0,
+            AMOUNT,
+            AMOUNT,
+            0,
+            0,
+            customSrc,
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData()
         );
 
         vm.prank(mockAdapter);
@@ -734,7 +748,18 @@ contract BridgeTest is BridgeTestBase {
         emit FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
-            expectedOpId, sourceSender, user, 0, AMOUNT, AMOUNT, 0, 0, SOURCE_CHAIN_ID, RGB_CHAIN_ID, DST_ADDR
+            expectedOpId,
+            sourceSender,
+            user,
+            0,
+            AMOUNT,
+            AMOUNT,
+            0,
+            0,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData()
         );
 
         vm.prank(user);
@@ -753,15 +778,27 @@ contract BridgeTest is BridgeTestBase {
         assertEq(usdt0.balanceOf(address(bridge)), AMOUNT);
     }
 
+    function test_fundsIn_rgbAcceptsEmptyDestinationAddressAndEmitsNonce() public {
+        bytes32 sourceSender = bytes32(uint256(uint160(user)));
+        bytes32 expectedOpId = _deriveOpId(SOURCE_CHAIN_ID, sourceSender, 0, AMOUNT, RGB_CHAIN_ID, "", _rgbData());
+
+        vm.expectEmit(true, false, false, true);
+        emit FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
+        vm.expectEmit(true, true, true, true);
+        emit BridgeFundsIn(
+            expectedOpId, sourceSender, user, 0, AMOUNT, AMOUNT, 0, 0, SOURCE_CHAIN_ID, RGB_CHAIN_ID, "", _rgbData()
+        );
+
+        vm.prank(user);
+        bytes32 operationId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, "", _rgbData());
+
+        assertEq(operationId, expectedOpId, "empty address is part of the canonical operation id");
+        assertEq(rgbModule.fundsInRecords(operationId), AMOUNT, "RGB settlement record created");
+    }
+
     // ========================================================================
     // fundsIn — reverts
     // ========================================================================
-
-    function test_fundsIn_revertsOnEmptyDestinationAddress() public {
-        vm.expectRevert(IBridge.InvalidDestinationAddress.selector);
-        vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, "", _rgbData());
-    }
 
     function test_fundsIn_revertsOnEmptyDestinationChain() public {
         vm.expectRevert(IBridge.InvalidDestinationChainId.selector);
@@ -810,7 +847,9 @@ contract BridgeTest is BridgeTestBase {
             _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);
 
         vm.expectEmit(true, true, false, true);
-        emit BridgeFundsOut(recipient, AMOUNT, AMOUNT, 0, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR);
+        emit BridgeFundsOut(
+            recipient, AMOUNT, AMOUNT, 0, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, settlementData
+        );
 
         vm.prank(multisig);
         _fundsOut(recipient, AMOUNT, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);

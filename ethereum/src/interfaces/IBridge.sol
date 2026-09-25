@@ -22,7 +22,6 @@ interface IBridge {
     // Errors
     // =========================================================================
 
-    error InvalidDestinationAddress();
     error InvalidDestinationChainId();
     error InvalidSourceChainId();
     error ZeroAmount();
@@ -144,7 +143,10 @@ interface IBridge {
     ///                           non-spoofable chain id forwarded by the adapter.
     /// @param destinationChainId Target chain id (backend-assigned for non-EVM
     ///                           destinations like RGB / Bitcoin).
-    /// @param destinationAddress Target address on the destination chain.
+    /// @param destinationAddress Target address on the destination chain. May
+    ///                           be empty when that route has no destination-
+    ///                           address concept (including RGB).
+    /// @param settlementData     Opaque route-specific settlement payload.
     event BridgeFundsIn(
         bytes32 indexed operationId,
         bytes32 indexed sourceSender,
@@ -156,7 +158,8 @@ interface IBridge {
         uint256 nativeCommission,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string destinationAddress
+        string destinationAddress,
+        bytes settlementData
     );
 
     /// @param recipient          Recipient on this chain.
@@ -168,6 +171,7 @@ interface IBridge {
     /// @param sourceChainId      Source chain id (non-EVM side for RGB→EVM releases).
     /// @param destinationChainId Destination chain id (EVM target receiving the release).
     /// @param sourceAddress      Sender address on the source chain.
+    /// @param settlementData     Opaque route-specific settlement payload.
     event BridgeFundsOut(
         address indexed recipient,
         uint256 amount,
@@ -176,7 +180,8 @@ interface IBridge {
         uint256 indexed burnId,
         uint256 sourceChainId,
         uint256 destinationChainId,
-        string sourceAddress
+        string sourceAddress,
+        bytes settlementData
     );
 
     /// @notice Emitted on every successful `rebalanceLiquidity`. The canonical
@@ -194,8 +199,11 @@ interface IBridge {
     /// @param amount             Amount migrated between the buckets (no commission).
     /// @param sourceAddress      Source-chain identity behind the debit (e.g. the
     ///                           RGB burner); its hash is folded into `operationId`.
-    /// @param destinationAddress Destination-chain address backing the credit
-    ///                           (e.g. the bridge's RGB wallet receiving a mint).
+    /// @param destinationAddress Destination-chain address backing the credit.
+    ///                           May be empty when the destination route has no
+    ///                           address concept (including RGB).
+    /// @param settlementDataOut  Opaque debit-leg settlement payload.
+    /// @param settlementDataIn   Opaque credit-leg settlement payload.
     event BridgeRebalance(
         bytes32 indexed operationId,
         uint256 indexed burnId,
@@ -203,7 +211,9 @@ interface IBridge {
         uint256 destinationChainId,
         uint256 amount,
         string sourceAddress,
-        string destinationAddress
+        string destinationAddress,
+        bytes settlementDataOut,
+        bytes settlementDataIn
     );
 
     // =========================================================================
@@ -313,7 +323,9 @@ interface IBridge {
     /// @param sourceAddress      Source-chain identity behind the debit;
     ///                           `keccak256(sourceAddress)` is folded into the
     ///                           credit-leg `operationId`.
-    /// @param destinationAddress Destination-chain address backing the credit.
+    /// @param destinationAddress Destination-chain address backing the credit;
+    ///                           may be empty when the destination route has no
+    ///                           address concept (including RGB).
     /// @param proof              Opaque payload for the route's `IFinalityVerifier`
     ///                           (debit-leg source proof; e.g. BtcRelay pairs for
     ///                           an RGB burn).
