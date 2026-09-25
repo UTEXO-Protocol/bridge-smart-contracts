@@ -58,7 +58,8 @@ import {FundsInContext, FundsOutContext} from "../interfaces/RouteTypes.sol";
 ///        - `onFundsIn`:  `abi.encode(uint256 rgbOpId)` — the RGB OpId, decoded
 ///                        and returned for Bridge's `FundsIn` event. The record
 ///                        is keyed by the bridge-derived `ctx.operationId`, not
-///                        by this value.
+///                        by this value. `ctx.destAddress` must be empty because
+///                        RGB has no destination-address concept.
 ///        - `beforeFundsOut`: `abi.encode(bytes32[] operationIds, uint256[] amounts)`
 ///                        (equal-length parallel arrays; non-empty for physical
 ///                        releases).
@@ -85,6 +86,11 @@ contract RgbSettlementModule is ISettlementModule {
     /// @notice `onFundsIn` `settlementData` decoded to a zero RGB OpId. The RGB
     ///         route requires a non-zero OpId (it is threaded to the RGB side).
     error InvalidRgbOpId();
+
+    /// @notice RGB has no destination-address concept. Requiring the canonical
+    ///         empty value prevents one deposit intent from being represented
+    ///         by multiple destination-address strings and operation ids.
+    error UnexpectedDestinationAddress();
 
     /// @notice A `beforeFundsOut` call referenced an `operationId` that has no
     ///         `fundsInRecords` entry (never recorded on-chain).
@@ -165,12 +171,15 @@ contract RgbSettlementModule is ISettlementModule {
     ///      RGB-only `FundsIn` event. The RGB OpId is NOT the dedup key — it is a
     ///      pass-through correlation id (a mempool copy of it cannot pre-empt a
     ///      deposit, since dedup is on `ctx.operationId`).
+    ///      RGB has no destination-address concept, so `ctx.destAddress` must
+    ///      use its single canonical representation: the empty string.
     function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
         external
         override
         onlyRouteRegistry
         returns (uint256 rgbOpId)
     {
+        if (bytes(ctx.destAddress).length != 0) revert UnexpectedDestinationAddress();
         if (fundsInRecords[ctx.operationId] != 0) revert DuplicateOperationId();
         fundsInRecords[ctx.operationId] = ctx.netAmount;
         // Tag the record with the RGB network it was minted to, so a release
