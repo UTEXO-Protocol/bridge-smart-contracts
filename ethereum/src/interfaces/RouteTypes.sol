@@ -40,7 +40,9 @@ pragma solidity 0.8.35;
 ///                           non-spoofable chain id forwarded by the adapter.
 /// @param destChainId        Target chain id (backend-assigned for non-EVM
 ///                           destinations).
-/// @param destAddress        Target address on the destination chain.
+/// @param destAddress        Target address on the destination chain. May be
+///                           empty when the route has no destination-address
+///                           concept (including RGB).
 struct FundsInContext {
     address token;
     address sender;

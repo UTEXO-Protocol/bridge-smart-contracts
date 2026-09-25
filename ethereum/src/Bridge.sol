@@ -615,7 +615,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             fundsOutParams.burnId,
             fundsOutParams.sourceChainId,
             fundsOutParams.destinationChainId,
-            fundsOutParams.sourceAddress
+            fundsOutParams.sourceAddress,
+            fundsOutParams.settlementData
         );
     }
 
@@ -740,7 +741,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             params.destinationChainId,
             params.amount,
             params.sourceAddress,
-            params.destinationAddress
+            params.destinationAddress,
+            params.settlementDataOut,
+            params.settlementDataIn
         );
     }
 
@@ -791,7 +794,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (params.destinationChainId == 0) revert InvalidDestinationChainId();
         if (params.sourceChainId == params.destinationChainId) revert RebalanceSameChain(params.sourceChainId);
         if (params.sourceBurnTxId == bytes32(0)) revert ZeroSourceBurnTxId();
-        if (bytes(params.destinationAddress).length == 0) revert InvalidDestinationAddress();
 
         uint256 sourceAddressLength = bytes(params.sourceAddress).length;
         if (sourceAddressLength > MAX_ADDRESS_LENGTH) {
@@ -884,7 +886,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (amount < minFundsInAmount) {
             revert AmountBelowMinimum(amount, minFundsInAmount);
         }
-        if (bytes(destinationAddress).length == 0) revert InvalidDestinationAddress();
         if (bytes(destinationAddress).length > MAX_ADDRESS_LENGTH) {
             revert AddressTooLong(bytes(destinationAddress).length, MAX_ADDRESS_LENGTH);
         }
@@ -1026,7 +1027,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             nativeToCollect, // native commission actually credited to the pool
             ctx.sourceChainId,
             ctx.destChainId,
-            ctx.destAddress
+            ctx.destAddress,
+            settlementData
         );
 
         // Return the drift buffer LAST: after every state write and after the
