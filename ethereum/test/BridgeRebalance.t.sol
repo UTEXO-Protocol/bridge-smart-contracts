@@ -78,7 +78,6 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     string constant ARCH_DST_ADDR = "arch:bridge-wallet";
     string constant RGB_SRC_ADDR = ""; // RGB has no source-address concept
     string constant ARCH_SRC_ADDR = "arch:burner";
-    bytes32 constant SRC_BURN_TX_ID = keccak256("rebalance-burn-tx-default");
     uint256 constant AMOUNT = 1e18;
 
     /// @dev Balanced policy that consumes the full configurable budget:

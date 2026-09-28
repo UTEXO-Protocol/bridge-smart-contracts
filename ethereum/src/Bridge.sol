@@ -132,11 +132,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
 
     /// @notice Domain-separated type hash for the settlement replay key shared
     ///         by `fundsOut` and `rebalanceLiquidity`.
-    ///
-    ///         Both paths derive `burnId` under THIS hash from the same fields,
-    ///         so settling one source-chain burn twice — once as a physical
-    ///         release and once as an accounting-only migration — derives the
-    ///         same id and the second call is rejected as a replay.
     bytes32 public constant BURN_TYPEHASH = keccak256(
         "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
@@ -169,9 +164,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     address public override lzAdapter;
 
     /// @notice Set of Bridge-derived burn identifiers already consumed by a
-    ///         successful `fundsOut` or `rebalanceLiquidity`. Both paths use the
-    ///         same `BURN_TYPEHASH` and field set, so the same canonical source
-    ///         burn derives the same id on either path and can settle only once.
+    ///         successful `fundsOut` or `rebalanceLiquidity`.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
     /// @notice Per-`(sourceChainId, sourceSender)` monotonic nonce. Folded into
@@ -229,6 +222,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///      Mutable through the same `MultisigProxy` propose -> timelock ->
     ///      execute flow.
     uint256 public override minFundsOutAmount;
+
+    /// @notice Source burns that a `fundsOut` or `rebalanceLiquidity` settled.
+    mapping(bytes32 sourceBurnTxId => bool consumed) public consumedSourceBurnTxIds;
 
     // =========================================================================
     // Modifiers
@@ -507,6 +503,10 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         // of the call.
         if (consumedBurnIds[fundsOutParams.burnId]) revert BurnIdAlreadyConsumed(fundsOutParams.burnId);
         consumedBurnIds[fundsOutParams.burnId] = true;
+        if (consumedSourceBurnTxIds[fundsOutParams.sourceBurnTxId]) {
+            revert SourceBurnTxIdAlreadyConsumed(fundsOutParams.sourceBurnTxId);
+        }
+        consumedSourceBurnTxIds[fundsOutParams.sourceBurnTxId] = true;
 
         // Isolated liquidity: a release may only draw from the liquidity
         // locked for its source chain. Debit before any external interaction so
@@ -643,6 +643,10 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (params.burnId != expectedBurnId) revert InvalidBurnId(params.burnId, expectedBurnId);
         if (consumedBurnIds[params.burnId]) revert BurnIdAlreadyConsumed(params.burnId);
         consumedBurnIds[params.burnId] = true;
+        if (consumedSourceBurnTxIds[params.sourceBurnTxId]) {
+            revert SourceBurnTxIdAlreadyConsumed(params.sourceBurnTxId);
+        }
+        consumedSourceBurnTxIds[params.sourceBurnTxId] = true;
 
         // Debit leg: the migration may only draw from the liquidity locked for
         // its source chain — identical to the `fundsOut` solvency rule.

@@ -627,7 +627,15 @@ contract BridgeTest is BridgeTestBase {
             _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, atMax, settlementData);
 
         IBridge.FundsOutParams memory params = IBridge.FundsOutParams(
-            recipient, AMOUNT, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, atMax, settlementData, SRC_BURN_TX_ID
+            recipient,
+            AMOUNT,
+            burnId,
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            SRC_ADDR,
+            atMax,
+            settlementData,
+            _srcBurnTxId(AMOUNT, RGB_CHAIN_ID)
         );
 
         vm.prank(multisig);

@@ -112,9 +112,6 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     bytes32 constant BURN_TYPEHASH = keccak256(
         "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
-    /// @notice Default source-chain burn identifier used by the helpers. Tests
-    ///         that need two distinct burns pass an explicit id instead.
-    bytes32 constant SRC_BURN_TX_ID = keccak256("rgb-burn-tx-default");
 
     // BtcRelay test data
     // RGB proof = two (height, commit) pairs. The source block (RGB burn/lock)
@@ -265,7 +262,12 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         bytes memory settlementData
     ) internal view returns (uint256) {
         return _deriveBurnIdWithTx(
-            amount, sourceChainId, destinationChainId, sourceAddress, settlementData, SRC_BURN_TX_ID
+            amount,
+            sourceChainId,
+            destinationChainId,
+            sourceAddress,
+            settlementData,
+            _srcBurnTxId(amount, sourceChainId)
         );
     }
 
@@ -376,7 +378,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                 sourceAddress,
                 proof,
                 settlementData,
-                SRC_BURN_TX_ID
+                _srcBurnTxId(amount, sourceChainId)
             )
         );
     }
@@ -796,7 +798,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                     SRC_ADDR,
                     proof,
                     settlementData,
-                    SRC_BURN_TX_ID
+                    _srcBurnTxId(amount, RGB_CHAIN_ID)
                 )
             );
     }
@@ -846,7 +848,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                     destinationChainId,
                     keccak256(bytes(sourceAddress)),
                     keccak256(settlementData),
-                    SRC_BURN_TX_ID
+                    _srcBurnTxId(amount, sourceChainId)
                 )
             )
         );

@@ -103,7 +103,6 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
     bytes32 constant BURN_TYPEHASH = keccak256(
         "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
-    bytes32 constant SRC_BURN_TX_ID = keccak256("integration-burn-tx-default");
 
     // RGB proof = two (height, commit) pairs: a deep source block (RGB
     // burn/lock) and a fresh latest block (relay head). gap = 6 - 1 = 5.
@@ -138,20 +137,6 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
     // =========================================================================
     // Setup
     // =========================================================================
-
-    function _deriveBurnId(
-        address recipient_,
-        uint256 amount,
-        uint256 sourceChainId,
-        uint256 destinationChainId,
-        string memory sourceAddress,
-        bytes memory proof,
-        bytes memory settlementData
-    ) internal view returns (uint256) {
-        return _deriveBurnId(
-            recipient_, amount, sourceChainId, destinationChainId, sourceAddress, proof, settlementData, SRC_BURN_TX_ID
-        );
-    }
 
     function _deriveBurnId(
         address recipient_,
@@ -388,8 +373,9 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes memory proof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
         bytes memory settlementData = abi.encode(fundsInIds, fundsInAmounts);
         string memory sourceAddress = ""; // RGB has no source-address concept
-        uint256 burnId =
-            _deriveBurnId(recipient, netBridgedIn, RGB_CHAIN_ID, SOURCE_CHAIN_ID, sourceAddress, proof, settlementData);
+        uint256 burnId = _deriveBurnId(
+            recipient, netBridgedIn, RGB_CHAIN_ID, SOURCE_CHAIN_ID, sourceAddress, proof, settlementData, SRC_BURN_TX_ID
+        );
 
         IBridge.FundsOutParams memory params = IBridge.FundsOutParams(
             recipient,
@@ -1053,10 +1039,15 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes32 burnD = keccak256("burn-D");
         bytes32 burnE = keccak256("burn-E");
 
-        // RGBVerifier rejects a source address, so only the rebalance route varies it.
-        Settlement[] memory dups = new Settlement[](5);
+        Settlement[] memory dups = new Settlement[](6);
         assertTrue(_trySettle("A", false, burnA, "", op1).ok, "A release");
         dups[0] = _trySettle("A cites other record", false, burnA, "", op2);
+        // RGBVerifier rejects a source address, so this one release runs on a NullVerifier route.
+        vm.prank(deployer);
+        routeRegistry.setRoute(RGB_CHAIN_ID, SOURCE_CHAIN_ID, true, address(nullVerifier), address(rgbModule));
+        dups[5] = _trySettle("A other source address", false, burnA, "bc1q-other", op1);
+        vm.prank(deployer);
+        routeRegistry.setRoute(RGB_CHAIN_ID, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
         assertTrue(_trySettle("C", false, burnC, "", op1).ok, "C release");
         dups[1] = _trySettle("C release then rebalance", true, burnC, "", op1);
         assertTrue(_trySettle("D", true, burnD, "", op1).ok, "D rebalance");

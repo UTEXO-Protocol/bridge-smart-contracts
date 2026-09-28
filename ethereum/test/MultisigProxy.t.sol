@@ -196,7 +196,6 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     uint256 constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
     string constant DST_ADDR = "";
     string constant SRC_ADDR = ""; // RGB has no source-address concept
-    bytes32 constant SRC_BURN_TX_ID = keccak256("multisig-burn-tx-default");
     uint256 constant AMOUNT = 1e18;
 
     /// @dev Balanced policy that consumes the full configurable budget:
@@ -384,7 +383,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
                     destinationChainId,
                     keccak256(bytes(sourceAddress)),
                     keccak256(settlementData),
-                    SRC_BURN_TX_ID
+                    _srcBurnTxId(amount, sourceChainId)
                 )
             )
         );
@@ -432,7 +431,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
             sourceAddress: SRC_ADDR,
             proof: proof,
             settlementData: settlementData,
-            sourceBurnTxId: SRC_BURN_TX_ID
+            sourceBurnTxId: _srcBurnTxId(amount, RGB_CHAIN_ID)
         });
     }
 
@@ -466,7 +465,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
             recipient: LZ_RECIPIENT,
             minAmountLD: 0,
             extraOptions: hex"0003010011010000000000000000000000000000ea60",
-            sourceBurnTxId: SRC_BURN_TX_ID
+            sourceBurnTxId: _srcBurnTxId(amount, RGB_CHAIN_ID)
         });
     }
 

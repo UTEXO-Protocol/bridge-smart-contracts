@@ -42,6 +42,7 @@ interface IBridge {
     error InvalidBurnId(uint256 provided, uint256 expected);
     error ZeroSourceBurnTxId();
     error BurnIdAlreadyConsumed(uint256 burnId);
+    error SourceBurnTxIdAlreadyConsumed(bytes32 sourceBurnTxId);
     error NativeValueMismatch();
     error NativeCommissionOutOfBounds(uint256 provided, uint256 minimum, uint256 maximum);
     error NativeRefundFailed(address recipient, uint256 amount);
