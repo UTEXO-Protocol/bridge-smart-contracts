@@ -99,7 +99,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
     // Non-zero RGB OpId threaded through the RGB-route settlementData on fundsIn.
     uint256 constant RGB_OP_ID = 0xABCDEF;
     bytes32 constant BURN_TYPEHASH = keccak256(
-        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
     bytes32 constant SRC_BURN_TX_ID = keccak256("integration-burn-tx-default");
 
@@ -147,6 +147,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes memory settlementData
     ) internal view returns (uint256) {
         recipient_; // no longer part of the key
+        destinationChainId; // no longer part of the key
         proof; // no longer part of the key
         return uint256(
             keccak256(
@@ -157,7 +158,6 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
                     address(token),
                     amount,
                     sourceChainId,
-                    destinationChainId,
                     keccak256(bytes(sourceAddress)),
                     keccak256(settlementData),
                     SRC_BURN_TX_ID

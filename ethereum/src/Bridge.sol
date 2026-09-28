@@ -137,8 +137,13 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///         so settling one source-chain burn twice — once as a physical
     ///         release and once as an accounting-only migration — derives the
     ///         same id and the second call is rejected as a replay.
+    ///
+    ///         `destinationChainId` is deliberately absent: it names where the
+    ///         value goes, not which burn it came from. A release and a
+    ///         rebalance of the same burn carry different destinations, so
+    ///         keeping it would let one burn settle once on each path.
     bytes32 public constant BURN_TYPEHASH = keccak256(
-        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
 
     /// @notice Domain-separated type hash for the credit-leg `operationId` of a
@@ -1151,12 +1156,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///      Identical formula for both paths — see `BURN_TYPEHASH`.
     function _deriveBurnId(FundsOutParams calldata params) private view returns (uint256) {
         return _deriveBurnIdFromFields(
-            params.amount,
-            params.sourceChainId,
-            params.destinationChainId,
-            params.sourceAddress,
-            params.settlementData,
-            params.sourceBurnTxId
+            params.amount, params.sourceChainId, params.sourceAddress, params.settlementData, params.sourceBurnTxId
         );
     }
 
@@ -1165,12 +1165,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///      `settlementData`.
     function _deriveRebalanceBurnId(RebalanceParams calldata params) private view returns (uint256) {
         return _deriveBurnIdFromFields(
-            params.amount,
-            params.sourceChainId,
-            params.destinationChainId,
-            params.sourceAddress,
-            params.settlementDataOut,
-            params.sourceBurnTxId
+            params.amount, params.sourceChainId, params.sourceAddress, params.settlementDataOut, params.sourceBurnTxId
         );
     }
 
@@ -1182,7 +1177,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     function _deriveBurnIdFromFields(
         uint256 amount,
         uint256 sourceChainId,
-        uint256 destinationChainId,
         string calldata sourceAddress,
         bytes calldata settlementData,
         bytes32 sourceBurnTxId
@@ -1196,7 +1190,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
                     TOKEN,
                     amount,
                     sourceChainId,
-                    destinationChainId,
                     _hashCalldataString(sourceAddress),
                     _hashCalldataBytes(settlementData),
                     sourceBurnTxId

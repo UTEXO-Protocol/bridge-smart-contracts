@@ -69,8 +69,9 @@ contract MultisigExecuteFundsOut is Script {
         p.settlementData = abi.encode(operationIds, amounts);
 
         // Shared Bridge settlement replay key. The Bridge recomputes the same
-        // canonical value for fundsOut and rebalanceLiquidity. The moving proof
-        // and recipient remain signed by the enclave but are not part of this id.
+        // canonical value for fundsOut and rebalanceLiquidity. The moving
+        // proof, recipient and destination chain id remain signed by the enclave
+        // but are not part of this id.
         p.burnId = _deriveBurnId(bridgeAddress, p);
     }
 
@@ -85,7 +86,6 @@ contract MultisigExecuteFundsOut is Script {
                     bridge.TOKEN(),
                     p.amount,
                     p.sourceChainId,
-                    p.destinationChainId,
                     keccak256(bytes(p.sourceAddress)),
                     keccak256(p.settlementData),
                     p.sourceBurnTxId

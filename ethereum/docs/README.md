@@ -59,13 +59,13 @@ Owner **must** be `MultisigProxy`. `fundsOut` is reachable only through the purp
 ```text
 keccak256(abi.encode(
     BURN_TYPEHASH, bridge, block.chainid, token,
-    amount, sourceChainId, destinationChainId,
+    amount, sourceChainId,
     keccak256(bytes(sourceAddress)),
     keccak256(settlementData), sourceBurnTxId
 ))
 ```
 
-For rebalance, `settlementData` is the debit-side `settlementDataOut`. The moving finality `proof`, physical recipient, and rebalance credit-leg fields are deliberately excluded, so the same canonical source burn derives the same id on either path. RGB requires an empty `sourceAddress`; `sourceBurnTxId` is the RGB burn-transition OpId. Enclaves validate the consignment and reconstruct every included field canonically. The Bridge rejects a zero source id, verifies the supplied `burnId`, and rejects an id already recorded as consumed. This complements `MultisigProxy`'s per-source-chain `teeNonce`, which prevents replaying one signature bundle.
+For rebalance, `settlementData` is the debit-side `settlementDataOut`. The moving finality `proof`, physical recipient, `destinationChainId`, and rebalance credit-leg fields are deliberately excluded, so the same canonical source burn derives the same id on either path. RGB requires an empty `sourceAddress`; `sourceBurnTxId` is the RGB burn-transition OpId. Enclaves validate the consignment and reconstruct every included field canonically. The Bridge rejects a zero source id, verifies the supplied `burnId`, and rejects an id already recorded as consumed. This complements `MultisigProxy`'s per-source-chain `teeNonce`, which prevents replaying one signature bundle.
 
 #### Outflow controls and reference liquidity
 

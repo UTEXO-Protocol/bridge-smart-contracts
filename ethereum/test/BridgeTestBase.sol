@@ -110,7 +110,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     /// @notice Non-zero RGB OpId threaded through the RGB-route settlementData.
     uint256 constant RGB_OP_ID = 0xABCDEF;
     bytes32 constant BURN_TYPEHASH = keccak256(
-        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
     /// @notice Default source-chain burn identifier used by the helpers. Tests
     ///         that need two distinct burns pass an explicit id instead.
@@ -264,18 +264,17 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         bytes memory proof,
         bytes memory settlementData
     ) internal view returns (uint256) {
-        return _deriveBurnIdWithTx(
-            amount, sourceChainId, destinationChainId, sourceAddress, settlementData, SRC_BURN_TX_ID
-        );
+        destinationChainId; // no longer part of the key
+        return _deriveBurnIdWithTx(amount, sourceChainId, sourceAddress, settlementData, SRC_BURN_TX_ID);
     }
 
-    /// @dev Mirror of `Bridge._deriveBurnIdFromFields`. `recipient` and `proof`
-    ///      are deliberately absent: the key is shared with `rebalanceLiquidity`,
-    ///      which has no recipient, and `proof` carries the moving relay head.
+    /// @dev Mirror of `Bridge._deriveBurnIdFromFields`. `recipient`, `proof` and
+    ///      `destinationChainId` are deliberately absent: the key is shared with
+    ///      `rebalanceLiquidity`, which has no recipient and credits a different
+    ///      destination, and `proof` carries the moving relay head.
     function _deriveBurnIdWithTx(
         uint256 amount,
         uint256 sourceChainId,
-        uint256 destinationChainId,
         string memory sourceAddress,
         bytes memory settlementData,
         bytes32 sourceBurnTxId
@@ -289,7 +288,6 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                     address(usdt0),
                     amount,
                     sourceChainId,
-                    destinationChainId,
                     keccak256(bytes(sourceAddress)),
                     keccak256(settlementData),
                     sourceBurnTxId
@@ -834,6 +832,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         bytes memory settlementData
     ) internal view returns (uint256) {
         recipient_; // no longer part of the key
+        destinationChainId; // no longer part of the key
         return uint256(
             keccak256(
                 abi.encode(
@@ -843,7 +842,6 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                     address(s.token),
                     amount,
                     sourceChainId,
-                    destinationChainId,
                     keccak256(bytes(sourceAddress)),
                     keccak256(settlementData),
                     SRC_BURN_TX_ID
