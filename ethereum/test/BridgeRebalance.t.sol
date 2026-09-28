@@ -244,7 +244,6 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
                     address(usdt0),
                     p.amount,
                     p.sourceChainId,
-                    p.destinationChainId,
                     keccak256(bytes(p.sourceAddress)),
                     keccak256(p.settlementDataOut),
                     p.sourceBurnTxId
@@ -429,7 +428,6 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
                     address(usdt0),
                     amount,
                     sourceChainId,
-                    SOURCE_CHAIN_ID,
                     keccak256(bytes(RGB_SRC_ADDR)),
                     keccak256(settlementData),
                     SRC_BURN_TX_ID
@@ -1143,6 +1141,66 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
                 sourceBurnTxId: p.sourceBurnTxId
             })
         );
+    }
+
+    /// @notice Production shape of the shared key: one 96 burn, migrated to the
+    ///         pool (96 -> 97) and then released to EVM (96 -> EVM). The two
+    ///         paths carry different `destinationChainId`s, so the key must not
+    ///         include it — otherwise the same burn settles once on each path.
+    function test_sameBurnCannotSettleViaRebalanceThenFundsOutToAnotherDestination() public {
+        (IBridge.RebalanceParams memory p, IBridge.FundsOutParams memory release) = _seedMintBurnBurnOnBothPaths();
+
+        _rebalance(p);
+        assertTrue(bridge.consumedBurnIds(p.burnId), "rebalance consumed the id");
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, p.burnId));
+        vm.prank(multisig);
+        bridge.fundsOut(release);
+    }
+
+    /// @notice Reverse order of the test above: a physical release first, then a
+    ///         rebalance of the same burn toward a different destination bucket.
+    function test_sameBurnCannotSettleViaFundsOutThenRebalanceToAnotherDestination() public {
+        (IBridge.RebalanceParams memory p, IBridge.FundsOutParams memory release) = _seedMintBurnBurnOnBothPaths();
+
+        vm.prank(multisig);
+        bridge.fundsOut(release);
+        assertTrue(bridge.consumedBurnIds(release.burnId), "fundsOut consumed the id");
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, p.burnId));
+        _rebalance(p);
+    }
+
+    /// @dev One 96 burn described twice: as a 96 -> 97 rebalance and as a
+    ///      96 -> EVM release. Every key field matches; only the destination
+    ///      differs, and both carry the rebalance-derived `burnId`.
+    function _seedMintBurnBurnOnBothPaths()
+        internal
+        returns (IBridge.RebalanceParams memory p, IBridge.FundsOutParams memory release)
+    {
+        usdt0.mint(user, AMOUNT * 19);
+        vm.prank(user);
+        bytes32 backingOperationId =
+            bridge.fundsIn(AMOUNT, PRODUCTION_RGB_MINT_BURN_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_000));
+        // Headroom under the 10% bucket burst; each deposit stays within uint64.
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT * 9, PRODUCTION_RGB_MINT_BURN_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_001));
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT * 9, PRODUCTION_RGB_MINT_BURN_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_002));
+
+        p = _productionMintBurnToPoolParams(AMOUNT, backingOperationId);
+        release = IBridge.FundsOutParams({
+            recipient: recipient,
+            amount: p.amount,
+            burnId: p.burnId,
+            sourceChainId: p.sourceChainId,
+            destinationChainId: SOURCE_CHAIN_ID,
+            sourceAddress: p.sourceAddress,
+            proof: p.proof,
+            settlementData: p.settlementDataOut,
+            sourceBurnTxId: p.sourceBurnTxId
+        });
+        assertTrue(release.destinationChainId != p.destinationChainId, "paths credit different destinations");
     }
 
     /// @notice The credit-leg blob is deliberately outside the key: it says where

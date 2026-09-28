@@ -207,7 +207,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     uint256 constant RGB_OP_ID = 0xABCDEF;
     uint256 constant BURN_ID = 9_001;
     bytes32 constant BURN_TYPEHASH = keccak256(
-        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,uint256 destinationChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
     );
     uint256 constant LZ_NATIVE_FEE = 0.01 ether;
     uint32 constant DST_EID = 30110;
@@ -371,6 +371,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         bytes memory settlementData
     ) internal view returns (uint256) {
         bridgeRecipient; // no longer part of the key
+        destinationChainId; // no longer part of the key
         proof; // no longer part of the key
         return uint256(
             keccak256(
@@ -381,7 +382,6 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
                     address(token),
                     amount,
                     sourceChainId,
-                    destinationChainId,
                     keccak256(bytes(sourceAddress)),
                     keccak256(settlementData),
                     SRC_BURN_TX_ID
@@ -1259,7 +1259,6 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
                     address(token),
                     p.amount,
                     p.sourceChainId,
-                    p.destinationChainId,
                     keccak256(bytes(p.sourceAddress)),
                     keccak256(p.settlementDataOut),
                     p.sourceBurnTxId

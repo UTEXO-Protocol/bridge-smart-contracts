@@ -1092,8 +1092,7 @@ contract BridgeTest is BridgeTestBase {
         _ensureRgbSafetyCapacity(AMOUNT);
 
         bytes memory settlementData = _settlement(_ids(opId));
-        uint256 burnId =
-            _deriveBurnIdWithTx(AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, settlementData, bytes32(0));
+        uint256 burnId = _deriveBurnIdWithTx(AMOUNT, RGB_CHAIN_ID, SRC_ADDR, settlementData, bytes32(0));
 
         vm.expectRevert(IBridge.ZeroSourceBurnTxId.selector);
         vm.prank(multisig);
@@ -1123,8 +1122,7 @@ contract BridgeTest is BridgeTestBase {
         bytes memory settlementData = _settlement(_ids(opId));
         bytes32 otherBurnTx = keccak256("a-different-rgb-burn");
 
-        uint256 signedBurnId =
-            _deriveBurnIdWithTx(AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, settlementData, otherBurnTx);
+        uint256 signedBurnId = _deriveBurnIdWithTx(AMOUNT, RGB_CHAIN_ID, SRC_ADDR, settlementData, otherBurnTx);
         uint256 expectedBurnId =
             _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData);
         assertTrue(signedBurnId != expectedBurnId, "a different burn derives a different id");
