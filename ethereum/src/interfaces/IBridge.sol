@@ -281,7 +281,8 @@ interface IBridge {
     ///                           Bridge's canonical settlement hash shared by
     ///                           `fundsOut` and `rebalanceLiquidity`. It includes
     ///                           `settlementData` and `sourceBurnTxId`, but not
-    ///                           the moving finality `proof` or recipient.
+    ///                           the moving finality `proof`, the recipient or
+    ///                           `destinationChainId`.
     /// @param sourceChainId      Source chain id.
     /// @param destinationChainId Destination chain id; part of the
     ///                           CommissionManager route key.
