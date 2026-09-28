@@ -11,6 +11,7 @@ import {IMultisigProxy} from "../src/interfaces/IMultisigProxy.sol";
 import {IBridge} from "../src/interfaces/IBridge.sol";
 import {RouteRegistry} from "../src/RouteRegistry.sol";
 import {RGBVerifier} from "../src/verifiers/RGBVerifier.sol";
+import {NullVerifier} from "../src/verifiers/NullVerifier.sol";
 import {RgbSettlementModule} from "../src/settlement/RgbSettlementModule.sol";
 import {
     CommissionConfig,
@@ -87,6 +88,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
 
     uint256 constant SOURCE_CHAIN_ID = 31337; // foundry default block.chainid
     uint256 constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
+    uint256 constant RGB_MINTBURN_CHAIN_ID = 1_000_003; // rebalance target of the RGB pool
 
     uint256 constant USER_DEPOSIT = 1 ether; // one 18-decimal mock token gross
     // FUNDS_IN route: 2% token commission (stablePercent = 200, multiplier = 100 → 200/100/100 = 2%).
@@ -146,6 +148,21 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes memory proof,
         bytes memory settlementData
     ) internal view returns (uint256) {
+        return _deriveBurnId(
+            recipient_, amount, sourceChainId, destinationChainId, sourceAddress, proof, settlementData, SRC_BURN_TX_ID
+        );
+    }
+
+    function _deriveBurnId(
+        address recipient_,
+        uint256 amount,
+        uint256 sourceChainId,
+        uint256 destinationChainId,
+        string memory sourceAddress,
+        bytes memory proof,
+        bytes memory settlementData,
+        bytes32 sourceBurnTxId
+    ) internal view returns (uint256) {
         recipient_; // no longer part of the key
         proof; // no longer part of the key
         return uint256(
@@ -160,7 +177,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
                     destinationChainId,
                     keccak256(bytes(sourceAddress)),
                     keccak256(settlementData),
-                    SRC_BURN_TX_ID
+                    sourceBurnTxId
                 )
             )
         );
@@ -676,12 +693,25 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         string memory srcAddr,
         bytes memory proof
     ) internal view returns (IBridge.FundsOutParams memory params, uint256 burnId) {
+        return _buildFundsOut(sdOpId, sdAmount, releaseAmount, srcAddr, proof, SRC_BURN_TX_ID);
+    }
+
+    function _buildFundsOut(
+        bytes32 sdOpId,
+        uint256 sdAmount,
+        uint256 releaseAmount,
+        string memory srcAddr,
+        bytes memory proof,
+        bytes32 sourceBurnTxId
+    ) internal view returns (IBridge.FundsOutParams memory params, uint256 burnId) {
         bytes32[] memory ids = new bytes32[](1);
         ids[0] = sdOpId;
         uint256[] memory amts = new uint256[](1);
         amts[0] = sdAmount;
         bytes memory settlementData = abi.encode(ids, amts);
-        burnId = _deriveBurnId(recipient, releaseAmount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, srcAddr, proof, settlementData);
+        burnId = _deriveBurnId(
+            recipient, releaseAmount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, srcAddr, proof, settlementData, sourceBurnTxId
+        );
         params = IBridge.FundsOutParams(
             recipient,
             releaseAmount,
@@ -691,8 +721,59 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
             srcAddr,
             proof,
             settlementData,
-            SRC_BURN_TX_ID
+            sourceBurnTxId
         );
+    }
+
+    struct Settlement {
+        string label;
+        bytes32 txId;
+        bool ok;
+        bytes ret;
+        uint256 moved;
+    }
+
+    /// @dev Signs and submits a 0.01 token release or rebalance of burn `txId`
+    ///      that cites the record `sdOpId`. `moved` is the recipient payout plus
+    ///      the credit to the mint/burn bucket.
+    function _trySettle(string memory label, bool rebalance, bytes32 txId, string memory srcAddr, bytes32 sdOpId)
+        internal
+        returns (Settlement memory s)
+    {
+        s.label = label;
+        s.txId = txId;
+        uint256 amount = 0.01 ether;
+        uint256 before = token.balanceOf(recipient) + bridge.lockedLiquidity(RGB_MINTBURN_CHAIN_ID);
+        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory data;
+        if (rebalance) {
+            bytes32[] memory ids = new bytes32[](1);
+            ids[0] = sdOpId;
+            uint256[] memory amts = new uint256[](1);
+            amts[0] = _netIn();
+            bytes memory sdOut = abi.encode(ids, amts);
+            IBridge.RebalanceParams memory p = IBridge.RebalanceParams(
+                amount,
+                _deriveBurnId(recipient, amount, RGB_CHAIN_ID, RGB_MINTBURN_CHAIN_ID, srcAddr, "", sdOut, txId),
+                RGB_CHAIN_ID,
+                RGB_MINTBURN_CHAIN_ID,
+                srcAddr,
+                "",
+                _validProof(),
+                sdOut,
+                abi.encode(RGB_OP_ID),
+                txId
+            );
+            bytes32 digest = MultisigHelper.digestTeeRebalance(domainSep, p, nonce, deadline);
+            data = abi.encodeCall(MultisigProxy.rebalanceCall, (p, nonce, deadline, 3, _signEnclave2of3(digest)));
+        } else {
+            (IBridge.FundsOutParams memory p,) = _buildFundsOut(sdOpId, _netIn(), amount, srcAddr, _validProof(), txId);
+            bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, p, nonce, deadline);
+            data = abi.encodeCall(MultisigProxy.fundsOutCall, (p, nonce, deadline, 3, _signEnclave2of3(digest)));
+        }
+        (s.ok, s.ret) = address(proxy).call(data);
+        s.moved = token.balanceOf(recipient) + bridge.lockedLiquidity(RGB_MINTBURN_CHAIN_ID) - before;
     }
 
     function _signEnclave1(bytes32 digest) internal view returns (bytes[] memory sigs) {
@@ -954,6 +1035,52 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         proxy.fundsOutCall(params, nonce2, deadline2, 3, sigs2);
 
         _assertReleaseUnchanged(burnId, afterFirst);
+    }
+
+    /// @notice A burn settles once on either path, whatever the other request fields are.
+    function test_fundsOut_burn_oneBurnSettlesOnce() public {
+        _configTokenCommissionRoutes();
+        _openOutflowLimits();
+        NullVerifier nullVerifier = new NullVerifier();
+        vm.prank(deployer);
+        routeRegistry.setRoute(RGB_CHAIN_ID, RGB_MINTBURN_CHAIN_ID, true, address(nullVerifier), address(rgbModule));
+        bytes32 op1 = _depositN(1, RGB_OP_ID);
+        bytes32 op2 = _depositN(1, RGB_OP_ID + 1);
+        _depositN(8, RGB_OP_ID + 2);
+        uint256 netOut = 0.01 ether - 0.01 ether * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
+        bytes32 burnA = keccak256("burn-A");
+        bytes32 burnC = keccak256("burn-C");
+        bytes32 burnD = keccak256("burn-D");
+        bytes32 burnE = keccak256("burn-E");
+
+        // RGBVerifier rejects a source address, so only the rebalance route varies it.
+        Settlement[] memory dups = new Settlement[](5);
+        assertTrue(_trySettle("A", false, burnA, "", op1).ok, "A release");
+        dups[0] = _trySettle("A cites other record", false, burnA, "", op2);
+        assertTrue(_trySettle("C", false, burnC, "", op1).ok, "C release");
+        dups[1] = _trySettle("C release then rebalance", true, burnC, "", op1);
+        assertTrue(_trySettle("D", true, burnD, "", op1).ok, "D rebalance");
+        dups[2] = _trySettle("D rebalance then release", false, burnD, "", op1);
+        assertTrue(_trySettle("E", true, burnE, "", op1).ok, "E rebalance");
+        dups[3] = _trySettle("E other source address", true, burnE, "bc1q-other", op1);
+        dups[4] = _trySettle("E cites other record", true, burnE, "", op2);
+        Settlement memory control = _trySettle("B", false, keccak256("burn-B"), "", op1);
+        assertTrue(control.ok, "B release");
+        assertEq(control.moved, netOut, "distinct burn pays");
+
+        for (uint256 i = 0; i < dups.length; i++) {
+            Settlement memory d = dups[i];
+            assertEq(d.moved, 0, string.concat(d.label, ": burn settles once"));
+            assertFalse(d.ok, string.concat(d.label, ": duplicate reverts"));
+            assertEq(
+                d.ret,
+                abi.encodeWithSignature("SourceBurnTxIdAlreadyConsumed(bytes32)", d.txId),
+                string.concat(d.label, ": error")
+            );
+        }
+        assertEq(token.balanceOf(recipient), 3 * netOut, "A, C and B pay");
+        assertEq(bridge.lockedLiquidity(RGB_MINTBURN_CHAIN_ID), 0.02 ether, "D and E credit");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 10 * _netIn() - 0.05 ether, "five settlements debit");
     }
 
     /// @notice A withdraw below the enclave signature threshold is rejected with no trace.
