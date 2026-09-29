@@ -185,8 +185,8 @@ after it. The update changes the Bridge and proxy pointers atomically.
 
 Administrative operations (signer rotation, configuration changes, commission withdrawals, route registration) go through:
 
-1. **Propose.** A federation member submits the operation with M-of-N federation signatures. `MultisigProxy` stores the operation hash together with the current `federationSignerSetVersion` and emits `ProposalCreated`. Nothing is executed yet.
-2. **Execute.** After `timelockDuration` elapses, anyone calls `executeProposal()` with the original data. `MultisigProxy` verifies the hash, timelock, and signer-set version before executing. A successful federation rotation increments the version, automatically invalidating every still-pending proposal approved by the previous signer set; the live federation may still cancel those stale records for cleanup.
+1. **Propose.** A federation member submits the operation with M-of-N federation signatures. `MultisigProxy` stores the operation hash, the signed `expectedTarget` for address-bound operations, and the current `federationSignerSetVersion` and emits `ProposalCreated`. Nothing is executed yet.
+2. **Execute.** After `timelockDuration` elapses, anyone calls `executeProposal()` with the original data. `MultisigProxy` verifies the hash, timelock, signer-set version, and signed target address before executing. A successful federation rotation increments the version, automatically invalidating every still-pending proposal approved by the previous signer set; the live federation may still cancel those stale records for cleanup.
 
 Raw generic calls cannot invoke `transferOwnership(address)`. Ownership migration uses the typed `TransferManagedOwnership` operation, which binds the exact allowlisted target and new owner into the federation's EIP-712 signatures and revalidates the target at execution. `acceptOwnership()` remains available through the relevant generic lane for two-step deployment and migration handoffs.
 
