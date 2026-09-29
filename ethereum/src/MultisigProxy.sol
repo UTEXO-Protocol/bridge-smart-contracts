@@ -36,7 +36,7 @@ contract MultisigProxy is IMultisigProxy {
     address public bridge;
     address public commissionManager;
 
-    /// @notice Direct emergency operator configured at deployment and rotatable
+    /// @notice Pause-only emergency operator configured at deployment and rotatable
     ///         through timelocked federation governance. `address(0)` disables
     ///         the guardian path after deployment.
     address public emergencyGuardian;
@@ -593,13 +593,6 @@ contract MultisigProxy is IMultisigProxy {
         if (msg.sender != emergencyGuardian) revert UnauthorizedEmergencyGuardian(msg.sender);
         _emergencyPauseBridge();
         emit GuardianEmergencyPaused(msg.sender);
-    }
-
-    /// @inheritdoc IMultisigProxy
-    function guardianEmergencyUnpause() external {
-        if (msg.sender != emergencyGuardian) revert UnauthorizedEmergencyGuardian(msg.sender);
-        _emergencyUnpauseBridge();
-        emit GuardianEmergencyUnpaused(msg.sender);
     }
 
     // =========================================================================
@@ -1379,8 +1372,7 @@ contract MultisigProxy is IMultisigProxy {
         _propagateRevert(ok, ret);
     }
 
-    /// @dev Shared Bridge dispatch for both federation- and guardian-authorized
-    ///      emergency unpauses.
+    /// @dev Bridge dispatch for federation-authorized emergency unpauses.
     function _emergencyUnpauseBridge() private {
         (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("emergencyUnpauseAll()"));
         _propagateRevert(ok, ret);

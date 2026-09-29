@@ -22,7 +22,7 @@ import {IBridge} from "./IBridge.sol";
 ///        Phase 2 — EXECUTE: after timelockDuration, anyone can call executeProposal().
 ///      Exception: federation emergencyPause / emergencyUnpause are instant
 ///      (no timelock). A separately configured emergency guardian can invoke
-///      equivalent pause/unpause actions directly without signatures.
+///      pause directly without signatures; unpause requires federation authorization.
 ///
 ///      COMMISSION MANAGER
 ///      This proxy is the owner of the CommissionManager. Federation can reach CM via:
@@ -184,7 +184,6 @@ interface IMultisigProxy {
     event EmergencyPaused(uint256 nonce, uint256 fedBitmap);
     event EmergencyUnpaused(uint256 nonce, uint256 fedBitmap);
     event GuardianEmergencyPaused(address indexed guardian);
-    event GuardianEmergencyUnpaused(address indexed guardian);
 
     // Emitted when proposals are executed
     event EnclaveSignersUpdated(uint256 indexed sourceChainId, address[] newSigners, uint256 newThreshold);
@@ -257,10 +256,6 @@ interface IMultisigProxy {
     /// @notice Emergency pause the Bridge directly as the configured guardian.
     /// @dev Requires `msg.sender == emergencyGuardian`; no signatures, nonce, or deadline.
     function guardianEmergencyPause() external;
-
-    /// @notice Emergency unpause the Bridge directly as the configured guardian.
-    /// @dev Requires `msg.sender == emergencyGuardian`; no signatures, nonce, or deadline.
-    function guardianEmergencyUnpause() external;
 
     // =========================================================================
     // Federation propose (Phase 1 — timelock)
