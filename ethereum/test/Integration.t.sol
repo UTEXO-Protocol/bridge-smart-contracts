@@ -1089,9 +1089,9 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         _assertReleaseUnchanged(burnId, beforeState);
     }
 
-    /// @notice The real guardian lane pauses both paths and allows the exact
-    ///         same signed release to succeed after unpause, without re-signing.
-    function test_guardian_pauseUnpauseRetriesSameSignedRelease() public {
+    /// @notice Guardian pauses both paths; federation unpause allows the exact
+    ///         same signed release to succeed without re-signing.
+    function test_guardianPause_federationUnpauseRetriesSameSignedRelease() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
         bytes32 opId = _depositN(10, RGB_OP_ID);
@@ -1120,11 +1120,11 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID + 100));
         _assertReleaseUnchanged(burnId, beforeState);
 
-        vm.prank(proxy.emergencyGuardian());
-        proxy.guardianEmergencyUnpause();
-        assertFalse(bridge.paused(), "guardian resumed inflow");
-        assertFalse(bridge.outflowPaused(), "guardian resumed outflow");
-        assertEq(proxy.emergencyNonce(), emergencyNonceBefore, "guardian does not consume federation emergency nonce");
+        bytes32 unpauseDigest = MultisigHelper.digestEmergencyUnpause(domainSep, emergencyNonceBefore, deadline);
+        proxy.emergencyUnpause(emergencyNonceBefore, deadline, 3, _signFed2of3(unpauseDigest));
+        assertFalse(bridge.paused(), "federation resumed inflow");
+        assertFalse(bridge.outflowPaused(), "federation resumed outflow");
+        assertEq(proxy.emergencyNonce(), emergencyNonceBefore + 1, "federation consumes emergency nonce");
         assertEq(proxy.proposalNonce(), proposalNonceBefore, "guardian does not consume proposal nonce");
 
         proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
@@ -1141,9 +1141,9 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
 
         vm.prank(proxy.emergencyGuardian());
         proxy.guardianEmergencyPause();
-        vm.prank(user);
-        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnauthorizedEmergencyGuardian.selector, user));
-        proxy.guardianEmergencyUnpause();
+        vm.prank(proxy.emergencyGuardian());
+        (bool success,) = address(proxy).call(abi.encodeWithSignature("guardianEmergencyUnpause()"));
+        assertFalse(success, "guardian cannot resume its own freeze");
         assertTrue(bridge.paused(), "unauthorized caller cannot resume inflow");
         assertTrue(bridge.outflowPaused(), "unauthorized caller cannot resume outflow");
     }

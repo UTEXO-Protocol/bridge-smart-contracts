@@ -107,7 +107,6 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     event EmergencyPaused(uint256 nonce, uint256 fedBitmap);
     event EmergencyUnpaused(uint256 nonce, uint256 fedBitmap);
     event GuardianEmergencyPaused(address indexed guardian);
-    event GuardianEmergencyUnpaused(address indexed guardian);
     event EmergencyGuardianUpdated(address indexed oldGuardian, address indexed newGuardian);
     event ProposalCreated(
         bytes32 indexed proposalId,
@@ -1470,7 +1469,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         assertFalse(bridge.paused());
     }
 
-    function test_guardianEmergencyPauseAndUnpause_workWithoutSignaturesOrNonceMovement() public {
+    function test_guardianEmergencyPause_worksWithoutSignaturesOrNonceMovement() public {
         uint256 emergencyNonceBefore = proxy.emergencyNonce();
         uint256 proposalNonceBefore = proxy.proposalNonce();
 
@@ -1483,28 +1482,42 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         assertTrue(bridge.outflowPaused(), "outflow frozen");
         assertEq(proxy.emergencyNonce(), emergencyNonceBefore, "federation emergency lane unchanged");
         assertEq(proxy.proposalNonce(), proposalNonceBefore, "proposal lane unchanged");
-
-        vm.expectEmit(true, false, false, true, address(proxy));
-        emit GuardianEmergencyUnpaused(emergencyGuardian);
-        vm.prank(emergencyGuardian);
-        proxy.guardianEmergencyUnpause();
-
-        assertFalse(bridge.paused(), "inflow resumed");
-        assertFalse(bridge.outflowPaused(), "outflow resumed");
-        assertEq(proxy.emergencyNonce(), emergencyNonceBefore, "federation emergency lane still unchanged");
-        assertEq(proxy.proposalNonce(), proposalNonceBefore, "proposal lane still unchanged");
     }
 
-    function test_guardianEmergencyCalls_revertForUnauthorizedCaller() public {
+    function test_guardianEmergencyPause_revertsForUnauthorizedCaller() public {
         address attacker = makeAddr("guardian-attacker");
-
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnauthorizedEmergencyGuardian.selector, attacker));
         vm.prank(attacker);
         proxy.guardianEmergencyPause();
+    }
 
-        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnauthorizedEmergencyGuardian.selector, attacker));
-        vm.prank(attacker);
-        proxy.guardianEmergencyUnpause();
+    function test_guardianCannotLiftFederationFreeze() public {
+        test_emergencyPause_works();
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 proposalNonceBefore = proxy.proposalNonce();
+
+        vm.prank(emergencyGuardian);
+        (bool success,) = address(proxy).call(abi.encodeWithSignature("guardianEmergencyUnpause()"));
+        assertFalse(success, "removed guardian selector must revert");
+        assertTrue(bridge.paused());
+        assertTrue(bridge.outflowPaused());
+
+        vm.prank(emergencyGuardian);
+        vm.expectRevert(IMultisigProxy.BelowThreshold.selector);
+        proxy.emergencyUnpause(nonce, block.timestamp + 1 hours, 0, new bytes[](0));
+        assertTrue(bridge.paused());
+        assertTrue(bridge.outflowPaused());
+        assertEq(proxy.emergencyNonce(), nonce);
+        assertEq(proxy.proposalNonce(), proposalNonceBefore);
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = MultisigHelper.digestEmergencyUnpause(domainSep, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        proxy.emergencyUnpause(nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks));
+        assertFalse(bridge.paused());
+        assertFalse(bridge.outflowPaused());
+        assertEq(proxy.emergencyNonce(), nonce + 1);
+        assertEq(proxy.proposalNonce(), proposalNonceBefore);
     }
 
     function test_proposeSetEmergencyGuardian_rotatesAfterTimelock() public {
