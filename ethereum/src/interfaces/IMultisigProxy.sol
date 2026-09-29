@@ -85,6 +85,7 @@ interface IMultisigProxy {
     error LZAdapterNotSet();
     error InvalidLZAdapter();
     error UnauthorizedEmergencyGuardian(address caller);
+    error StaleProposalTarget(address expectedTarget, address currentTarget);
     error StaleBridgeTarget(address signedBridge, address currentBridge);
     error InvalidBridgeImplementation(address implementation);
 
@@ -140,6 +141,8 @@ interface IMultisigProxy {
         bytes32 sourceBurnTxId;
     }
 
+    /// @notice expectedTarget is the signed external target for address-bound lanes;
+    ///         zero for operations using local state or existing explicit-target rules.
     struct Proposal {
         bytes32 dataHash;
         uint256 proposedAt;
@@ -148,6 +151,7 @@ interface IMultisigProxy {
         uint256 federationVersion;
         OperationType opType;
         ProposalStatus status;
+        address expectedTarget;
     }
 
     // =========================================================================
