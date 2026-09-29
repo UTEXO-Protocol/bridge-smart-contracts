@@ -30,13 +30,13 @@ library MultisigHelper {
         keccak256("EmergencyUnpause(uint256 nonce,uint256 deadline)");
 
     bytes32 internal constant PROPOSE_PAUSE_INFLOW_TYPEHASH =
-        keccak256("ProposePauseInflow(uint256 nonce,uint256 deadline)");
+        keccak256("ProposePauseInflow(address target,uint256 nonce,uint256 deadline)");
 
     bytes32 internal constant PROPOSE_UNPAUSE_INFLOW_TYPEHASH =
-        keccak256("ProposeUnpauseInflow(uint256 nonce,uint256 deadline)");
+        keccak256("ProposeUnpauseInflow(address target,uint256 nonce,uint256 deadline)");
 
     bytes32 internal constant PROPOSE_ADMIN_EXECUTE_TYPEHASH =
-        keccak256("ProposeAdminExecute(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
+        keccak256("ProposeAdminExecute(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
 
     bytes32 internal constant PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH = keccak256(
         "ProposeUpdateEnclaveSigners(uint256 sourceChainId,address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)"
@@ -65,23 +65,27 @@ library MultisigHelper {
         keccak256("CancelProposal(bytes32 proposalId,uint256 deadline)");
 
     bytes32 internal constant PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH = keccak256(
-        "ProposeAdminExecuteCommissionManager(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+        "ProposeAdminExecuteCommissionManager(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
     );
 
-    bytes32 internal constant PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH =
-        keccak256("ProposeAdminExecuteRouteRegistry(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
+    bytes32 internal constant PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH = keccak256(
+        "ProposeAdminExecuteRouteRegistry(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+    );
 
-    bytes32 internal constant PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH =
-        keccak256("ProposeWithdrawTokenCommissionCM(address token,uint256 amount,uint256 nonce,uint256 deadline)");
+    bytes32 internal constant PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH = keccak256(
+        "ProposeWithdrawTokenCommissionCM(address target,address token,uint256 amount,uint256 nonce,uint256 deadline)"
+    );
 
     bytes32 internal constant PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH =
-        keccak256("ProposeWithdrawNativeCommissionCM(uint256 amount,uint256 nonce,uint256 deadline)");
+        keccak256("ProposeWithdrawNativeCommissionCM(address target,uint256 amount,uint256 nonce,uint256 deadline)");
 
-    bytes32 internal constant PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH =
-        keccak256("ProposeUpdateCommissionManager(address newCommissionManager,uint256 nonce,uint256 deadline)");
+    bytes32 internal constant PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH = keccak256(
+        "ProposeUpdateCommissionManager(address target,address newCommissionManager,uint256 nonce,uint256 deadline)"
+    );
 
-    bytes32 internal constant PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH =
-        keccak256("ProposeAdminExecuteAdapter(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
+    bytes32 internal constant PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH = keccak256(
+        "ProposeAdminExecuteAdapter(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+    );
 
     bytes32 internal constant PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH =
         keccak256("ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)");
@@ -89,11 +93,11 @@ library MultisigHelper {
         keccak256("ProposeDisableLZAdapter(uint256 nonce,uint256 deadline)");
 
     bytes32 internal constant PROPOSE_SET_ROUTE_TYPEHASH = keccak256(
-        "ProposeSetRoute(uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)"
+        "ProposeSetRoute(address target,uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)"
     );
 
     bytes32 internal constant PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH =
-        keccak256("ProposeUpdateRouteRegistry(address newRouteRegistry,uint256 nonce,uint256 deadline)");
+        keccak256("ProposeUpdateRouteRegistry(address target,address newRouteRegistry,uint256 nonce,uint256 deadline)");
 
     /// @dev Builds the EIP-712 domain separator the same way MultisigProxy does.
     function domainSeparator(address verifyingContract, uint256 chainId) internal pure returns (bytes32) {
@@ -232,20 +236,22 @@ library MultisigHelper {
         return toTypedDataHash(domainSep, keccak256(abi.encode(EMERGENCY_UNPAUSE_TYPEHASH, nonce, deadline)));
     }
 
-    function digestProposePauseInflow(bytes32 domainSep, uint256 nonce, uint256 deadline)
+    function digestProposePauseInflow(bytes32 domainSep, address target, uint256 nonce, uint256 deadline)
         internal
         pure
         returns (bytes32)
     {
-        return toTypedDataHash(domainSep, keccak256(abi.encode(PROPOSE_PAUSE_INFLOW_TYPEHASH, nonce, deadline)));
+        return toTypedDataHash(domainSep, keccak256(abi.encode(PROPOSE_PAUSE_INFLOW_TYPEHASH, target, nonce, deadline)));
     }
 
-    function digestProposeUnpauseInflow(bytes32 domainSep, uint256 nonce, uint256 deadline)
+    function digestProposeUnpauseInflow(bytes32 domainSep, address target, uint256 nonce, uint256 deadline)
         internal
         pure
         returns (bytes32)
     {
-        return toTypedDataHash(domainSep, keccak256(abi.encode(PROPOSE_UNPAUSE_INFLOW_TYPEHASH, nonce, deadline)));
+        return toTypedDataHash(
+            domainSep, keccak256(abi.encode(PROPOSE_UNPAUSE_INFLOW_TYPEHASH, target, nonce, deadline))
+        );
     }
 
     function digestProposeDisableLZAdapter(bytes32 domainSep, uint256 nonce, uint256 deadline)
@@ -258,6 +264,7 @@ library MultisigHelper {
 
     function digestProposeAdminExecute(
         bytes32 domainSep,
+        address target,
         bytes4 selector,
         bytes memory callData,
         uint256 nonce,
@@ -265,7 +272,9 @@ library MultisigHelper {
     ) internal pure returns (bytes32) {
         return toTypedDataHash(
             domainSep,
-            keccak256(abi.encode(PROPOSE_ADMIN_EXECUTE_TYPEHASH, selector, keccak256(callData), nonce, deadline))
+            keccak256(
+                abi.encode(PROPOSE_ADMIN_EXECUTE_TYPEHASH, target, selector, keccak256(callData), nonce, deadline)
+            )
         );
     }
 
@@ -381,6 +390,7 @@ library MultisigHelper {
 
     function digestProposeAdminExecuteCM(
         bytes32 domainSep,
+        address target,
         bytes4 selector,
         bytes memory callData,
         uint256 nonce,
@@ -388,12 +398,15 @@ library MultisigHelper {
     ) internal pure returns (bytes32) {
         return toTypedDataHash(
             domainSep,
-            keccak256(abi.encode(PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, selector, keccak256(callData), nonce, deadline))
+            keccak256(
+                abi.encode(PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, target, selector, keccak256(callData), nonce, deadline)
+            )
         );
     }
 
     function digestProposeAdminExecuteRouteRegistry(
         bytes32 domainSep,
+        address target,
         bytes4 selector,
         bytes memory callData,
         uint256 nonce,
@@ -403,7 +416,12 @@ library MultisigHelper {
             domainSep,
             keccak256(
                 abi.encode(
-                    PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH, selector, keccak256(callData), nonce, deadline
+                    PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH,
+                    target,
+                    selector,
+                    keccak256(callData),
+                    nonce,
+                    deadline
                 )
             )
         );
@@ -411,6 +429,7 @@ library MultisigHelper {
 
     function digestProposeWithdrawTokenCommissionCM(
         bytes32 domainSep,
+        address target,
         address token,
         uint256 amount,
         uint256 nonce,
@@ -418,32 +437,38 @@ library MultisigHelper {
     ) internal pure returns (bytes32) {
         return toTypedDataHash(
             domainSep,
-            keccak256(abi.encode(PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH, token, amount, nonce, deadline))
+            keccak256(abi.encode(PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH, target, token, amount, nonce, deadline))
         );
     }
 
-    function digestProposeWithdrawNativeCommissionCM(bytes32 domainSep, uint256 amount, uint256 nonce, uint256 deadline)
-        internal
-        pure
-        returns (bytes32)
-    {
+    function digestProposeWithdrawNativeCommissionCM(
+        bytes32 domainSep,
+        address target,
+        uint256 amount,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
         return toTypedDataHash(
-            domainSep, keccak256(abi.encode(PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH, amount, nonce, deadline))
+            domainSep,
+            keccak256(abi.encode(PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH, target, amount, nonce, deadline))
         );
     }
 
-    function digestProposeUpdateCommissionManager(bytes32 domainSep, address newCm, uint256 nonce, uint256 deadline)
-        internal
-        pure
-        returns (bytes32)
-    {
+    function digestProposeUpdateCommissionManager(
+        bytes32 domainSep,
+        address target,
+        address newCm,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
         return toTypedDataHash(
-            domainSep, keccak256(abi.encode(PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH, newCm, nonce, deadline))
+            domainSep, keccak256(abi.encode(PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH, target, newCm, nonce, deadline))
         );
     }
 
     function digestProposeAdminExecuteAdapter(
         bytes32 domainSep,
+        address target,
         bytes4 selector,
         bytes memory callData,
         uint256 nonce,
@@ -452,7 +477,9 @@ library MultisigHelper {
         return toTypedDataHash(
             domainSep,
             keccak256(
-                abi.encode(PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, selector, keccak256(callData), nonce, deadline)
+                abi.encode(
+                    PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, target, selector, keccak256(callData), nonce, deadline
+                )
             )
         );
     }
@@ -469,6 +496,7 @@ library MultisigHelper {
 
     function digestProposeSetRoute(
         bytes32 domainSep,
+        address target,
         uint256 sourceChainId,
         uint256 destChainId,
         bool enabled,
@@ -482,6 +510,7 @@ library MultisigHelper {
             keccak256(
                 abi.encode(
                     PROPOSE_SET_ROUTE_TYPEHASH,
+                    target,
                     sourceChainId,
                     destChainId,
                     enabled,
@@ -496,12 +525,14 @@ library MultisigHelper {
 
     function digestProposeUpdateRouteRegistry(
         bytes32 domainSep,
+        address target,
         address newRouteRegistry,
         uint256 nonce,
         uint256 deadline
     ) internal pure returns (bytes32) {
         return toTypedDataHash(
-            domainSep, keccak256(abi.encode(PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH, newRouteRegistry, nonce, deadline))
+            domainSep,
+            keccak256(abi.encode(PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH, target, newRouteRegistry, nonce, deadline))
         );
     }
 

@@ -424,7 +424,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 wdNonce = proxy.proposalNonce();
         uint256 wdDeadline = block.timestamp + 7 days;
         bytes32 wdDigest = MultisigHelper.digestProposeWithdrawTokenCommissionCM(
-            domainSep, address(token), totalCommission, wdNonce, wdDeadline
+            domainSep, proxy.commissionManager(), address(token), totalCommission, wdNonce, wdDeadline
         );
         bytes[] memory fedSigs = _signFed2of3(wdDigest);
 
@@ -518,8 +518,9 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         // Federation withdraws native commission.
         uint256 wdNonce = proxy.proposalNonce();
         uint256 wdDeadline = block.timestamp + 7 days;
-        bytes32 wdDigest =
-            MultisigHelper.digestProposeWithdrawNativeCommissionCM(domainSep, nativeQuote, wdNonce, wdDeadline);
+        bytes32 wdDigest = MultisigHelper.digestProposeWithdrawNativeCommissionCM(
+            domainSep, proxy.commissionManager(), nativeQuote, wdNonce, wdDeadline
+        );
         bytes[] memory fedSigs = _signFed2of3(wdDigest);
 
         bytes32 proposalId = proxy.proposeWithdrawNativeCommissionCM(nativeQuote, wdNonce, wdDeadline, 3, fedSigs);
@@ -547,7 +548,9 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes4 selector;
         assembly { selector := mload(add(callData, 32)) }
 
-        bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(domainSep, selector, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(
+            domainSep, proxy.commissionManager(), selector, callData, nonce, deadline
+        );
         bytes[] memory sigs = _signFed2of3(digest);
 
         bytes32 proposalId = proxy.proposeAdminExecuteCommissionManager(callData, nonce, deadline, 3, sigs);
@@ -561,7 +564,8 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 deadline = block.timestamp + 7 days;
         bytes4 selector;
         assembly { selector := mload(add(callData, 32)) }
-        bytes32 digest = MultisigHelper.digestProposeAdminExecute(domainSep, selector, callData, nonce, deadline);
+        bytes32 digest =
+            MultisigHelper.digestProposeAdminExecute(domainSep, proxy.bridge(), selector, callData, nonce, deadline);
         bytes32 proposalId = proxy.proposeAdminExecute(callData, nonce, deadline, 3, _signFed2of3(digest));
         vm.warp(block.timestamp + TIMELOCK + 1);
         proxy.executeProposal(proposalId, callData);
@@ -1185,7 +1189,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 wdNonce = proxy.proposalNonce();
         uint256 wdDeadline = block.timestamp + 7 days;
         bytes32 wdDigest = MultisigHelper.digestProposeWithdrawTokenCommissionCM(
-            domainSep, address(token), totalCommission, wdNonce, wdDeadline
+            domainSep, proxy.commissionManager(), address(token), totalCommission, wdNonce, wdDeadline
         );
         bytes32 proposalId = proxy.proposeWithdrawTokenCommissionCM(
             address(token), totalCommission, wdNonce, wdDeadline, 3, _signFed2of3(wdDigest)
