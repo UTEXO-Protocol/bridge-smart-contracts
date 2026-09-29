@@ -128,7 +128,7 @@ Owner of `Bridge`, `RouteRegistry`, **and** `CommissionManager`. Two-level ECDSA
 
 - **Enclave signers (TEE)** — authorize only the purpose-built `fundsOutCall`, `lzFundsOutCall`, and `rebalanceCall` operations (M-of-N, bitmap encoding). Signer sets and replay-protection nonces are isolated per source chain; there is no generic enclave call dispatch.
 - **Federation signers (governance)** — two-phase timelock for admin operations. Instant `emergencyPause` / `emergencyUnpause` bypass the timelock.
-- **Emergency guardian** — a required non-zero constructor address that can call `guardianEmergencyPause` and `guardianEmergencyUnpause` directly, without signatures or nonce consumption. Federation may rotate it, or set it to `address(0)` to disable this direct path, through a timelocked `SetEmergencyGuardian` proposal.
+- **Emergency guardian** — a required non-zero constructor address that can call `guardianEmergencyPause` directly, without signatures or nonce consumption. Unpause requires federation authorization. Federation may rotate it, or set it to `address(0)` to disable this direct path, through a timelocked `SetEmergencyGuardian` proposal.
 
 Federation-controlled operations (`OperationType`):
 
@@ -190,9 +190,9 @@ Administrative operations (signer rotation, configuration changes, commission wi
 
 Raw generic calls cannot invoke `transferOwnership(address)`. Ownership migration uses the typed `TransferManagedOwnership` operation, which binds the exact allowlisted target and new owner into the federation's EIP-712 signatures and revalidates the target at execution. `acceptOwnership()` remains available through the relevant generic lane for two-step deployment and migration handoffs.
 
-**Emergency pause/unpause** bypass the timelock — federation can stop or resume `Bridge` instantly with M-of-N signatures. The configured guardian can perform the equivalent action directly, without signatures, through `guardianEmergencyPause` / `guardianEmergencyUnpause`; these calls do not advance `emergencyNonce` or `proposalNonce`.
+**Emergency pause/unpause** bypass the timelock — federation can stop or resume `Bridge` instantly with M-of-N signatures. The configured guardian can only pause directly, without signatures, through `guardianEmergencyPause`; this call does not advance `emergencyNonce` or `proposalNonce`.
 
-The guardian is deliberately trusted with both directions of this control. `guardianEmergencyUnpause` calls `Bridge.emergencyUnpauseAll()`, so it resumes both inflow and outflow and can also clear an inflow-only pause previously established through timelocked governance. Compromise of the guardian therefore permits resuming bridge traffic during an incident; use a tightly controlled EOA or contract account and disable it with `SetEmergencyGuardian(address(0))` when direct access is not required.
+The guardian is pause-only and cannot lift its own freeze or a federation freeze. Resuming both inflow and outflow requires federation signatures through `emergencyUnpause`. Use `EmergencyUnpause.s.sol` for this operation; the former guardian unpause function and script have been removed. A compromised guardian can still halt traffic; use a tightly controlled EOA or contract account and disable it with `SetEmergencyGuardian(address(0))` when direct pause access is not required.
 
 ### EIP-712 signatures
 
@@ -245,7 +245,7 @@ set -a && source .env.interact && set +a   # before interact scripts
 - `RGB_SETTLEMENT_MODULE_ADDRESS`, `RGB_MINT_BURN_CHAIN_ID`, `RGB_POOL_CHAIN_ID` — standalone `DeployRgbPoolSettlementModule` inputs (`96` and `97` in production)
 - `COMMISSION_MANAGER` — `CommissionManager` address (step-by-step deploys only)
 - `COMMISSION_RECIPIENT` — immutable destination for every CM withdrawal; choose a long-lived treasury address
-- `EMERGENCY_GUARDIAN` — required non-zero initial guardian address with direct emergency pause/unpause authority
+- `EMERGENCY_GUARDIAN` — required non-zero initial guardian address with direct emergency pause-only authority
 - `MIN_FUNDS_IN_AMOUNT` / `MIN_FUNDS_OUT_AMOUNT` — required non-zero operation floors in token smallest units; configure the outbound value consistently in source-side tooling and TEE policy
 - `ETH_USD_FEED` / `ETH_USD_HEARTBEAT` — Chainlink ETH/USD aggregator + staleness window (required if any route uses NATIVE commission)
 - `ENCLAVE_SIGNERS` / `FEDERATION_SIGNERS` — comma-separated addresses, ordered by bitmap bit index
@@ -340,7 +340,6 @@ Scripts in `script/interact/` let you exercise contracts manually before the bac
 | `EmergencyPause.s.sol` | Signs and submits `MultisigProxy.emergencyPause()` with `FED_PKS` |
 | `EmergencyUnpause.s.sol` | Signs and submits `MultisigProxy.emergencyUnpause()` with `FED_PKS` |
 | `GuardianEmergencyPause.s.sol` | Calls `guardianEmergencyPause()` directly from the configured guardian account |
-| `GuardianEmergencyUnpause.s.sol` | Calls `guardianEmergencyUnpause()` directly from the configured guardian account |
 | `MultisigProposeSetEmergencyGuardian.s.sol` | Signs and submits a timelocked guardian rotation/disable proposal; prints the `proposalId` and execution `opData` |
 | `MultisigProposeUpgradeBridge.s.sol` | Signs and submits a typed Bridge implementation upgrade; prints execution `opData`. |
 
@@ -408,7 +407,7 @@ script/
                                  DeployMultisigProxy
   interact/                    — BridgeFundsIn, MultisigExecuteFundsOut,
                                  MultisigProposeSetRoute, EmergencyPause, EmergencyUnpause,
-                                 GuardianEmergencyPause, GuardianEmergencyUnpause,
+                                 GuardianEmergencyPause,
                                  MultisigProposeSetEmergencyGuardian,
                                  MultisigProposeUpgradeBridge
 
