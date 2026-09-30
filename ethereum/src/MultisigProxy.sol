@@ -729,10 +729,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        if (bridgeProxy != bridge) revert StaleBridgeTarget(bridgeProxy, bridge);
-        if (newImplementation.code.length == 0 || newImplementation == bridgeProxy) {
-            revert InvalidBridgeImplementation(newImplementation);
-        }
+        _requireValidBridgeUpgrade(bridgeProxy, newImplementation, initializationData);
 
         bytes32 structHash = keccak256(
             abi.encode(
@@ -1461,10 +1458,7 @@ contract MultisigProxy is IMultisigProxy {
         } else if (opType == OperationType.UpgradeBridgeImplementation) {
             (address bridgeProxy, address newImplementation, bytes memory initializationData) =
                 abi.decode(opData, (address, address, bytes));
-            if (bridgeProxy != bridge) revert StaleBridgeTarget(bridgeProxy, bridge);
-            if (newImplementation.code.length == 0 || newImplementation == bridgeProxy) {
-                revert InvalidBridgeImplementation(newImplementation);
-            }
+            _requireValidBridgeUpgrade(bridgeProxy, newImplementation, initializationData);
             IBridgeProxy(bridgeProxy).upgradeToAndCall(newImplementation, initializationData);
             emit BridgeImplementationUpgraded(bridgeProxy, newImplementation);
         } else {
@@ -1618,6 +1612,25 @@ contract MultisigProxy is IMultisigProxy {
             } else {
                 revert CallFailed();
             }
+        }
+    }
+
+    /// @dev Check at both proposal creation and execution: another matured
+    ///      upgrade can make a previously valid candidate the current implementation.
+    ///      Initialization must not directly invoke enclave-only release operations.
+    function _requireValidBridgeUpgrade(address bridgeProxy, address newImplementation, bytes memory initializationData)
+        private
+        view
+    {
+        if (bridgeProxy != bridge) revert StaleBridgeTarget(bridgeProxy, bridge);
+        if (
+            newImplementation.code.length == 0 || newImplementation == bridgeProxy
+                || newImplementation == IBridgeProxy(bridgeProxy).implementation()
+        ) revert InvalidBridgeImplementation(newImplementation);
+
+        if (initializationData.length != 0) {
+            if (initializationData.length < SELECTOR_LENGTH) revert CallDataTooShort();
+            _requireNotBridgeReleaseSelector(_firstSelector(initializationData));
         }
     }
 

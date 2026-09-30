@@ -317,6 +317,7 @@ interface IMultisigProxy {
     /// @notice Propose upgrading the currently configured Bridge proxy.
     /// @dev The signed proxy address prevents a pending proposal from being
     ///      redirected if `bridge` changes before execution.
+    ///      Nonempty calldata must contain a full selector.
     function proposeUpgradeBridgeImplementation(
         address bridgeProxy,
         address newImplementation,
