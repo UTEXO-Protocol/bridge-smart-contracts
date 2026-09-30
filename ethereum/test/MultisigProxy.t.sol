@@ -2471,6 +2471,60 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     // Cancel
     // ========================================================================
 
+    function _prepareCancellation(uint256 cancelDeadline)
+        internal
+        returns (bytes32 id, uint256 bitmap, bytes[] memory cancelSigs)
+    {
+        address newBridge = makeAddr("cancel-deadline-bridge");
+        uint256 nonce = proxy.proposalNonce();
+        uint256 proposalDeadline = block.timestamp + 1 days;
+        (uint256[] memory pks, uint256 bits) = _fedSigSet2of3();
+        bitmap = bits;
+        bytes32 proposalDigest = MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, nonce, proposalDeadline);
+        id = proxy.proposeUpdateBridge(
+            newBridge, nonce, proposalDeadline, bitmap, MultisigHelper.signAll(vm, proposalDigest, pks)
+        );
+        cancelSigs = MultisigHelper.signAll(vm, MultisigHelper.digestCancelProposal(domainSep, id, cancelDeadline), pks);
+    }
+
+    function test_cancelProposal_revertsOnDeadlineTooFar() public {
+        uint256[2] memory deadlines =
+            [block.timestamp + proxy.MAX_PROPOSAL_LIFETIME() + 1, block.timestamp + 10 * 365 days];
+        for (uint256 i; i < deadlines.length; ++i) {
+            (bytes32 id, uint256 bitmap, bytes[] memory sigs) = _prepareCancellation(deadlines[i]);
+            uint256 nonceBefore = proxy.proposalNonce();
+            uint256 emergencyNonceBefore = proxy.emergencyNonce();
+            uint256 teeNonceBefore = proxy.teeNonce(RGB_CHAIN_ID);
+            vm.expectRevert(IMultisigProxy.DeadlineTooFar.selector);
+            proxy.cancelProposal(id, deadlines[i], bitmap, sigs);
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+            assertEq(proxy.proposalNonce(), nonceBefore);
+            assertEq(proxy.emergencyNonce(), emergencyNonceBefore);
+            assertEq(proxy.teeNonce(RGB_CHAIN_ID), teeNonceBefore);
+        }
+    }
+
+    function test_cancelProposal_acceptsExactDeadlineBoundaries() public {
+        uint256[2] memory deadlines = [block.timestamp, block.timestamp + proxy.MAX_PROPOSAL_LIFETIME()];
+        for (uint256 i; i < deadlines.length; ++i) {
+            (bytes32 id, uint256 bitmap, bytes[] memory sigs) = _prepareCancellation(deadlines[i]);
+            uint256 nonceBefore = proxy.proposalNonce();
+            proxy.cancelProposal(id, deadlines[i], bitmap, sigs);
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Cancelled));
+            assertEq(proxy.proposalNonce(), nonceBefore);
+        }
+    }
+
+    function test_cancelProposal_revertsOnExpiredDeadline() public {
+        uint256 deadline = block.timestamp - 1;
+        (bytes32 id, uint256 bitmap, bytes[] memory sigs) = _prepareCancellation(deadline);
+        uint256 nonceBefore = proxy.proposalNonce();
+        vm.expectRevert(IMultisigProxy.Expired.selector);
+        proxy.cancelProposal(id, deadline, bitmap, sigs);
+        assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+        assertEq(proxy.proposalNonce(), nonceBefore);
+    }
+
     function test_cancelProposal_cancels() public {
         address newBridge = makeAddr("newBridge");
         uint256 nonce = proxy.proposalNonce();
