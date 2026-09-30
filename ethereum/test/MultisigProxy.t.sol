@@ -1889,6 +1889,153 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         assertEq(token.balanceOf(address(upgraded)), balanceBefore);
     }
 
+    function _submitBridgeUpgrade(address nextImplementation, bytes memory initializationData)
+        internal
+        returns (bytes32)
+    {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeUpgradeBridgeImplementation(
+            domainSep, address(bridge), nextImplementation, initializationData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        return proxy.proposeUpgradeBridgeImplementation(
+            address(bridge),
+            nextImplementation,
+            initializationData,
+            nonce,
+            deadline,
+            bitmap,
+            MultisigHelper.signAll(vm, digest, pks)
+        );
+    }
+
+    function _expectRejectedBridgeUpgrade(address nextImplementation, bytes memory data, bytes memory expectedError)
+        internal
+    {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 teeNonceBefore = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 balanceBefore = token.balanceOf(address(bridge));
+        address implementationBefore = IBridgeProxy(address(bridge)).implementation();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeUpgradeBridgeImplementation(
+            domainSep, address(bridge), nextImplementation, data, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory signatures = MultisigHelper.signAll(vm, digest, pks);
+        vm.expectRevert(expectedError);
+        proxy.proposeUpgradeBridgeImplementation(
+            address(bridge), nextImplementation, data, nonce, deadline, bitmap, signatures
+        );
+        assertEq(proxy.proposalNonce(), nonce);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), teeNonceBefore);
+        assertEq(IBridgeProxy(address(bridge)).implementation(), implementationBefore);
+        assertEq(token.balanceOf(address(bridge)), balanceBefore);
+    }
+
+    function test_upgrade_rejectsCurrentImplementationWithEmptyOrReleaseData() public {
+        address current = IBridgeProxy(address(bridge)).implementation();
+        bytes memory errorData = abi.encodeWithSelector(IMultisigProxy.InvalidBridgeImplementation.selector, current);
+        _expectRejectedBridgeUpgrade(current, "", errorData);
+        _expectRejectedBridgeUpgrade(current, abi.encodeCall(IBridge.fundsOut, (_fundsOutParams())), errorData);
+        _expectRejectedBridgeUpgrade(
+            current, abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams())), errorData
+        );
+    }
+
+    function test_upgrade_rejectsReleaseSelectorsOnDifferentImplementation() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes[2] memory payloads = [
+            abi.encodeCall(IBridge.fundsOut, (_fundsOutParams())),
+            abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams()))
+        ];
+        for (uint256 i; i < payloads.length; ++i) {
+            bytes4 selector = bytes4(payloads[i]);
+            bytes memory errorData =
+                abi.encodeWithSelector(IMultisigProxy.ForbiddenBridgeReleaseSelector.selector, selector);
+            _expectRejectedBridgeUpgrade(address(candidate), payloads[i], errorData);
+            _expectRejectedBridgeUpgrade(address(candidate), abi.encodePacked(selector), errorData);
+            _expectRejectedBridgeUpgrade(address(candidate), bytes.concat(payloads[i], hex"ff"), errorData);
+        }
+    }
+
+    function test_upgrade_rejectsNonemptyTruncatedSelector() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        for (uint256 length = 1; length < 4; ++length) {
+            _expectRejectedBridgeUpgrade(
+                address(candidate), new bytes(length), abi.encodeWithSelector(IMultisigProxy.CallDataTooShort.selector)
+            );
+        }
+    }
+
+    function test_upgrade_emptyInitializationDataWorks() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes32 id = _submitBridgeUpgrade(address(candidate), "");
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, abi.encode(address(bridge), address(candidate), bytes("")));
+        assertEq(IBridgeProxy(address(bridge)).implementation(), address(candidate));
+        assertEq(bridge.owner(), address(proxy));
+    }
+
+    function test_upgrade_rechecksCurrentImplementationAtExecution() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes32 first = _submitBridgeUpgrade(address(candidate), "");
+        bytes memory initializationData = abi.encodeCall(BridgeV2Mock.initializeV2, (777));
+        bytes32 second = _submitBridgeUpgrade(address(candidate), initializationData);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(first, abi.encode(address(bridge), address(candidate), bytes("")));
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.InvalidBridgeImplementation.selector, address(candidate)));
+        proxy.executeProposal(second, abi.encode(address(bridge), address(candidate), initializationData));
+        assertEq(BridgeV2Mock(address(bridge)).upgradeValue(), 0, "second initializer did not run");
+        assertEq(uint256(proxy.getProposal(second).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+    }
+
+    /// @dev Seed a legacy-style pending payload to exercise execution defenses
+    ///      independently of the propose guard. This is test-only storage setup,
+    ///      not a capability available to a transaction submitter.
+    function _seedUpgradePayloadHash(bytes32 id, bytes memory original, bytes memory replacement) internal {
+        vm.record();
+        proxy.getProposal(id);
+        (bytes32[] memory reads,) = vm.accesses(address(proxy));
+        for (uint256 i; i < reads.length; ++i) {
+            if (vm.load(address(proxy), reads[i]) == keccak256(original)) {
+                vm.store(address(proxy), reads[i], keccak256(replacement));
+                return;
+            }
+        }
+        revert("proposal dataHash slot not found");
+    }
+
+    function test_upgrade_executionRejectsReleasePayloadsIndependently() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes[2] memory payloads = [
+            abi.encodeCall(IBridge.fundsOut, (_fundsOutParams())),
+            abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams()))
+        ];
+        address originalImplementation = IBridgeProxy(address(bridge)).implementation();
+        uint256 balanceBefore = token.balanceOf(address(bridge));
+        uint256 recipientBefore = token.balanceOf(recipient);
+        uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 teeNonceBefore = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 startedAt = block.timestamp;
+        for (uint256 i; i < payloads.length; ++i) {
+            bytes32 id = _submitBridgeUpgrade(address(candidate), "");
+            bytes memory opData = abi.encode(address(bridge), address(candidate), payloads[i]);
+            _seedUpgradePayloadHash(id, abi.encode(address(bridge), address(candidate), bytes("")), opData);
+            vm.warp(startedAt + (i + 1) * (TIMELOCK + 1));
+            vm.expectRevert(
+                abi.encodeWithSelector(IMultisigProxy.ForbiddenBridgeReleaseSelector.selector, bytes4(payloads[i]))
+            );
+            proxy.executeProposal(id, opData);
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+            assertEq(IBridgeProxy(address(bridge)).implementation(), originalImplementation);
+            assertEq(token.balanceOf(address(bridge)), balanceBefore);
+            assertEq(token.balanceOf(recipient), recipientBefore);
+            assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore);
+            assertEq(proxy.teeNonce(RGB_CHAIN_ID), teeNonceBefore);
+        }
+    }
+
     function test_proposeUpgradeBridgeImplementation_signatureBindsInitializationData() public {
         BridgeV2Mock nextImplementation = new BridgeV2Mock();
         bytes memory signedData = abi.encodeCall(BridgeV2Mock.initializeV2, (777));
