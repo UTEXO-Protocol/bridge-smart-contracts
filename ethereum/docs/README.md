@@ -36,7 +36,7 @@ Amount floors must satisfy `minFundsInAmount >= minFundsOutAmount`. Initializati
 
 Owner-controlled custom proxy built on OpenZeppelin `ERC1967Proxy` and `ERC1967Utils`. The canonical, value-holding Bridge address is the proxy; implementation addresses are replaceable.
 
-- `upgradeToAndCall(newImplementation, data)` is callable only by the current Bridge owner and upgrades plus optionally runs a versioned reinitializer atomically.
+- `upgradeToAndCall(newImplementation, data)` is callable only by the current Bridge owner and upgrades plus optionally runs a versioned reinitializer atomically. Initialization data is limited to 4096 bytes, including its selector; empty data is allowed. Oversized data reverts with `UpgradeCallDataTooLong(length, maxLength)` before implementation validation or delegatecall.
 - Upgrade authority follows `Bridge.owner()` automatically, including its two-step ownership handoff. No separate proxy admin is stored.
 - Every implementation must return the stable, direct-call-only `bridgeProxyCompatibilityUUID`; this rejects accidental upgrades to unrelated contracts and nested proxies. Storage-layout review remains mandatory for every upgrade.
 - Proxy-control selectors (`implementation` and `upgradeToAndCall`) are reserved and must not be added to Bridge implementations. Proxy addresses are rejected as implementation candidates.
@@ -315,7 +315,11 @@ Note: `RouteRegistry.bridge` and `CommissionManager.bridgeAddress` must point to
 
 `MultisigProxy` validates upgrades both when proposed and when executed. The candidate must differ from the proxy's current implementation. Nonempty initialization calldata must contain at least a four-byte selector and must not directly call `fundsOut` or `rebalanceLiquidity`; violations revert before the upgrade or delegatecall. Empty calldata and reviewed versioned reinitializers remain supported. If another proposal installs the candidate first, execution of the pending upgrade reverts with `InvalidBridgeImplementation` and leaves it Pending.
 
-These checks restrict the federation governance entrypoint; `BridgeProxy` itself retains its owner-controlled API. The selector checks do not constrain arbitrary behavior or wrappers in a newly approved implementation, so implementation review remains required. The upgrade EIP-712 schema and execution payload are unchanged.
+Initialization calldata is limited to 4096 bytes including its selector. `MultisigProxy` enforces this at both proposal creation and execution, and `BridgeProxy` independently enforces it on direct upgrades. The limit applies to the initialization bytes, not the outer ABI-encoded proposal or execution payload. Oversized payloads revert with `UpgradeCallDataTooLong(length, maxLength)`; rejected proposal creation leaves the nonce unchanged, and rejected execution leaves the proposal Pending and the implementation unchanged. The cap bounds payload size, not the reinitializer's gas consumption.
+
+The candidate and selector checks restrict the federation governance entrypoint; `BridgeProxy` itself retains its owner-controlled API. The selector checks do not constrain arbitrary behavior or wrappers in a newly approved implementation, so implementation review remains required. The upgrade EIP-712 schema and execution payload are unchanged.
+
+These limits are part of the deployed `BridgeProxy` and `MultisigProxy` code. Upgrading only the Bridge implementation does not add them to existing deployments. Constructor initialization calldata is outside this upgrade limit.
 
 1. Run `DeployBridgeImplementation.s.sol` to deploy a new locked implementation.
 2. Run `python3 script/storage-layout/storage_layout.py` after building the exact candidate artifact; review it against the frozen deployed baseline (see `storage-layout/README.md`). Prepare any versioned reinitializer calldata (`0x` if none). Upgrades must preserve the current owner: the proxy checks `owner()` after initialization and reverts the complete upgrade if the getter fails or returns a different address. Transfer ownership separately using the two-step ownership flow.
