@@ -628,6 +628,50 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
     }
 
     // =========================================================================
+    // Amount-floor governance
+    // =========================================================================
+
+    function test_amountFloors_pendingOutflowRaiseRechecksCurrentInflowMinimum() public {
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsInAmount, (100)));
+        bytes memory pendingCall = abi.encodeCall(IBridge.setMinFundsOutAmount, (80));
+        bytes32 pendingId = _proposeBridgeAdminCall(pendingCall);
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsInAmount, (50)));
+        uint256 nonceBeforeExecution = proxy.proposalNonce();
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidAmountFloors.selector, uint256(50), uint256(80)));
+        proxy.executeProposal(pendingId, pendingCall);
+        assertEq(bridge.minFundsInAmount(), 50);
+        assertEq(bridge.minFundsOutAmount(), 1);
+        assertEq(proxy.proposalNonce(), nonceBeforeExecution);
+        assertEq(uint256(proxy.getProposal(pendingId).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsInAmount, (100)));
+        proxy.executeProposal(pendingId, pendingCall);
+        assertEq(bridge.minFundsInAmount(), 100);
+        assertEq(bridge.minFundsOutAmount(), 80);
+    }
+
+    function test_amountFloors_pendingInflowLowerRechecksCurrentOutflowMinimum() public {
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsInAmount, (100)));
+        bytes memory pendingCall = abi.encodeCall(IBridge.setMinFundsInAmount, (50));
+        bytes32 pendingId = _proposeBridgeAdminCall(pendingCall);
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsOutAmount, (80)));
+        uint256 nonceBeforeExecution = proxy.proposalNonce();
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidAmountFloors.selector, uint256(50), uint256(80)));
+        proxy.executeProposal(pendingId, pendingCall);
+        assertEq(bridge.minFundsInAmount(), 100);
+        assertEq(bridge.minFundsOutAmount(), 80);
+        assertEq(proxy.proposalNonce(), nonceBeforeExecution);
+        assertEq(uint256(proxy.getProposal(pendingId).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsOutAmount, (40)));
+        proxy.executeProposal(pendingId, pendingCall);
+        assertEq(bridge.minFundsInAmount(), 50);
+        assertEq(bridge.minFundsOutAmount(), 40);
+    }
+
+    // =========================================================================
     // Helpers
     // =========================================================================
 
@@ -651,14 +695,18 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         proxy.executeProposal(proposalId, callData);
     }
 
-    function _proposeAndExecuteBridgeAdminCall(bytes memory callData) internal {
+    function _proposeBridgeAdminCall(bytes memory callData) internal returns (bytes32) {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 7 days;
         bytes4 selector;
         assembly { selector := mload(add(callData, 32)) }
         bytes32 digest =
             MultisigHelper.digestProposeAdminExecute(domainSep, proxy.bridge(), selector, callData, nonce, deadline);
-        bytes32 proposalId = proxy.proposeAdminExecute(callData, nonce, deadline, 3, _signFed2of3(digest));
+        return proxy.proposeAdminExecute(callData, nonce, deadline, 3, _signFed2of3(digest));
+    }
+
+    function _proposeAndExecuteBridgeAdminCall(bytes memory callData) internal {
+        bytes32 proposalId = _proposeBridgeAdminCall(callData);
         vm.warp(block.timestamp + TIMELOCK + 1);
         proxy.executeProposal(proposalId, callData);
     }

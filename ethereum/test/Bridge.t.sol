@@ -242,13 +242,13 @@ contract BridgeTest is BridgeTestBase {
     }
 
     // ========================================================================
-    // Minimum fundsIn amount + zero-amount guards
+    // Amount floors + zero-amount guards
     //
     // `minFundsInAmount` is a non-zero floor enforced on the inbound path: it
     // rejects zero-amount deposits and dust whose commission would round to
-    // zero. `fundsOut` is an authorized release and only rejects amount == 0.
-    // The harness deploys with the smallest floor (1), so
-    // tests that need a higher floor raise it via `setMinFundsInAmount`.
+    // zero. `fundsOut` enforces its own non-zero outbound floor. Configuration
+    // requires minFundsInAmount >= minFundsOutAmount. The harness deploys with
+    // both floors at 1; tests raise them in an order that preserves the bound.
     // ========================================================================
 
     function test_constructor_storesMinFundsInAmount() public {
@@ -291,8 +291,9 @@ contract BridgeTest is BridgeTestBase {
 
     function test_constructor_storesMinFundsOutAmount() public {
         vm.prank(deployer);
-        Bridge b =
-            _deployBridge(address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 4321, deployer);
+        Bridge b = _deployBridge(
+            address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 9000, 4321, deployer
+        );
         assertEq(b.minFundsOutAmount(), 4321, "minFundsOutAmount stored from constructor");
     }
 
@@ -305,6 +306,8 @@ contract BridgeTest is BridgeTestBase {
     }
 
     function test_setMinFundsOutAmount_updatesAndEmits() public {
+        vm.prank(multisig);
+        bridge.setMinFundsInAmount(2000);
         vm.expectEmit(false, false, false, true, address(bridge));
         emit MinFundsOutAmountUpdated(1, 2000);
 
@@ -325,12 +328,64 @@ contract BridgeTest is BridgeTestBase {
         bridge.setMinFundsOutAmount(2000);
     }
 
+    function test_amountFloors_initializeRejectsInvertedMinimums() public {
+        Bridge implementation = new Bridge();
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidAmountFloors.selector, uint256(1), uint256(2)));
+        _deployBridgeFromImplementation(
+            implementation, address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 2, deployer
+        );
+    }
+
+    function test_amountFloors_rejectsInflowBelowOutflowMinimum() public {
+        vm.startPrank(multisig);
+        bridge.setMinFundsInAmount(100);
+        bridge.setMinFundsOutAmount(80);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidAmountFloors.selector, uint256(79), uint256(80)));
+        bridge.setMinFundsInAmount(79);
+        vm.stopPrank();
+        assertEq(bridge.minFundsInAmount(), 100);
+        assertEq(bridge.minFundsOutAmount(), 80);
+    }
+
+    function test_amountFloors_rejectsOutflowAboveInflowMinimum() public {
+        vm.startPrank(multisig);
+        bridge.setMinFundsInAmount(100);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidAmountFloors.selector, uint256(100), uint256(101)));
+        bridge.setMinFundsOutAmount(101);
+        vm.stopPrank();
+        assertEq(bridge.minFundsInAmount(), 100);
+        assertEq(bridge.minFundsOutAmount(), 1);
+    }
+
+    function testFuzz_amountFloors_allowOrderedUpdatesAndEquality(uint256 inMinimum, uint256 outMinimum) public {
+        inMinimum = bound(inMinimum, 1, type(uint256).max);
+        outMinimum = bound(outMinimum, 1, inMinimum);
+        vm.startPrank(multisig);
+        bridge.setMinFundsInAmount(inMinimum);
+        bridge.setMinFundsOutAmount(outMinimum);
+        assertEq(bridge.minFundsInAmount(), inMinimum);
+        assertEq(bridge.minFundsOutAmount(), outMinimum);
+
+        // Raising the outbound minimum up to equality is valid.
+        bridge.setMinFundsOutAmount(inMinimum);
+        assertEq(bridge.minFundsInAmount(), bridge.minFundsOutAmount());
+
+        // Lower outbound first, then lower inbound down to equality.
+        bridge.setMinFundsOutAmount(outMinimum);
+        bridge.setMinFundsInAmount(outMinimum);
+        vm.stopPrank();
+        assertEq(bridge.minFundsInAmount(), outMinimum);
+        assertEq(bridge.minFundsOutAmount(), outMinimum);
+    }
+
     /// @dev The floor is an on-chain backstop for a limit the TEE is not known
     ///      to enforce: a dust release costs the bridge more to settle than it
     ///      moves.
     function test_fundsOut_revertsBelowMinFundsOutAmount() public {
         _seedRGB(1000e6);
 
+        vm.prank(multisig);
+        bridge.setMinFundsInAmount(1e6);
         vm.prank(multisig);
         bridge.setMinFundsOutAmount(1e6);
 
@@ -341,6 +396,8 @@ contract BridgeTest is BridgeTestBase {
     function test_fundsOut_acceptsExactlyMinFundsOutAmount() public {
         _seedRGB(1000e6);
 
+        vm.prank(multisig);
+        bridge.setMinFundsInAmount(1e6);
         vm.prank(multisig);
         bridge.setMinFundsOutAmount(1e6);
 
@@ -359,6 +416,8 @@ contract BridgeTest is BridgeTestBase {
         uint256 baseFee = 1e6;
 
         // The flat fee must fit under the release floor.
+        vm.prank(multisig);
+        bridge.setMinFundsInAmount(10e6);
         vm.prank(multisig);
         bridge.setMinFundsOutAmount(10e6);
 

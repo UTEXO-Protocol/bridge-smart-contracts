@@ -58,18 +58,18 @@ contract BridgeProxyTest is Test {
         assertEq(bridge.routeRegistry(), routeRegistry);
         assertEq(address(bridge.commissionManager()), commissionManager);
         assertEq(bridge.lzAdapter(), lzAdapter);
-        assertEq(bridge.minFundsInAmount(), 11);
-        assertEq(bridge.minFundsOutAmount(), 22);
+        assertEq(bridge.minFundsInAmount(), 22);
+        assertEq(bridge.minFundsOutAmount(), 11);
     }
 
     function test_implementationCannotBeInitialized() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        implementation.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 11, 22, owner);
+        implementation.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 22, 11, owner);
     }
 
     function test_proxyCannotBeInitializedTwice() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        bridge.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 11, 22, owner);
+        bridge.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 22, 11, owner);
     }
 
     function test_upgradeRequiresOwner() public {
@@ -163,8 +163,8 @@ contract BridgeProxyTest is Test {
         assertEq(upgraded.routeRegistry(), routeRegistry);
         assertEq(address(upgraded.commissionManager()), commissionManager);
         assertEq(upgraded.lzAdapter(), lzAdapter);
-        assertEq(upgraded.minFundsInAmount(), 11);
-        assertEq(upgraded.minFundsOutAmount(), 22);
+        assertEq(upgraded.minFundsInAmount(), 22);
+        assertEq(upgraded.minFundsOutAmount(), 11);
         assertTrue(upgraded.paused());
         assertEq(token.balanceOf(address(proxy)), 123 ether);
     }
@@ -227,7 +227,7 @@ contract BridgeProxyTest is Test {
     function _initializationData() internal view returns (bytes memory) {
         return abi.encodeCall(
             Bridge.initialize,
-            (address(token), routeRegistry, commissionManager, lzAdapter, uint256(11), uint256(22), owner)
+            (address(token), routeRegistry, commissionManager, lzAdapter, uint256(22), uint256(11), owner)
         );
     }
 }
