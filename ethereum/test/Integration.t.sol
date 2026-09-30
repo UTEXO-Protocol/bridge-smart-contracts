@@ -1124,11 +1124,13 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID + 100));
         _assertReleaseUnchanged(burnId, beforeState);
 
-        bytes32 unpauseDigest = MultisigHelper.digestEmergencyUnpause(domainSep, emergencyNonceBefore, deadline);
-        proxy.emergencyUnpause(emergencyNonceBefore, deadline, 3, _signFed2of3(unpauseDigest));
+        uint256 unpauseNonce = proxy.emergencyNonce();
+        assertEq(unpauseNonce, emergencyNonceBefore + 1, "guardian consumes emergency nonce");
+        bytes32 unpauseDigest = MultisigHelper.digestEmergencyUnpause(domainSep, unpauseNonce, deadline);
+        proxy.emergencyUnpause(unpauseNonce, deadline, 3, _signFed2of3(unpauseDigest));
         assertFalse(bridge.paused(), "federation resumed inflow");
         assertFalse(bridge.outflowPaused(), "federation resumed outflow");
-        assertEq(proxy.emergencyNonce(), emergencyNonceBefore + 1, "federation consumes emergency nonce");
+        assertEq(proxy.emergencyNonce(), emergencyNonceBefore + 2, "guardian and federation each consume a nonce");
         assertEq(proxy.proposalNonce(), proposalNonceBefore, "guardian does not consume proposal nonce");
 
         proxy.fundsOutCall(params, nonce, deadline, 3, sigs);

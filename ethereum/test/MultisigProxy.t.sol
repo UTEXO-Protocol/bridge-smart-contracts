@@ -1470,7 +1470,130 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         assertFalse(bridge.paused());
     }
 
-    function test_guardianEmergencyPause_worksWithoutSignaturesOrNonceMovement() public {
+    function _emergencySignatures(bool unpause, uint256 nonce, uint256 deadline)
+        internal
+        view
+        returns (uint256 bitmap, bytes[] memory signatures)
+    {
+        bytes32 digest = unpause
+            ? MultisigHelper.digestEmergencyUnpause(domainSep, nonce, deadline)
+            : MultisigHelper.digestEmergencyPause(domainSep, nonce, deadline);
+        (uint256[] memory keys, uint256 bits) = _fedSigSet2of3();
+        return (bits, MultisigHelper.signAll(vm, digest, keys));
+    }
+
+    function _submitEmergency(bool unpause, uint256 nonce, uint256 deadline, uint256 bitmap, bytes[] memory signatures)
+        internal
+    {
+        if (unpause) proxy.emergencyUnpause(nonce, deadline, bitmap, signatures);
+        else proxy.emergencyPause(nonce, deadline, bitmap, signatures);
+    }
+
+    function test_guardianPause_invalidatesPreviouslySignedPauseAndUnpause() public {
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+        (uint256 bitmap, bytes[] memory pauseSignatures) = _emergencySignatures(false, nonce, deadline);
+        (, bytes[] memory unpauseSignatures) = _emergencySignatures(true, nonce, deadline);
+        uint256 proposalNonceBefore = proxy.proposalNonce();
+        uint256 teeNonceBefore = proxy.teeNonce(RGB_CHAIN_ID);
+        vm.prank(emergencyGuardian);
+        proxy.guardianEmergencyPause();
+
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.emergencyPause(nonce, deadline, bitmap, pauseSignatures);
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.emergencyUnpause(nonce, deadline, bitmap, unpauseSignatures);
+        assertTrue(bridge.paused());
+        assertTrue(bridge.outflowPaused());
+        assertEq(proxy.emergencyNonce(), nonce + 1);
+        assertEq(proxy.proposalNonce(), proposalNonceBefore);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), teeNonceBefore);
+
+        (, bytes[] memory freshSignatures) = _emergencySignatures(true, nonce + 1, deadline);
+        proxy.emergencyUnpause(nonce + 1, deadline, bitmap, freshSignatures);
+        assertFalse(bridge.paused());
+        assertFalse(bridge.outflowPaused());
+        assertEq(proxy.emergencyNonce(), nonce + 2);
+    }
+
+    function test_guardianPause_repeatedPauseInvalidatesNewlyCollectedUnpause() public {
+        vm.prank(emergencyGuardian);
+        proxy.guardianEmergencyPause();
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+        (uint256 bitmap, bytes[] memory signatures) = _emergencySignatures(true, nonce, deadline);
+        vm.prank(emergencyGuardian);
+        proxy.guardianEmergencyPause();
+        assertEq(proxy.emergencyNonce(), nonce + 1);
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.emergencyUnpause(nonce, deadline, bitmap, signatures);
+        assertTrue(bridge.paused());
+        assertTrue(bridge.outflowPaused());
+    }
+
+    function test_guardianPause_revertPreservesEmergencyNonce() public {
+        uint256 nonce = proxy.emergencyNonce();
+        vm.mockCallRevert(
+            address(bridge),
+            abi.encodeWithSignature("emergencyPauseAll()"),
+            abi.encodeWithSignature("Error(string)", "bridge failure")
+        );
+        vm.prank(emergencyGuardian);
+        vm.expectRevert(bytes("bridge failure"));
+        proxy.guardianEmergencyPause();
+        assertEq(proxy.emergencyNonce(), nonce);
+        assertFalse(bridge.paused());
+        assertFalse(bridge.outflowPaused());
+    }
+
+    function test_emergencyTiming_rejectsDistantDeadlinesForBothActions() public {
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 proposalNonceBefore = proxy.proposalNonce();
+        uint256[2] memory deadlines =
+            [block.timestamp + proxy.MAX_EMERGENCY_DEADLINE() + 1, block.timestamp + 10 * 365 days];
+        for (uint256 action; action < 2; ++action) {
+            for (uint256 i; i < deadlines.length; ++i) {
+                (uint256 bitmap, bytes[] memory signatures) = _emergencySignatures(action == 1, nonce, deadlines[i]);
+                vm.expectRevert(IMultisigProxy.DeadlineTooFar.selector);
+                _submitEmergency(action == 1, nonce, deadlines[i], bitmap, signatures);
+                assertEq(proxy.emergencyNonce(), nonce);
+                assertEq(proxy.proposalNonce(), proposalNonceBefore);
+                assertFalse(bridge.paused());
+                assertFalse(bridge.outflowPaused());
+            }
+        }
+    }
+
+    function test_emergencyTiming_acceptsExactDeadlineBoundaries() public {
+        uint256[2] memory deadlines = [block.timestamp, block.timestamp + proxy.MAX_EMERGENCY_DEADLINE()];
+        for (uint256 i; i < deadlines.length; ++i) {
+            uint256 nonce = proxy.emergencyNonce();
+            (uint256 bitmap, bytes[] memory signatures) = _emergencySignatures(false, nonce, deadlines[i]);
+            proxy.emergencyPause(nonce, deadlines[i], bitmap, signatures);
+            assertTrue(bridge.paused());
+            assertTrue(bridge.outflowPaused());
+            (, signatures) = _emergencySignatures(true, nonce + 1, deadlines[i]);
+            proxy.emergencyUnpause(nonce + 1, deadlines[i], bitmap, signatures);
+            assertFalse(bridge.paused());
+            assertFalse(bridge.outflowPaused());
+            assertEq(proxy.emergencyNonce(), nonce + 2);
+        }
+    }
+
+    function test_emergencyTiming_rejectsExpiredUnpauseWithoutConsumingNonce() public {
+        vm.prank(emergencyGuardian);
+        proxy.guardianEmergencyPause();
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 deadline = block.timestamp - 1;
+        (uint256 bitmap, bytes[] memory signatures) = _emergencySignatures(true, nonce, deadline);
+        vm.expectRevert(IMultisigProxy.Expired.selector);
+        proxy.emergencyUnpause(nonce, deadline, bitmap, signatures);
+        assertEq(proxy.emergencyNonce(), nonce);
+        assertTrue(bridge.paused());
+        assertTrue(bridge.outflowPaused());
+    }
+
+    function test_guardianEmergencyPause_advancesOnlyEmergencyNonce() public {
         uint256 emergencyNonceBefore = proxy.emergencyNonce();
         uint256 proposalNonceBefore = proxy.proposalNonce();
 
@@ -1481,15 +1604,19 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
         assertTrue(bridge.paused(), "inflow frozen");
         assertTrue(bridge.outflowPaused(), "outflow frozen");
-        assertEq(proxy.emergencyNonce(), emergencyNonceBefore, "federation emergency lane unchanged");
+        assertEq(proxy.emergencyNonce(), emergencyNonceBefore + 1, "guardian invalidates emergency signatures");
         assertEq(proxy.proposalNonce(), proposalNonceBefore, "proposal lane unchanged");
     }
 
     function test_guardianEmergencyPause_revertsForUnauthorizedCaller() public {
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 proposalNonceBefore = proxy.proposalNonce();
         address attacker = makeAddr("guardian-attacker");
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnauthorizedEmergencyGuardian.selector, attacker));
         vm.prank(attacker);
         proxy.guardianEmergencyPause();
+        assertEq(proxy.emergencyNonce(), nonce);
+        assertEq(proxy.proposalNonce(), proposalNonceBefore);
     }
 
     function test_guardianCannotLiftFederationFreeze() public {
