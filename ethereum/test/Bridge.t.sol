@@ -181,6 +181,37 @@ contract BridgeTest is BridgeTestBase {
         bridge.setCommissionManager(makeAddr("newCm"));
     }
 
+    function test_setCommissionManager_revertsOnCodelessAddress() public {
+        address candidate = makeAddr("codeless-manager");
+        vm.expectRevert(IBridge.InvalidCommissionManagerAddress.selector);
+        vm.prank(multisig);
+        bridge.setCommissionManager(candidate);
+        assertEq(address(bridge.commissionManager()), address(cm));
+    }
+
+    function test_setCommissionManager_revertsOnWrongBridgeBinding() public {
+        CommissionManager candidate = new CommissionManager(makeAddr("other-bridge"), recipient);
+        vm.expectRevert(IBridge.InvalidCommissionManagerAddress.selector);
+        vm.prank(multisig);
+        bridge.setCommissionManager(address(candidate));
+        assertEq(address(bridge.commissionManager()), address(cm));
+    }
+
+    function test_setCommissionManager_revertsOnMissingOrRevertingBindingGetter() public {
+        // The token has code but does not implement bridgeAddress().
+        vm.expectRevert();
+        vm.prank(multisig);
+        bridge.setCommissionManager(address(usdt0));
+        assertEq(address(bridge.commissionManager()), address(cm));
+
+        CommissionManager candidate = new CommissionManager(address(bridge), recipient);
+        vm.mockCallRevert(address(candidate), abi.encodeCall(ICommissionManager.bridgeAddress, ()), bytes("bad getter"));
+        vm.expectRevert(bytes("bad getter"));
+        vm.prank(multisig);
+        bridge.setCommissionManager(address(candidate));
+        assertEq(address(bridge.commissionManager()), address(cm));
+    }
+
     function test_setCommissionManager_routesNewFeesToReplacement() public {
         CommissionManager newCm = new CommissionManager(address(bridge), recipient);
         uint256 percent = 400; // 4%
@@ -877,7 +908,7 @@ contract BridgeTest is BridgeTestBase {
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
-        ZeroNetCommissionManager zeroNetManager = new ZeroNetCommissionManager();
+        ZeroNetCommissionManager zeroNetManager = new ZeroNetCommissionManager(address(bridge));
         vm.prank(multisig);
         bridge.setCommissionManager(address(zeroNetManager));
 
@@ -896,6 +927,56 @@ contract BridgeTest is BridgeTestBase {
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore, "reverted release restores liquidity");
         assertEq(bridge.totalLockedLiquidity(), totalLiquidityBefore, "reverted release restores total liquidity");
         assertEq(usdt0.balanceOf(recipient), 0, "reverted release transfers no tokens");
+    }
+
+    function _assertNonconservingQuoteRejected(uint256 fee, uint256 net) internal {
+        _seedRGB(AMOUNT);
+        vm.mockCall(
+            address(cm),
+            abi.encodeCall(
+                ICommissionManager.calculateFundsOutCommission, (RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(usdt0), AMOUNT)
+            ),
+            abi.encode(fee, uint256(0), net)
+        );
+        bytes memory settlementData = _settlementWithAmounts(_ids(_seedOpId), _one(_seedAmt));
+        uint256 burnId =
+            _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), settlementData);
+        LedgerSnapshot memory beforeState = _snapshotLedger(_seedOpId);
+        uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 totalBefore = bridge.totalLockedLiquidity();
+        uint256 chainAllowanceBefore = bridge.availableOutflow(RGB_CHAIN_ID);
+        uint256 globalAllowanceBefore = bridge.availableGlobalOutflow();
+
+        vm.expectRevert(IBridge.CommissionConservationBroken.selector);
+        vm.prank(multisig);
+        _fundsOutWithBurnId(
+            recipient, AMOUNT, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), settlementData
+        );
+
+        _assertLedgerUnchanged(beforeState, _seedOpId);
+        assertEq(usdt0.balanceOf(recipient), 0);
+        assertFalse(bridge.consumedBurnIds(burnId));
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore);
+        assertEq(bridge.totalLockedLiquidity(), totalBefore);
+        assertEq(bridge.availableOutflow(RGB_CHAIN_ID), chainAllowanceBefore);
+        assertEq(bridge.availableGlobalOutflow(), globalAllowanceBefore);
+    }
+
+    function test_fundsOut_rejectsInflatedCommissionQuote() public {
+        _assertNonconservingQuoteRejected(0, AMOUNT * 2);
+    }
+
+    function test_fundsOut_rejectsUnderpayingCommissionQuote() public {
+        _assertNonconservingQuoteRejected(0, AMOUNT - 1);
+    }
+
+    function test_fundsOut_rejectsOverflowingCommissionQuote() public {
+        _assertNonconservingQuoteRejected(type(uint256).max, 1);
+    }
+
+    function testFuzz_fundsOut_rejectsNonconservingCommissionQuote(uint256 fee, uint256 net) public {
+        vm.assume(fee > AMOUNT || net != AMOUNT - fee);
+        _assertNonconservingQuoteRejected(fee, net);
     }
 
     function test_fundsOut_multipleFundsInIds() public {
