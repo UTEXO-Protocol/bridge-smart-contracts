@@ -30,6 +30,8 @@ Production bridge for UTEXO. Runs behind the custom ERC-1967 `BridgeProxy` and i
 
 `BridgeProxy` receives initialization calldata in its constructor, so the proxy is never left claimable. The implementation constructor disables initialization. `initialize` stores the token, registry, CommissionManager, optional LayerZero adapter, non-zero amount floors, and initial owner in proxy storage. Federation may retune mutable settings through the timelocked owner path. The bridge's own chain identifier is `block.chainid` — chain IDs are `uint256` throughout the stack (real EVM chain IDs for EVM legs; backend-assigned IDs in a reserved namespace above `2^32` for non-EVM endpoints, e.g. RGB = `1_000_001`).
 
+Amount floors must satisfy `minFundsInAmount >= minFundsOutAmount`. Initialization and both setters enforce this ordering; equal floors and different floors with a higher inbound minimum are allowed. Setters compare against the counterpart's current value at execution, so a pending governance proposal can revert if another proposal changed that value during the timelock. When changing both floors, raise the inbound floor first when necessary; lower the outbound floor first when necessary. These are gross operation minima: token commission can still reduce a minimum deposit's net amount below the withdrawal floor, so frontend and source-side tooling must account for fees separately.
+
 ### BridgeProxy (`src/BridgeProxy.sol`)
 
 Owner-controlled custom proxy built on OpenZeppelin `ERC1967Proxy` and `ERC1967Utils`. The canonical, value-holding Bridge address is the proxy; implementation addresses are replaceable.
@@ -246,7 +248,7 @@ set -a && source .env.interact && set +a   # before interact scripts
 - `COMMISSION_MANAGER` — `CommissionManager` address (step-by-step deploys only)
 - `COMMISSION_RECIPIENT` — immutable destination for every CM withdrawal; choose a long-lived treasury address
 - `EMERGENCY_GUARDIAN` — required non-zero initial guardian address with direct emergency pause-only authority
-- `MIN_FUNDS_IN_AMOUNT` / `MIN_FUNDS_OUT_AMOUNT` — required non-zero operation floors in token smallest units; configure the outbound value consistently in source-side tooling and TEE policy
+- `MIN_FUNDS_IN_AMOUNT` / `MIN_FUNDS_OUT_AMOUNT` — required non-zero operation floors in token smallest units, with `MIN_FUNDS_IN_AMOUNT >= MIN_FUNDS_OUT_AMOUNT`; configure the outbound value consistently in source-side tooling and TEE policy
 - `ETH_USD_FEED` / `ETH_USD_HEARTBEAT` — Chainlink ETH/USD aggregator + staleness window (required if any route uses NATIVE commission)
 - `ENCLAVE_SIGNERS` / `FEDERATION_SIGNERS` — comma-separated addresses, ordered by bitmap bit index
 - `ENCLAVE_THRESHOLD` / `FEDERATION_THRESHOLD` — M-of-N thresholds
@@ -362,7 +364,7 @@ forge script script/interact/BridgeFundsIn.s.sol --rpc-url $RPC_URL --broadcast
 4. Verify immutable commission destination: `CommissionManager.commissionRecipient()` returns the intended treasury.
 5. Verify Bridge ↔ Registry linkage: `Bridge.routeRegistry()` returns the live `RouteRegistry`; `RouteRegistry.bridge()` returns the live `Bridge`.
 6. Verify Bridge ↔ CM linkage: `CommissionManager.bridgeAddress()` returns the live `Bridge`; `Bridge.commissionManager()` returns the live `CommissionManager`.
-7. Verify amount floors: `Bridge.minFundsInAmount()` and `Bridge.minFundsOutAmount()` return the intended non-zero values, and source-side tooling rejects burns below the outbound floor.
+7. Verify amount floors: `Bridge.minFundsInAmount()` and `Bridge.minFundsOutAmount()` return the intended non-zero values with the inbound floor at least the outbound floor, and source-side tooling rejects burns below the outbound floor.
 8. Verify LZ adapter wiring: `Bridge.lzAdapter()` and `MultisigProxy.lzAdapter()` both return `address(0)` immediately after deploy. Once the adapter is live, federation must run two timelocked proposals:
    - `proposeAdminExecute` on the proxy with calldata `Bridge.setLZAdapter(adapter)` — opens the adapter `fundsIn` data path.
    - `proposeUpdateLZAdapter(adapter)` — opens the `AdminExecuteAdapter` governance path on the proxy.
