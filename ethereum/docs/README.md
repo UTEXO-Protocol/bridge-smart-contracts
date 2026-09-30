@@ -96,20 +96,17 @@ Adding a new finality source (e.g. an Arch light client) is just a new verifier 
 Per-route plugin that owns route-specific bookkeeping. Interface: `onFundsIn(ctx)` + `beforeFundsOut(ctx)`, both invoked by `RouteRegistry` on behalf of the Bridge.
 
 - **`RgbSettlementModule`** — canonical RGB mint/burn ledger. On `fundsIn`, requires the canonical empty `destinationAddress`, stores the Bridge-derived `operationId => netAmount`, tags it with the destination RGB network, and returns the supplied RGB OpId so Bridge emits both `FundsIn` and `BridgeFundsIn`. On `fundsOut`, `settlementData = abi.encode(bytes32[] operationIds, uint256[] amounts)` must reference existing exact-amount records tagged with the debit network. Records are permanent proof-of-mint entries; replay and solvency are enforced independently by `consumedBurnIds` and isolated liquidity.
-- **`RgbOutboundSettlementModule`** — canonical-ledger reader for routes whose RGB debit is followed by a destination that must not create a new record. In production it serves the `96 -> 97` mint/burn-to-pool rebalance: it performs the network-scoped debit check, then returns `0` and writes nothing on the pool credit.
-- **`RgbPoolSettlementModule`** — asymmetric pool adapter pinned to immutable pool and backing-network ids. A credit into pool network `97` writes no canonical record and returns `0`, so a normal pool deposit emits only `BridgeFundsIn`. A physical release from `97` must cite exact records from the canonical mint/burn ledger tagged with network `96`.
+- **`RgbOutboundSettlementModule`** — canonical-ledger reader for routes whose RGB debit is followed by a destination that must not create a new record. For RGB mint/burn-to-Arch rebalances it performs the network-scoped debit check, then returns `0` and writes no RGB record on the non-RGB credit.
 - **`NullSettlementModule`** — stateless no-op. Used by routes whose settlement is handled entirely by an external delivery layer (e.g. LayerZero compose) or by routes whose verifier already binds the release to a specific deposit. Stateless ⇒ no auth.
 
-Production route-module topology:
+Production RGB mint/burn route-module topology:
 
 | Route | Settlement module | Result |
 |---|---|---|
 | `42161 -> 96` | `RgbSettlementModule` | writes canonical record; emits `FundsIn` + `BridgeFundsIn` |
 | `96 -> 42161` | `RgbSettlementModule` | verifies a network-96 canonical record |
-| `42161 -> 97` | `RgbPoolSettlementModule` | no record; emits only `BridgeFundsIn` |
-| `97 -> 42161` | `RgbPoolSettlementModule` | verifies backing records tagged with network 96 |
-| `96 -> 97` rebalance | `RgbOutboundSettlementModule` | verifies network 96; writes no pool record |
-| `97 -> 96` rebalance | `RgbSettlementModule` | accounting-only debit; writes the new network-96 record |
+
+RGB uses mint/burn routes only. Rebalances to non-RGB destinations use `RgbOutboundSettlementModule`; rebalances into RGB use `RgbSettlementModule` to create the destination mint record.
 
 ### CommissionManager (`src/CommissionManager.sol`)
 
@@ -244,7 +241,6 @@ set -a && source .env.interact && set +a   # before interact scripts
 - `BTC_RELAY_ADDRESS` — Atomiq BtcRelay contract address (consumed by `RGBVerifier`)
 - `LZ_ADAPTER` — initial LayerZero adapter address (optional; pass `0x0` if the adapter has not been deployed yet, then wire it in via federation governance after the adapter ships)
 - `ROUTE_REGISTRY_ADDRESS` — `RouteRegistry` address (step-by-step deployments only; `DeployAll` predicts it)
-- `RGB_SETTLEMENT_MODULE_ADDRESS`, `RGB_MINT_BURN_CHAIN_ID`, `RGB_POOL_CHAIN_ID` — standalone `DeployRgbPoolSettlementModule` inputs (`96` and `97` in production)
 - `COMMISSION_MANAGER` — `CommissionManager` address (step-by-step deploys only)
 - `COMMISSION_RECIPIENT` — immutable destination for every CM withdrawal; choose a long-lived treasury address
 - `EMERGENCY_GUARDIAN` — required non-zero initial guardian address with direct emergency pause-only authority
@@ -286,7 +282,7 @@ Predicts the Bridge address from the deployer's future nonce, deploys in order:
 3. locked `Bridge` implementation
 4. atomically initialized `BridgeProxy` (the canonical Bridge address)
 5. `RGBVerifier` (wraps the BtcRelay)
-6. `RgbSettlementModule`, `NullVerifier`, `RgbOutboundSettlementModule`, `RgbPoolSettlementModule`, and `NullSettlementModule`
+6. `RgbSettlementModule`, `NullVerifier`, `RgbOutboundSettlementModule`, and `NullSettlementModule`
 7. `MultisigProxy`
 8. Optional `CommissionManager` oracle configuration
 9. `CommissionManager` / `Bridge` / `RouteRegistry` `transferOwnership` → `MultisigProxy`
@@ -301,7 +297,6 @@ forge script script/deploy/DeployRouteRegistry.s.sol         --rpc-url $RPC_URL 
 forge script script/deploy/DeployBridge.s.sol                --rpc-url $RPC_URL --broadcast --verify
 forge script script/deploy/DeployRGBVerifier.s.sol           --rpc-url $RPC_URL --broadcast --verify
 forge script script/deploy/DeployRgbSettlementModule.s.sol   --rpc-url $RPC_URL --broadcast --verify
-forge script script/deploy/DeployRgbPoolSettlementModule.s.sol --rpc-url $RPC_URL --broadcast --verify
 forge script script/deploy/DeployMultisigProxy.s.sol         --rpc-url $RPC_URL --broadcast --verify
 
 # Transfer ownerships to MultisigProxy
@@ -393,7 +388,6 @@ src/
   settlement/
     RgbSettlementModule.sol    — canonical RGB mint/burn proof ledger
     RgbOutboundSettlementModule.sol — ledger reader with stateless credit
-    RgbPoolSettlementModule.sol — pool credit no-op + mint/burn-ledger debit check
     NullSettlementModule.sol   — Stateless no-op (routes settled by external delivery)
   interfaces/
     IBridge.sol                — Bridge interface, events, and custom errors
@@ -408,7 +402,7 @@ src/
 script/
   deploy/                      — DeployAll, DeployBridge, DeployBridgeImplementation, DeployMinimalBridge,
                                  DeployRouteRegistry, DeployRGBVerifier,
-                                 DeployRgbSettlementModule, DeployRgbPoolSettlementModule,
+                                 DeployRgbSettlementModule,
                                  DeployCommissionManager,
                                  DeployMultisigProxy
   interact/                    — BridgeFundsIn, MultisigExecuteFundsOut,
@@ -426,7 +420,6 @@ test/
   MinimalBridge.t.sol          — MinimalBridge tests
   RouteRegistry.t.sol          — RouteRegistry tests (setRoute, dispatch, enabled gating)
   RgbSettlementModule.t.sol    — canonical RGB ledger tests
-  RgbPoolSettlementModule.t.sol — asymmetric RGB pool settlement tests
   CommissionManager.t.sol      — CommissionManager tests (rules, pools, withdrawals, ETH/USD feed)
   MultisigProxy.t.sol          — MultisigProxy tests (EIP-712, bitmap sigs, proposals incl. SetRoute / UpdateRouteRegistry)
   Integration.t.sol            — End-to-end: user → Bridge → RouteRegistry → TEE multisig → fundsOut → CM withdrawal
