@@ -75,7 +75,7 @@ contract BridgeProxy is ERC1967Proxy, IBridgeProxy {
         if (candidate == address(this)) revert IncompatibleBridgeImplementation(candidate);
 
         // Implementations must expose a direct-call-only compatibility marker.
-        // Bridge's immutable identity guard rejects proxy-mediated calls to it.    
+        // Bridge's immutable identity guard rejects proxy-mediated calls to it.
         (bool ok, bytes memory result) = candidate.staticcall(abi.encodeCall(IBridge.bridgeProxyCompatibilityUUID, ()));
         if (
             !ok || result.length != 32
