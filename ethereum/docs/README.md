@@ -128,7 +128,7 @@ Owner of `Bridge`, `RouteRegistry`, **and** `CommissionManager`. Two-level ECDSA
 
 - **Enclave signers (TEE)** — authorize only the purpose-built `fundsOutCall`, `lzFundsOutCall`, and `rebalanceCall` operations (M-of-N, bitmap encoding). Signer sets and replay-protection nonces are isolated per source chain; there is no generic enclave call dispatch.
 - **Federation signers (governance)** — two-phase timelock for admin operations. Instant `emergencyPause` / `emergencyUnpause` bypass the timelock.
-- **Emergency guardian** — a required non-zero constructor address that can call `guardianEmergencyPause` directly, without signatures or nonce consumption. Unpause requires federation authorization. Federation may rotate it, or set it to `address(0)` to disable this direct path, through a timelocked `SetEmergencyGuardian` proposal.
+- **Emergency guardian** — a required non-zero constructor address that can call `guardianEmergencyPause` directly, without signatures. Every successful call advances `emergencyNonce`, invalidating previously signed federation emergency commands. Unpause requires federation authorization. Federation may rotate it, or set it to `address(0)` to disable this direct path, through a timelocked `SetEmergencyGuardian` proposal.
 
 Federation-controlled operations (`OperationType`):
 
@@ -190,7 +190,9 @@ Administrative operations (signer rotation, configuration changes, commission wi
 
 Raw generic calls cannot invoke `transferOwnership(address)`. Ownership migration uses the typed `TransferManagedOwnership` operation, which binds the exact allowlisted target and new owner into the federation's EIP-712 signatures and revalidates the target at execution. `acceptOwnership()` remains available through the relevant generic lane for two-step deployment and migration handoffs.
 
-**Emergency pause/unpause** bypass the timelock — federation can stop or resume `Bridge` instantly with M-of-N signatures. The configured guardian can only pause directly, without signatures, through `guardianEmergencyPause`; this call does not advance `emergencyNonce` or `proposalNonce`.
+**Emergency pause/unpause** bypass the timelock — federation can stop or resume `Bridge` instantly with M-of-N signatures. The configured guardian can only pause directly, without signatures, through `guardianEmergencyPause`; each successful call advances `emergencyNonce`, including when the bridge is already paused. It does not advance `proposalNonce` or any TEE nonce.
+
+Federation `emergencyPause` and `emergencyUnpause` require `block.timestamp <= deadline <= block.timestamp + MAX_EMERGENCY_DEADLINE` (one day). Typed enclave operations use the separate `MAX_TEE_DEADLINE` limit, also currently one day. These limits constrain the deadline at submission, not the age of the signature: no signing timestamp is included. Emergency signing tools must read the current `emergencyNonce` after any guardian action; a rejected or reverted action consumes no nonce. The EIP-712 schemas are unchanged.
 
 The guardian is pause-only and cannot lift its own freeze or a federation freeze. Resuming both inflow and outflow requires federation signatures through `emergencyUnpause`. Use `EmergencyUnpause.s.sol` for this operation; the former guardian unpause function and script have been removed. A compromised guardian can still halt traffic; use a tightly controlled EOA or contract account and disable it with `SetEmergencyGuardian(address(0))` when direct pause access is not required.
 

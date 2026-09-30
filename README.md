@@ -61,7 +61,7 @@ There are two independent signer sets:
 
 **Federation signers (governance)** — authorize administrative operations: signer rotation, configuration changes, commission withdrawal, and updates to the addresses of `Bridge` / `CommissionManager`. All federation operations go through a two-phase timelock (propose → wait → execute), except emergency pause/unpause which are instant.
 
-**Emergency guardian** — a single address initialized when `MultisigProxy` is deployed. It may immediately pause both bridge directions without signatures. Unpause requires federation authorization. Federation can rotate it or set it to `address(0)` through timelocked governance.
+**Emergency guardian** — a single address initialized when `MultisigProxy` is deployed. It may immediately pause both bridge directions without signatures. Every successful guardian pause advances the emergency nonce and invalidates older emergency authorizations. Unpause requires federation authorization. Federation can rotate it or set it to `address(0)` through timelocked governance.
 
 Private keys are held inside Enclaves and cannot be extracted. Key persistence is handled through attested enclave-to-enclave cloning.
 
