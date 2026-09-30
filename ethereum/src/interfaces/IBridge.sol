@@ -26,6 +26,8 @@ interface IBridge {
     error InvalidSourceChainId();
     error ZeroAmount();
     error ZeroNetAmount();
+    /// @notice The quoted token commission and net payout do not sum to the gross release amount.
+    error CommissionConservationBroken();
     error AmountBelowMinimum(uint256 amount, uint256 minimum);
     error InsufficientReceived(uint256 received, uint256 tokenCommission);
     error InvalidMinFundsInAmount();
@@ -308,6 +310,7 @@ interface IBridge {
     /// @dev Per-chain / global outflow rate limiting uses the outflow
     ///      token-bucket library; bucket state is exposed via the `chainBuckets`
     ///      / `globalBucket` getters and the `availableOutflow` previews.
+    ///      Requires token commission + net payout == gross amount, with a non-zero net payout.
     function fundsOut(FundsOutParams calldata params) external;
 
     /// @notice Parameters for `rebalanceLiquidity`.
@@ -393,7 +396,8 @@ interface IBridge {
 
     /// @notice Updates the `CommissionManager` used for fee quotes and custody.
     ///         Owner-only (MultisigProxy via the typed, timelocked
-    ///         `UpdateCommissionManager` operation). Must be non-zero.
+    ///         `UpdateCommissionManager` operation). Must have deployed code
+    ///         and return this Bridge's address from `bridgeAddress()`.
     function setCommissionManager(address newCommissionManager) external;
 
     /// @notice Updates the minimum accepted `fundsIn` deposit (token smallest

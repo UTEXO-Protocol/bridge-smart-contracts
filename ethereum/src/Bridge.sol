@@ -326,8 +326,12 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @inheritdoc IBridge
     /// @dev Owner is `MultisigProxy`; its typed `UpdateCommissionManager`
     ///      operation updates this pointer and the proxy's own target atomically.
+    ///      Validate deployed code and the live Bridge binding at execution.
     function setCommissionManager(address newCommissionManager) external override onlyOwner {
-        if (newCommissionManager == address(0)) revert InvalidCommissionManagerAddress();
+        if (newCommissionManager.code.length == 0) revert InvalidCommissionManagerAddress();
+        if (ICommissionManager(payable(newCommissionManager)).bridgeAddress() != address(this)) {
+            revert InvalidCommissionManagerAddress();
+        }
         address old = address(commissionManager);
         commissionManager = ICommissionManager(payable(newCommissionManager));
         emit CommissionManagerUpdated(old, newCommissionManager);
@@ -551,13 +555,17 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         chainBuckets[fundsOutParams.sourceChainId].spend(_toShares(fundsOutParams.amount, srcLiquidity), TOKEN);
         globalBucket.spend(_toShares(fundsOutParams.amount, totalLiquidity), address(0));
 
-        // Quote commission. NATIVE on fundsOut is unrepresentable: the
-        // CommissionManager setters reject a (NATIVE, FUNDS_OUT) rule at config,
-        // so `nativeCommission` is always 0 on this path. The value is ignored here.
+        // Releases charge only token commission. Enforce conservation here
+        // independently of the replaceable manager's quote implementation.
         (uint256 tokenCommission,, uint256 netAmount) = commissionManager.calculateFundsOutCommission(
             fundsOutParams.sourceChainId, fundsOutParams.destinationChainId, TOKEN, fundsOutParams.amount
         );
 
+        // Equivalent to tokenCommission + netAmount == amount, without risking
+        // overflow on an invalid quote from a replacement manager.
+        if (tokenCommission > fundsOutParams.amount || netAmount != fundsOutParams.amount - tokenCommission) {
+            revert CommissionConservationBroken();
+        }
         if (netAmount == 0) revert ZeroNetAmount();
 
         // Delegate route-specific finality verification + settlement-state
