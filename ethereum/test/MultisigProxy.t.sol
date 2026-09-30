@@ -2104,6 +2104,66 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         assertEq(bridge.owner(), address(proxy));
     }
 
+    function test_upgradeCalldata_acceptsExactly4096BytesThroughGovernance() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4060));
+        assertEq(initializationData.length, 4096);
+        bytes32 id = _submitBridgeUpgrade(address(candidate), initializationData);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        // The ABI-encoded operation envelope may be larger than 4096 bytes.
+        proxy.executeProposal(id, abi.encode(address(bridge), address(candidate), initializationData));
+        assertEq(IBridgeProxy(address(bridge)).implementation(), address(candidate));
+        assertEq(BridgeV2Mock(address(bridge)).upgradeValue(), 777);
+        assertEq(bridge.owner(), address(proxy));
+        assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Executed));
+    }
+
+    function test_upgradeCalldata_rejects4097BytesAtProposal() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4061));
+        _expectRejectedBridgeUpgrade(
+            address(candidate),
+            initializationData,
+            abi.encodeWithSelector(IMultisigProxy.UpgradeCallDataTooLong.selector, uint256(4097), uint256(4096))
+        );
+    }
+
+    function test_upgradeCalldata_executionRejectsOversizedPayloadIndependently() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes32 id = _submitBridgeUpgrade(address(candidate), "");
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4061));
+        bytes memory original = abi.encode(address(bridge), address(candidate), bytes(""));
+        bytes memory opData = abi.encode(address(bridge), address(candidate), initializationData);
+        _seedUpgradePayloadHash(id, original, opData);
+        uint256 nonceBefore = proxy.proposalNonce();
+        address implementationBefore = IBridgeProxy(address(bridge)).implementation();
+        uint256 balanceBefore = token.balanceOf(address(bridge));
+        uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        // A distinct downstream error proves MultisigProxy rejects the payload
+        // itself, rather than relying on BridgeProxy's identical length error.
+        vm.mockCallRevert(
+            address(bridge),
+            abi.encodeCall(IBridgeProxy.upgradeToAndCall, (address(candidate), initializationData)),
+            bytes("unexpected proxy call")
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(IMultisigProxy.UpgradeCallDataTooLong.selector, uint256(4097), uint256(4096))
+        );
+        proxy.executeProposal(id, opData);
+        vm.clearMockedCalls();
+        assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+        assertEq(proxy.proposalNonce(), nonceBefore);
+        assertEq(IBridgeProxy(address(bridge)).implementation(), implementationBefore);
+        assertEq(bridge.owner(), address(proxy));
+        assertEq(token.balanceOf(address(bridge)), balanceBefore);
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore);
+    }
+
     function test_upgrade_rechecksCurrentImplementationAtExecution() public {
         BridgeV2Mock candidate = new BridgeV2Mock();
         bytes32 first = _submitBridgeUpgrade(address(candidate), "");

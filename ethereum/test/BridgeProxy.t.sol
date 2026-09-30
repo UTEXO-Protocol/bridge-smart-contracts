@@ -169,6 +169,51 @@ contract BridgeProxyTest is Test {
         assertEq(token.balanceOf(address(proxy)), 123 ether);
     }
 
+    function test_upgradeCalldata_acceptsExactly4096Bytes() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4060));
+        assertEq(initializationData.length, 4096);
+
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), initializationData);
+        assertEq(proxy.implementation(), address(candidate));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 777);
+        assertEq(bridge.owner(), owner);
+    }
+
+    function test_upgradeCalldata_rejects4097BytesAndAllowsRetry() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4061));
+        token.mint(address(proxy), 123 ether);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(BridgeProxy.UpgradeCallDataTooLong.selector, uint256(4097), uint256(4096))
+        );
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), initializationData);
+        assertEq(proxy.implementation(), address(implementation));
+        assertEq(bridge.owner(), owner);
+        assertEq(token.balanceOf(address(proxy)), 123 ether);
+
+        // The rejected call did not consume the reinitializer version.
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), abi.encodeCall(BridgeV2Mock.initializeV2, (42)));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 42);
+    }
+
+    function testFuzz_upgradeCalldata_rejectsOversizedPayloads(uint256 length) public {
+        length = bound(length, 4097, 65_536);
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(length - 36));
+        vm.expectRevert(abi.encodeWithSelector(BridgeProxy.UpgradeCallDataTooLong.selector, length, uint256(4096)));
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), initializationData);
+        assertEq(proxy.implementation(), address(implementation));
+    }
+
     function test_failedUpgradeInitializationRollsBackImplementation() public {
         BridgeV2Mock nextImplementation = new BridgeV2Mock();
         vm.prank(owner);
