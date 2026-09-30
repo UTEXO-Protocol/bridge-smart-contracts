@@ -85,11 +85,10 @@ contract MultisigProxy is IMultisigProxy {
     ///         (`_propose` and all typed proposal entrypoints).
     uint256 public proposalNonce;
 
-    /// @notice Sequential nonce for the emergency lane: `emergencyPause` /
-    ///         `emergencyUnpause`. Kept separate from `proposalNonce` so an
+    /// @notice Sequential nonce shared by federation emergency pause/unpause
+    ///         and every successful guardian pause. Kept separate from `proposalNonce` so an
     ///         emergency action cannot invalidate an already-signed regular
-    ///         proposal. Cross-lane replay is independently prevented by
-    ///         each operation's distinct EIP-712 typehash.
+    ///         proposal.
     uint256 public emergencyNonce;
 
     /// @notice Minimum delay (seconds) between proposal creation and execution.
@@ -109,12 +108,13 @@ contract MultisigProxy is IMultisigProxy {
     /// @notice Maximum allowed time between proposal creation and its deadline.
     uint256 public constant MAX_PROPOSAL_LIFETIME = 30 days;
 
-    /// @notice Maximum allowed lifetime of a TEE-signed `fundsOutCall` /
-    ///         `lzFundsOutCall` deadline. Tighter than `MAX_PROPOSAL_LIFETIME` because enclave
-    ///         operations (e.g. `fundsOut`) are meant to be executed promptly
-    ///         after signing; a short ceiling limits how long a leaked or
-    ///         pre-signed payload stays executable while its nonce is unconsumed.
+    /// @notice Maximum future deadline offset at submission for typed enclave operations.
+    /// @dev Bounds the deadline relative to block time, not the age of a signature.
     uint256 public constant MAX_TEE_DEADLINE = 1 days;
+
+    /// @notice Maximum future deadline offset at submission for federation emergency pause/unpause.
+    /// @dev Bounds the deadline relative to block time, not the age of a signature.
+    uint256 public constant MAX_EMERGENCY_DEADLINE = 1 days;
 
     /// @notice Hard upper bound on the size of either signer set. Bounds the
     ///         O(N^2) duplicate/disjointness checks and stays far within the
@@ -311,7 +311,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external {
-        _checkTeeTiming(deadline);
+        _checkDeadline(deadline, MAX_TEE_DEADLINE);
         // Select the enclave set by the release's source chain. `sourceChainId`
         // is committed to in the digest below, so a signature is bound to the
         // set of exactly one source chain. A zero threshold = unregistered.
@@ -377,7 +377,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external {
-        _checkTeeTiming(deadline);
+        _checkDeadline(deadline, MAX_TEE_DEADLINE);
         if (enclaveThreshold[params.sourceChainId] == 0) revert UnknownSourceChain(params.sourceChainId);
         if (nonce != teeNonce[params.sourceChainId]) revert InvalidNonce();
 
@@ -450,7 +450,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external payable {
-        _checkTeeTiming(deadline);
+        _checkDeadline(deadline, MAX_TEE_DEADLINE);
         if (enclaveThreshold[params.sourceChainId] == 0) revert UnknownSourceChain(params.sourceChainId);
         if (nonce != teeNonce[params.sourceChainId]) revert InvalidNonce();
 
@@ -547,11 +547,10 @@ contract MultisigProxy is IMultisigProxy {
         );
     }
 
-    /// @dev Shared timing guard for the typed enclave methods: not expired, and
-    ///      the signed deadline cannot sit further than `MAX_TEE_DEADLINE` ahead.
-    function _checkTeeTiming(uint256 deadline) private view {
+    /// @dev Reject expired deadlines and deadlines further than the supplied maximum offset ahead.
+    function _checkDeadline(uint256 deadline, uint256 maxDeadlineOffset) private view {
         if (block.timestamp > deadline) revert Expired();
-        if (deadline > block.timestamp + MAX_TEE_DEADLINE) revert DeadlineTooFar();
+        if (deadline > block.timestamp + maxDeadlineOffset) revert DeadlineTooFar();
     }
 
     // =========================================================================
@@ -560,7 +559,7 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @inheritdoc IMultisigProxy
     function emergencyPause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external {
-        if (block.timestamp > deadline) revert Expired();
+        _checkDeadline(deadline, MAX_EMERGENCY_DEADLINE);
         if (nonce != emergencyNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(_EMERGENCY_PAUSE_TYPEHASH, nonce, deadline)));
@@ -578,7 +577,7 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @inheritdoc IMultisigProxy
     function emergencyUnpause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external {
-        if (block.timestamp > deadline) revert Expired();
+        _checkDeadline(deadline, MAX_EMERGENCY_DEADLINE);
         if (nonce != emergencyNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(_EMERGENCY_UNPAUSE_TYPEHASH, nonce, deadline)));
@@ -595,6 +594,7 @@ contract MultisigProxy is IMultisigProxy {
     /// @inheritdoc IMultisigProxy
     function guardianEmergencyPause() external {
         if (msg.sender != emergencyGuardian) revert UnauthorizedEmergencyGuardian(msg.sender);
+        emergencyNonce++;
         _emergencyPauseBridge();
         emit GuardianEmergencyPaused(msg.sender);
     }

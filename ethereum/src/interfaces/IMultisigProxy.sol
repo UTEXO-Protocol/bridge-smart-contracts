@@ -252,13 +252,16 @@ interface IMultisigProxy {
     // =========================================================================
 
     /// @notice Emergency pause the Bridge. Instant, no timelock.
+    /// @dev Deadline must be between the current timestamp and one day ahead.
     function emergencyPause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
     /// @notice Emergency unpause the Bridge. Instant, no timelock.
+    /// @dev Deadline must be between the current timestamp and one day ahead.
     function emergencyUnpause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
     /// @notice Emergency pause the Bridge directly as the configured guardian.
-    /// @dev Requires `msg.sender == emergencyGuardian`; no signatures, nonce, or deadline.
+    /// @dev Requires `msg.sender == emergencyGuardian`; no signatures, nonce argument, or deadline.
+    ///      Every successful call increments emergencyNonce, even if already paused.
     function guardianEmergencyPause() external;
 
     // =========================================================================
