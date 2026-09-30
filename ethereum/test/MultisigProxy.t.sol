@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {MultisigProxy} from "../src/MultisigProxy.sol";
@@ -120,7 +120,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     event ProposalCancelled(bytes32 indexed proposalId);
     event ProposalExecuted(bytes32 indexed proposalId, IMultisigProxy.OperationType indexed opType);
     event EnclaveSignersUpdated(uint256 indexed sourceChainId, address[] newSigners, uint256 newThreshold);
-    event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
+    event FederationSignersUpdated(address[] newSigners, uint256 newThreshold, uint256 indexed newVersion);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
     event TimelockDurationUpdated(uint256 newDuration);
@@ -4004,6 +4004,48 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         // live-timelock check this would revert TimelockActive.
         proxy.executeProposal(bridgeProposalId, abi.encode(newBridge));
         assertEq(proxy.bridge(), newBridge, "snapshotted proposal executes despite the live timelock raise");
+    }
+
+    function test_federationRotation_emitsOneCompleteEventPerRotation() public {
+        (address[] memory newSigners, uint256[] memory newPks) = _fedFromPks(0xFA1, 3);
+        (uint256[] memory currentPks, uint256 bitmap) = _fedSigSet2of3();
+        assertEq(proxy.federationSignerSetVersion(), 1);
+
+        vm.recordLogs();
+        _rotateFedMeasured(newSigners, 2, currentPks, bitmap);
+        _assertFederationRotationLogs(vm.getRecordedLogs(), newSigners, 2, 2);
+
+        // Updating only the threshold is still a rotation and advances the version.
+        vm.recordLogs();
+        _rotateFedMeasured(newSigners, 3, _slice(newPks, 2), _bitmapFor(2));
+        _assertFederationRotationLogs(vm.getRecordedLogs(), newSigners, 3, 3);
+    }
+
+    function _assertFederationRotationLogs(
+        Vm.Log[] memory entries,
+        address[] memory expectedSigners,
+        uint256 expectedThreshold,
+        uint256 expectedVersion
+    ) internal view {
+        bytes32 combinedTopic = keccak256("FederationSignersUpdated(address[],uint256,uint256)");
+        bytes32 legacySignersTopic = keccak256("FederationSignersUpdated(address[],uint256)");
+        bytes32 legacyVersionTopic = keccak256("FederationSignerSetVersionUpdated(uint256)");
+        uint256 count;
+        for (uint256 i; i < entries.length; ++i) {
+            if (entries[i].emitter != address(proxy) || entries[i].topics.length == 0) continue;
+            bytes32 topic = entries[i].topics[0];
+            assertTrue(topic != legacySignersTopic, "legacy signer event must not be emitted");
+            assertTrue(topic != legacyVersionTopic, "legacy version event must not be emitted");
+            if (topic != combinedTopic) continue;
+            count++;
+            assertEq(entries[i].topics.length, 2, "version is the only indexed field");
+            assertEq(entries[i].topics[1], bytes32(expectedVersion), "indexed version");
+            assertEq(entries[i].data, abi.encode(expectedSigners, expectedThreshold), "signers and threshold");
+        }
+        assertEq(count, 1, "one complete event per rotation");
+        assertEq(proxy.federationSignerSetVersion(), expectedVersion);
+        assertEq(proxy.getFederationSigners(), expectedSigners);
+        assertEq(proxy.federationThreshold(), expectedThreshold);
     }
 
     function test_federationRotationInvalidatesPendingProposals() public {
