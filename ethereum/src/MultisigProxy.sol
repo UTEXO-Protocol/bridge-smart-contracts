@@ -105,7 +105,7 @@ contract MultisigProxy is IMultisigProxy {
     // Constants
     // =========================================================================
 
-    /// @notice Maximum allowed time between proposal creation and its deadline.
+    /// @notice Maximum future deadline offset at submission for proposals and cancellations.
     uint256 public constant MAX_PROPOSAL_LIFETIME = 30 days;
 
     /// @notice Maximum future deadline offset at submission for typed enclave operations.
@@ -1122,6 +1122,7 @@ contract MultisigProxy is IMultisigProxy {
         external
     {
         if (block.timestamp > deadline) revert Expired();
+        if (deadline > block.timestamp + MAX_PROPOSAL_LIFETIME) revert DeadlineTooFar();
 
         Proposal storage p = _proposals[proposalId];
         if (p.status != ProposalStatus.Pending) revert NotPending();

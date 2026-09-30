@@ -520,7 +520,8 @@ interface IMultisigProxy {
     // =========================================================================
 
     /// @notice Cancel a pending proposal. Requires M-of-N federation signatures.
-    /// @dev The authorization is bound directly to `proposalId`;
+    /// @dev Authorization is bound to `proposalId` and does not consume proposalNonce.
+    ///      Deadline must be between the current timestamp and MAX_PROPOSAL_LIFETIME ahead.
     function cancelProposal(bytes32 proposalId, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
     /// @notice Execute a proposal after the timelock has elapsed. Permissionless.
