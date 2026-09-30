@@ -17,8 +17,13 @@ import {IBridgeProxy} from "./interfaces/IBridgeProxy.sol";
 ///      implementation() and upgradeToAndCall(address,bytes) selectors are
 ///      reserved by this proxy and must not appear in an implementation ABI.
 contract BridgeProxy is ERC1967Proxy, IBridgeProxy {
+    /// @dev Maximum upgrade initialization bytes, including the selector.
+    ///      Keep aligned with MultisigProxy's proposal/execution limit.
+    uint256 private constant _MAX_UPGRADE_CALLDATA_LENGTH = 4096;
+
     error UnauthorizedBridgeOwner(address caller);
     error IncompatibleBridgeImplementation(address implementation);
+    error UpgradeCallDataTooLong(uint256 length, uint256 maxLength);
 
     constructor(address implementation_, bytes memory initializationData_)
         payable
@@ -44,6 +49,9 @@ contract BridgeProxy is ERC1967Proxy, IBridgeProxy {
         override
         onlyBridgeOwner
     {
+        if (data.length > _MAX_UPGRADE_CALLDATA_LENGTH) {
+            revert UpgradeCallDataTooLong(data.length, _MAX_UPGRADE_CALLDATA_LENGTH);
+        }
         _requireCompatibleImplementation(newImplementation);
         ERC1967Utils.upgradeToAndCall(newImplementation, data);
         // Check in proxy storage after the reinitializer. Any failure rolls

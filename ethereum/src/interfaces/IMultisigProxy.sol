@@ -88,6 +88,7 @@ interface IMultisigProxy {
     error StaleProposalTarget(address expectedTarget, address currentTarget);
     error StaleBridgeTarget(address signedBridge, address currentBridge);
     error InvalidBridgeImplementation(address implementation);
+    error UpgradeCallDataTooLong(uint256 length, uint256 maxLength);
 
     // =========================================================================
     // Types
@@ -320,7 +321,9 @@ interface IMultisigProxy {
     /// @notice Propose upgrading the currently configured Bridge proxy.
     /// @dev The signed proxy address prevents a pending proposal from being
     ///      redirected if `bridge` changes before execution.
-    ///      Nonempty calldata must contain a full selector.
+    ///      Initialization calldata is capped at 4096 bytes including its selector,
+    ///      at both proposal creation and execution. Empty calldata is allowed;
+    ///      nonempty calldata must contain a full selector.
     function proposeUpgradeBridgeImplementation(
         address bridgeProxy,
         address newImplementation,

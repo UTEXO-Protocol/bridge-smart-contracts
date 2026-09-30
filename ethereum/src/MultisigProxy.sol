@@ -132,6 +132,10 @@ contract MultisigProxy is IMultisigProxy {
     ///         selector before it is sliced via `calldataload`.
     uint256 public constant SELECTOR_LENGTH = 4;
 
+    /// @dev Maximum upgrade initialization bytes, including the selector.
+    ///      Keep aligned with BridgeProxy's direct upgrade limit.
+    uint256 private constant _MAX_UPGRADE_CALLDATA_LENGTH = 4096;
+
     /// @notice CommissionManager withdrawal selectors that generic raw-call
     ///         paths are NOT allowed to call.
     ///         The asset layer always pays CM's immutable recipient, while this
@@ -1629,6 +1633,9 @@ contract MultisigProxy is IMultisigProxy {
                 || newImplementation == IBridgeProxy(bridgeProxy).implementation()
         ) revert InvalidBridgeImplementation(newImplementation);
 
+        if (initializationData.length > _MAX_UPGRADE_CALLDATA_LENGTH) {
+            revert UpgradeCallDataTooLong(initializationData.length, _MAX_UPGRADE_CALLDATA_LENGTH);
+        }
         if (initializationData.length != 0) {
             if (initializationData.length < SELECTOR_LENGTH) revert CallDataTooShort();
             _requireNotBridgeReleaseSelector(_firstSelector(initializationData));
