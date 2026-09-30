@@ -312,6 +312,10 @@ Note: `RouteRegistry.bridge` and `CommissionManager.bridgeAddress` must point to
 
 ### Bridge implementation upgrades
 
+`MultisigProxy` validates upgrades both when proposed and when executed. The candidate must differ from the proxy's current implementation. Nonempty initialization calldata must contain at least a four-byte selector and must not directly call `fundsOut` or `rebalanceLiquidity`; violations revert before the upgrade or delegatecall. Empty calldata and reviewed versioned reinitializers remain supported. If another proposal installs the candidate first, execution of the pending upgrade reverts with `InvalidBridgeImplementation` and leaves it Pending.
+
+These checks restrict the federation governance entrypoint; `BridgeProxy` itself retains its owner-controlled API. The selector checks do not constrain arbitrary behavior or wrappers in a newly approved implementation, so implementation review remains required. The upgrade EIP-712 schema and execution payload are unchanged.
+
 1. Run `DeployBridgeImplementation.s.sol` to deploy a new locked implementation.
 2. Run `python3 script/storage-layout/storage_layout.py` after building the exact candidate artifact; review it against the frozen deployed baseline (see `storage-layout/README.md`). Prepare any versioned reinitializer calldata (`0x` if none). Upgrades must preserve the current owner: the proxy checks `owner()` after initialization and reverts the complete upgrade if the getter fails or returns a different address. Transfer ownership separately using the two-step ownership flow.
 3. Run `MultisigProposeUpgradeBridge.s.sol`; the signed proposal binds the current proxy, new implementation, and `keccak256(UPGRADE_CALLDATA)`.
