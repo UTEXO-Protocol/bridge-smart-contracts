@@ -162,6 +162,23 @@ the current Bridge as `bridgeAddress`, start its two-step ownership transfer to
 timelocks, execute the update first and the ownership acceptance immediately
 after it. The update changes the Bridge and proxy pointers atomically.
 
+### RgbRejectList (`src/RgbRejectList.sol`)
+
+Standalone on-chain source of the RGB reject list read by RGB client-side validation. No bridge contract references it; it replaces the centrally hosted list as the place the list is downloaded from.
+
+Each entry is `(opId, reject)`: an RGB operation id and whether it is rejected or allowed. Validators do **not** query the contract per operation id — validation needs a lookup for every operation in the history, and a network round trip per lookup would be far too slow. Instead a client downloads the whole list once, caches it, and performs every lookup locally, exactly as with the hosted file.
+
+- `append(Entry[] batch)` — appender-only. Appends entries in order. Reverts as a whole on an empty batch, a zero `opId`, or an `opId` that is already listed — each operation id is listed at most once and a decision can never be overwritten.
+- `length()` / `entries(start, end)` — the read interface. `entries` returns `[start, end)` clamped to the list length, so clients can request fixed-size pages.
+- `isListed(opId)` — whether an operation id has an entry; used for uniqueness and monitoring, not by validators.
+- `setAppender(newAppender)` — `onlyOwner`. Appoints the appender and revokes the previous one. Must be non-zero.
+
+Two roles keep the hot key away from administration. The **owner** is a cold key that only appoints and rotates the appender; the **appender** is the hot key of the tool that publishes entries, and the only account that can append. A leaked appender key cannot take over the registry — the owner rotates it — but entries it already appended stay, since the list is append-only.
+
+The list is **append-only by construction** — there is no edit or remove function — so a client caches entries up to the last index it has seen and on the next sync fetches only `[cachedLength, length())`. Reading `length()` and the pages at one fixed block keeps a sync consistent. Page size is bounded by the `eth_call` gas cap and timeout of the RPC node in use, so it is a client-side choice: start from a default and shrink it when the node rejects a call.
+
+The RGB contract references this registry by address at issuance, so neither the address nor the read interface can change. The contract is therefore **not upgradeable**, ownership is two-step (`Ownable2Step`), and `renounceOwnership` is blocked — losing the owner would freeze the list permanently.
+
 ## How it works
 
 ### FundsIn (user deposits)
@@ -255,6 +272,8 @@ set -a && source .env.interact && set +a   # before interact scripts
 - `ENCLAVE_SIGNERS` / `FEDERATION_SIGNERS` — comma-separated addresses, ordered by bitmap bit index
 - `ENCLAVE_THRESHOLD` / `FEDERATION_THRESHOLD` — M-of-N thresholds
 - `TIMELOCK_DURATION` — federation timelock window in seconds
+- `REJECT_LIST_OWNER` — cold owner of the standalone `RgbRejectList` that appoints and rotates the appender (`DeployRgbRejectList` only); a dedicated variable so a shared `.env.deploy` cannot silently reuse the bridge governance owner
+- `REJECT_LIST_APPENDER` — hot key of the publishing tool, the only account allowed to append entries; must differ from `REJECT_LIST_OWNER`
 
 > Chain identifiers are `uint256` everywhere — `block.chainid` for EVM legs, backend-assigned values for non-EVM endpoints (e.g. RGB = `1_000_001`). There is no `SOURCE_CHAIN_NAME` env var anymore; the bridge reads `block.chainid` at runtime.
 
@@ -343,6 +362,14 @@ forge script script/deploy/DeployMinimalBridge.s.sol --rpc-url $RPC_URL --broadc
 
 Deploys `MinimalBridge` with `TOKEN_ADDRESS`. The deployer becomes the initial owner; transfer to the integrator's multisig after deployment. `MinimalBridge` has no dependency on `MultisigProxy`, `RouteRegistry`, or `CommissionManager` — use any multisig or EOA as owner.
 
+### Option D — RGB reject list (standalone)
+
+```sh
+forge script script/deploy/DeployRgbRejectList.s.sol --rpc-url $RPC_URL --broadcast --verify
+```
+
+Deploys `RgbRejectList` owned by `REJECT_LIST_OWNER`, with `REJECT_LIST_APPENDER` as the initial appender; the script refuses to deploy if the two are the same address. It is independent of the bridge stack and is not part of `DeployAll`. Deploy it once per network and record the address before issuing the RGB asset: the RGB contract references it at issuance and it cannot be replaced afterwards. Choose a long-lived owner — ownership can be transferred in two steps but never renounced.
+
 ## Interaction scripts
 
 Scripts in `script/interact/` let you exercise contracts manually before the backend is wired up. All read inputs from `.env.interact`.
@@ -396,6 +423,7 @@ src/
   RouteRegistry.sol            — Per-route plugin dispatcher (verifier + settlement module)
   CommissionManager.sol        — Standalone commission quotes, custody and withdrawal
   MultisigProxy.sol            — M-of-N multisig owner of Bridge, RouteRegistry and CommissionManager
+  RgbRejectList.sol            — Standalone append-only RGB reject list for client-side validation
   verifiers/
     RGBVerifier.sol            — Bitcoin SPV finality (wraps Atomiq BtcRelay)
     NullVerifier.sol           — Stateless no-op (routes with upstream finality)
@@ -411,6 +439,7 @@ src/
     ISettlementModule.sol      — SettlementModule interface
     IRouteRegistry.sol         — RouteRegistry interface, events and errors
     IMultisigProxy.sol         — MultisigProxy interface and custom errors
+    IRgbRejectList.sol         — RgbRejectList read interface, entry type, events and errors
     RouteTypes.sol             — Shared FundsInContext / FundsOutContext structs
 
 script/
@@ -418,7 +447,7 @@ script/
                                  DeployRouteRegistry, DeployRGBVerifier,
                                  DeployRgbSettlementModule,
                                  DeployCommissionManager,
-                                 DeployMultisigProxy
+                                 DeployMultisigProxy, DeployRgbRejectList
   interact/                    — BridgeFundsIn, MultisigExecuteFundsOut,
                                  MultisigProposeSetRoute, EmergencyPause, EmergencyUnpause,
                                  GuardianEmergencyPause,
@@ -434,6 +463,7 @@ test/
   MinimalBridge.t.sol          — MinimalBridge tests
   RouteRegistry.t.sol          — RouteRegistry tests (setRoute, dispatch, enabled gating)
   RgbSettlementModule.t.sol    — canonical RGB ledger tests
+  RgbRejectList.t.sol          — reject list append, paging, client sync, appender rotation and ownership tests
   CommissionManager.t.sol      — CommissionManager tests (rules, pools, withdrawals, ETH/USD feed)
   MultisigProxy.t.sol          — MultisigProxy tests (EIP-712, bitmap sigs, proposals incl. SetRoute / UpdateRouteRegistry)
   Integration.t.sol            — End-to-end: user → Bridge → RouteRegistry → TEE multisig → fundsOut → CM withdrawal
