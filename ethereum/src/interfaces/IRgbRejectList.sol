@@ -66,7 +66,7 @@ interface IRgbRejectList {
     // Events
     // =========================================================================
 
-    /// @notice Emitted for every appended entry. For indexing and monitoring;    
+    /// @notice Emitted for every appended entry. For indexing and monitoring;
     /// @param index  Position of the entry in the list.
     /// @param opId   RGB operation id.
     /// @param reject `true` = reject, `false` = allow.
