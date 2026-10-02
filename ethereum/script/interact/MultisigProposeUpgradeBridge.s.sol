@@ -9,6 +9,9 @@ import {MultisigHelper} from "../../test/mocks/MultisigHelper.sol";
 /// @notice Signs and submits a timelocked Bridge implementation upgrade.
 /// @dev UPGRADE_CALLDATA is delegatecalled on the new implementation in the
 ///      same transaction as the upgrade. Use `0x` when no reinitializer is needed.
+///      The candidate must differ from the current implementation; nonempty
+///      data must have a full selector. UPGRADE_CALLDATA is limited to 4096 bytes
+///      including that selector; the outer execution opData is not part of this limit.
 contract MultisigProposeUpgradeBridge is Script {
     function run() external returns (bytes32 proposalId) {
         uint256 submitterPk = vm.envUint("PRIVATE_KEY");

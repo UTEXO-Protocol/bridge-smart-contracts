@@ -45,7 +45,7 @@ The EVM-side contracts in this repository are deployed on Arbitrum. Cross-chain 
 
 - **`FinalityVerifier`** — a per-route plugin consulted by `Bridge.fundsOut` to confirm that the source-side event justifying the release is final on its origin chain. The current production verifier is `RGBVerifier`, a wrapper around Atomiq's on-chain Bitcoin SPV light client (`BtcRelay`) — it stores Bitcoin block headers and validates proof-of-work continuity and the difficulty-retarget rules. This removes the need to trust any single oracle or off-chain attestation for Bitcoin finality: the EVM-side release is gated by Bitcoin's own consensus, observed on-chain. Routes that don't need finality verification (e.g. trusted-bridge EVM legs) use `NullVerifier`.
 
-- **`SettlementModule`** — a per-route plugin that owns route-specific state. `RgbSettlementModule` is the permanent proof-of-mint ledger for RGB mint/burn routes. `RgbPoolSettlementModule` gives pool routes asymmetric behavior: pool credits create no ledger record or RGB-specific event, while pool releases verify their Bridge operation ids against the mint/burn ledger. Routes whose settlement is handled entirely by an external delivery layer use `NullSettlementModule`.
+- **`SettlementModule`** — a per-route plugin that owns route-specific state. `RgbSettlementModule` is the permanent proof-of-mint ledger for RGB mint/burn routes. `RgbOutboundSettlementModule` reads that ledger for RGB mint/burn rebalances to non-RGB destinations, without creating an RGB record on the destination side. Routes whose settlement is handled entirely by an external delivery layer use `NullSettlementModule`.
 
 - **`CommissionManager`** — a dedicated fee-accounting contract that holds the protocol's commissions strictly separated from bridge liquidity. The `Bridge` consults it on every transfer to determine the per-route commission (token vs. native; charged on `FundsIn` vs. `FundsOut`) and forwards the fee to it. Withdrawal is gated by federation governance through `MultisigProxy`. Owned by `MultisigProxy`.
 
@@ -61,7 +61,7 @@ There are two independent signer sets:
 
 **Federation signers (governance)** — authorize administrative operations: signer rotation, configuration changes, commission withdrawal, and updates to the addresses of `Bridge` / `CommissionManager`. All federation operations go through a two-phase timelock (propose → wait → execute), except emergency pause/unpause which are instant.
 
-**Emergency guardian** — a single address initialized when `MultisigProxy` is deployed. It may immediately pause both bridge directions without signatures. Unpause requires federation authorization. Federation can rotate it or set it to `address(0)` through timelocked governance.
+**Emergency guardian** — a single address initialized when `MultisigProxy` is deployed. It may immediately pause both bridge directions without signatures. Every successful guardian pause advances the emergency nonce and invalidates older emergency authorizations. Unpause requires federation authorization. Federation can rotate it or set it to `address(0)` through timelocked governance.
 
 Private keys are held inside Enclaves and cannot be extracted. Key persistence is handled through attested enclave-to-enclave cloning.
 
@@ -74,7 +74,7 @@ Private keys are held inside Enclaves and cannot be extracted. Key persistence i
 
 ### Commission
 
-Each transfer may deduct a per-route service commission consisting of a proportional component plus an optional flat `baseFee`: `fee = amount × percentageFee + baseFee`. `FundsIn` commission may be paid in the bridged token or native currency; `FundsOut` commission is token-only. The Bridge enforces separate non-zero `minFundsInAmount` and `minFundsOutAmount` floors, and a configured flat fee must leave a positive net amount at the applicable floor. On EVM the commission is held by the `CommissionManager` contract — kept separate from bridge liquidity — and withdrawal is controlled by federation governance through the timelock.
+Each transfer may deduct a per-route service commission consisting of a proportional component plus an optional flat `baseFee`: `fee = amount × percentageFee + baseFee`. `FundsIn` commission may be paid in the bridged token or native currency; `FundsOut` commission is token-only. The Bridge independently requires the token commission and net payout to sum to the gross release amount, with a positive net payout, including after a commission-manager rotation. The Bridge enforces non-zero `minFundsInAmount` and `minFundsOutAmount` floors with `minFundsInAmount >= minFundsOutAmount`; the two values may differ. These are gross minima, so token commission can still leave a minimum deposit below the withdrawal floor. A configured flat fee must leave a positive net amount at the applicable floor. On EVM the commission is held by the `CommissionManager` contract — kept separate from bridge liquidity — and withdrawal is controlled by federation governance through the timelock.
 
 ### Replay protection
 
