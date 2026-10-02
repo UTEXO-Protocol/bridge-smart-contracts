@@ -74,13 +74,8 @@ contract BridgeProxy is ERC1967Proxy, IBridgeProxy {
         // fallback recurse into itself and permanently brick the Bridge.
         if (candidate == address(this)) revert IncompatibleBridgeImplementation(candidate);
 
-        // Another ERC-1967 proxy can expose the Bridge marker through its own
-        // fallback, but using proxy bytecode as an implementation would make
-        // it read this proxy's implementation slot and recurse as well.
-        (bool exposesProxyApi, bytes memory proxyResult) =
-            candidate.staticcall(abi.encodeCall(IBridgeProxy.implementation, ()));
-        if (exposesProxyApi && proxyResult.length == 32) revert IncompatibleBridgeImplementation(candidate);
-
+        // Implementations must expose a direct-call-only compatibility marker.
+        // Bridge's immutable identity guard rejects proxy-mediated calls to it.
         (bool ok, bytes memory result) = candidate.staticcall(abi.encodeCall(IBridge.bridgeProxyCompatibilityUUID, ()));
         if (
             !ok || result.length != 32

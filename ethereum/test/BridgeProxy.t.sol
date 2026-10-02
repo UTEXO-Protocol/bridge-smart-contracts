@@ -46,6 +46,36 @@ contract SpoofedOwnerImplementation is BridgeV2Mock {
     }
 }
 
+/// @dev A genuine implementation may answer unknown selectors with one word.
+contract WordFallbackImplementation is BridgeV2Mock {
+    fallback() external {
+        assembly ("memory-safe") {
+            mstore(0, 42)
+            return(0, 32)
+        }
+    }
+}
+
+contract InvalidCompatibilityMarkerImplementation {
+    uint8 private immutable _mode;
+
+    constructor(uint8 mode_) {
+        _mode = mode_;
+    }
+
+    function initializeStub() external pure {}
+
+    fallback() external {
+        if (_mode == 2) revert("marker reverted");
+        bytes32 response = _mode == 0 ? bytes32(0) : keccak256("utexo.bridge.proxy.compatibility.v1");
+        uint256 length = _mode == 1 ? 31 : 32;
+        assembly ("memory-safe") {
+            mstore(0, response)
+            return(0, length)
+        }
+    }
+}
+
 contract BridgeProxyTest is Test {
     Bridge internal implementation;
     BridgeProxy internal proxy;
@@ -84,6 +114,70 @@ contract BridgeProxyTest is Test {
     function test_proxyCannotBeInitializedTwice() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
         bridge.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 22, 11, owner);
+    }
+
+    function test_compatibilityMarker_constructorAcceptsImplementationWithWordFallback() public {
+        WordFallbackImplementation candidate = new WordFallbackImplementation();
+        BridgeProxy created = new BridgeProxy(address(candidate), _initializationData());
+        assertEq(created.implementation(), address(candidate));
+        assertEq(Bridge(address(created)).owner(), owner);
+        assertEq(Bridge(address(created)).TOKEN(), address(token));
+        assertEq(Bridge(address(created)).minFundsInAmount(), 22);
+        assertEq(Bridge(address(created)).minFundsOutAmount(), 11);
+    }
+
+    function test_compatibilityMarker_upgradeAcceptsImplementationWithWordFallback() public {
+        WordFallbackImplementation candidate = new WordFallbackImplementation();
+        // No implementation() getter exists: the fallback returns an arbitrary word.
+        (bool ok, bytes memory response) = address(candidate).staticcall(abi.encodeCall(BridgeProxy.implementation, ()));
+        assertTrue(ok);
+        assertEq(response.length, 32);
+        assertEq(abi.decode(response, (uint256)), 42);
+        assertEq(candidate.bridgeProxyCompatibilityUUID(), keccak256("utexo.bridge.proxy.compatibility.v1"));
+        token.mint(address(proxy), 123 ether);
+
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), abi.encodeCall(BridgeV2Mock.initializeV2, (777)));
+        assertEq(proxy.implementation(), address(candidate));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 777);
+        assertEq(bridge.owner(), owner);
+        assertEq(token.balanceOf(address(proxy)), 123 ether);
+    }
+
+    function test_compatibilityMarker_constructorRejectsNestedBridgeProxy() public {
+        Bridge candidateImplementation = new Bridge();
+        BridgeProxy candidate = new BridgeProxy(address(candidateImplementation), _initializationData());
+        vm.expectRevert(
+            abi.encodeWithSelector(BridgeProxy.IncompatibleBridgeImplementation.selector, address(candidate))
+        );
+        // The base constructor initializes before compatibility validation. Use
+        // a nondelegating selector to reach the marker check without recursion.
+        new BridgeProxy(address(candidate), abi.encodeCall(BridgeProxy.implementation, ()));
+    }
+
+    function test_compatibilityMarker_upgradeRejectsWrongTruncatedAndRevertingResponses() public {
+        for (uint8 mode; mode < 3; ++mode) {
+            InvalidCompatibilityMarkerImplementation candidate = new InvalidCompatibilityMarkerImplementation(mode);
+            vm.expectRevert(
+                abi.encodeWithSelector(BridgeProxy.IncompatibleBridgeImplementation.selector, address(candidate))
+            );
+            vm.prank(owner);
+            proxy.upgradeToAndCall(address(candidate), bytes(""));
+            assertEq(proxy.implementation(), address(implementation));
+            assertEq(bridge.owner(), owner);
+        }
+    }
+
+    function test_compatibilityMarker_constructorRejectsWrongTruncatedAndRevertingResponses() public {
+        for (uint8 mode; mode < 3; ++mode) {
+            InvalidCompatibilityMarkerImplementation candidate = new InvalidCompatibilityMarkerImplementation(mode);
+            vm.expectRevert(
+                abi.encodeWithSelector(BridgeProxy.IncompatibleBridgeImplementation.selector, address(candidate))
+            );
+            new BridgeProxy(
+                address(candidate), abi.encodeCall(InvalidCompatibilityMarkerImplementation.initializeStub, ())
+            );
+        }
     }
 
     function test_upgradeRequiresOwner() public {

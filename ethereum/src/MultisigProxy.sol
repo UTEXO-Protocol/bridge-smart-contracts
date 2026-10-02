@@ -1349,8 +1349,7 @@ contract MultisigProxy is IMultisigProxy {
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
             federationSignerSetVersion++;
-            emit FederationSignersUpdated(newSigners, newThreshold);
-            emit FederationSignerSetVersionUpdated(federationSignerSetVersion);
+            emit FederationSignersUpdated(newSigners, newThreshold, federationSignerSetVersion);
         } else if (opType == OperationType.UpdateBridge) {
             address newBridge = abi.decode(opData, (address));
             if (newBridge == address(0)) revert ZeroBridge();
@@ -1694,7 +1693,7 @@ contract MultisigProxy is IMultisigProxy {
         if (target == bridge || target == commissionManager || target == lzAdapter) return;
 
         address registry = IBridge(bridge).routeRegistry();
-        if (target == registry && registry != address(0)) return;
+        if (target == registry) return;
 
         revert InvalidManagedOwnershipTarget(target);
     }
