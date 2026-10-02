@@ -6,6 +6,7 @@ import {MultisigProxy} from "../../src/MultisigProxy.sol";
 
 /// @title GuardianEmergencyPause
 /// @notice Submits a direct guardian-authorized emergency pause without signatures.
+/// @dev Advances emergencyNonce, invalidating previously signed emergency commands.
 ///
 /// Env:
 ///   PRIVATE_KEY    — configured emergency guardian private key
@@ -20,5 +21,6 @@ contract GuardianEmergencyPause is Script {
         vm.stopBroadcast();
 
         console2.log("guardianEmergencyPause submitted by:", vm.addr(guardianPk));
+        console2.log("New emergencyNonce:", proxy.emergencyNonce());
     }
 }

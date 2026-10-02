@@ -17,7 +17,7 @@ import {FundsInContext, FundsOutContext} from "../interfaces/RouteTypes.sol";
 ///        canonical on-chain proof of "this mint happened, for this amount".
 ///        `fundsInRecordChainIds[operationId] = destChainId` — the RGB network
 ///        the mint was credited TO. One module instance can serve several RGB
-///        networks (e.g. a pool and a mint/burn network) from this one ledger,
+///        mint/burn networks from this one ledger,
 ///        because every record is tagged with its network. Records are keyed by
 ///        the globally-unique `operationId`, so no cross-network key collision
 ///        is possible; the tag exists to enforce network SCOPE at release.
@@ -105,7 +105,7 @@ contract RgbSettlementModule is ISettlementModule {
     /// @notice A `beforeFundsOut` operation id exists, but it was minted to a
     ///         different RGB network than the one this release burns from. Blocks
     ///         a burn on one RGB network from proving its backing with a mint
-    ///         recorded for another (e.g. a pool burn citing a mint/burn record).
+    ///         recorded for another RGB mint/burn network.
     error FundsInRecordChainMismatch(bytes32 operationId, uint256 expected, uint256 recorded);
 
     /// @notice `beforeFundsOut` `settlementData` decoded to `operationIds` and

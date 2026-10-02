@@ -30,15 +30,17 @@ Production bridge for UTEXO. Runs behind the custom ERC-1967 `BridgeProxy` and i
 
 `BridgeProxy` receives initialization calldata in its constructor, so the proxy is never left claimable. The implementation constructor disables initialization. `initialize` stores the token, registry, CommissionManager, optional LayerZero adapter, non-zero amount floors, and initial owner in proxy storage. Federation may retune mutable settings through the timelocked owner path. The bridge's own chain identifier is `block.chainid` — chain IDs are `uint256` throughout the stack (real EVM chain IDs for EVM legs; backend-assigned IDs in a reserved namespace above `2^32` for non-EVM endpoints, e.g. RGB = `1_000_001`).
 
+Amount floors must satisfy `minFundsInAmount >= minFundsOutAmount`. Initialization and both setters enforce this ordering; equal floors and different floors with a higher inbound minimum are allowed. Setters compare against the counterpart's current value at execution, so a pending governance proposal can revert if another proposal changed that value during the timelock. When changing both floors, raise the inbound floor first when necessary; lower the outbound floor first when necessary. These are gross operation minima: token commission can still reduce a minimum deposit's net amount below the withdrawal floor, so frontend and source-side tooling must account for fees separately.
+
 ### BridgeProxy (`src/BridgeProxy.sol`)
 
 Owner-controlled custom proxy built on OpenZeppelin `ERC1967Proxy` and `ERC1967Utils`. The canonical, value-holding Bridge address is the proxy; implementation addresses are replaceable.
 
-- `upgradeToAndCall(newImplementation, data)` is callable only by the current Bridge owner and upgrades plus optionally runs a versioned reinitializer atomically.
-- Upgrade authority follows `Bridge.owner()` automatically, including its two-step ownership handoff. No separate proxy admin is stored.
-- Every implementation must return the stable, direct-call-only `bridgeProxyCompatibilityUUID`; this rejects accidental upgrades to unrelated contracts and nested proxies. Storage-layout review remains mandatory for every upgrade.
-- Proxy-control selectors (`implementation` and `upgradeToAndCall`) are reserved and must not be added to Bridge implementations. Proxy addresses are rejected as implementation candidates.
-- The upgrade selector is blocked in all generic governance lanes. Federation must use the dedicated typed, timelocked operation, whose signed payload binds the exact proxy address. Future implementations must preserve a working `owner()` getter: upgrades fail closed if it reverts or returns invalid data. Ownership changes also transfer upgrade authority; there is no independent recovery admin.
+- `upgradeToAndCall(newImplementation, data)` is callable only by the current Bridge owner and upgrades plus optionally runs a versioned reinitializer atomically. Initialization data is limited to 4096 bytes, including its selector; empty data is allowed. Oversized data reverts with `UpgradeCallDataTooLong(length, maxLength)` before implementation validation or delegatecall.
+- Upgrade authority follows the stored OpenZeppelin Ownable owner, including its two-step ownership handoff. Both authorization and the post-upgrade preservation check read the owner address directly from proxy storage. No separate proxy admin is stored.
+- Every implementation must return the exact, stable `bridgeProxyCompatibilityUUID` on a direct staticcall and preserve its direct-call-only behavior. Bridge's immutable identity guard rejects proxy-mediated marker calls, including `BridgeProxy` and plain ERC-1967 proxies forwarding to a Bridge implementation. Storage-layout review remains mandatory for every upgrade.
+- Proxy-control selectors (`implementation` and `upgradeToAndCall`) are reserved and must not be added to Bridge implementations. The proxy itself is explicitly rejected as its own implementation.
+- The upgrade selector is blocked in all generic governance lanes. Federation must use the dedicated typed, timelocked operation, whose signed payload binds the exact proxy address. Future implementations must preserve the OpenZeppelin Ownable namespace and owner field. Upgrade authority is independent of `owner()`: a missing, reverting, malformed, or misleading getter does not prevent the stored owner from restoring a reviewed implementation. Ownership changes also transfer upgrade authority; there is no independent recovery admin.
 
 - `fundsIn(amount, destinationChainId, destinationAddress, settlementData)` — open, **`payable`**. Direct entry point for EVM users; the source chain is implicit (`block.chainid`). Requires `amount >= minFundsInAmount`. Quotes commission from `CommissionManager` using route key `(block.chainid, destinationChainId, TOKEN)`; if the route uses NATIVE currency, `msg.value` must be between the fresh quote and 5% above it. Exactly the fresh quote is collected and any surplus is refunded to the caller. Pulls the full `amount` in tokens from the sender, forwards any token/native commission to `CommissionManager`, and dispatches to the route's `SettlementModule.onFundsIn(...)` via `RouteRegistry`. The Bridge permits an empty `destinationAddress`; route modules define its semantics. The canonical RGB settlement module requires it to be empty, while non-empty values on other routes remain bounded by `MAX_ADDRESS_LENGTH`. The `settlementData` blob is opaque to the bridge — its layout is dictated by the destination route's settlement module. Emits two events:
   - `FundsIn` — RGB-only compatibility event using `netAmount`; `sender` is indexed while `rgbOpId` and the `uint64`-bounded amount are carried in event data. Deposits whose RGB amount exceeds `type(uint64).max` revert instead of truncating.
@@ -46,8 +48,8 @@ Owner-controlled custom proxy built on OpenZeppelin `ERC1967Proxy` and `ERC1967U
 - `fundsIn(amount, sourceChainId, sourceSender, destinationChainId, destinationAddress, settlementData)` — `onlyLZAdapter` overload used by `LZAdapter` after a cross-chain `OFT.send` compose lands. The adapter has already authenticated the originating sender on the source chain via LayerZero's `OFTComposeMsgCodec.composeFrom`, so it forwards the non-spoofable `sourceChainId` and `sourceSender` to the bridge. For NATIVE commission routes, the source-agreed `msg.value` must remain within the immutable ±5% band around the fresh destination quote. Cross-domain refunds are deliberately unsupported, so the complete accepted value is collected as commission.
 - `setLZAdapter(adapter)` — `onlyOwner`. Rotates the address authorized to call the adapter overload. Set to `address(0)` to close the adapter path entirely.
 - `setRouteRegistry(newRouteRegistry)` — `onlyOwner`. Rotates the `RouteRegistry` Bridge talks to. Used to migrate to a redeployed registry (the registry's `bridge` is immutable, so a new registry deploy is the only way to rotate). Reverts on `address(0)`.
-- `setCommissionManager(newCommissionManager)` — `onlyOwner`. Rotates the manager used for fee quotes and custody. Production migration uses the typed `UpdateCommissionManager` operation so the Bridge and `MultisigProxy` pointers change atomically. Reverts on `address(0)`.
-- `fundsOut(FundsOutParams)` — `onlyOwner`, called only by the typed `MultisigProxy.fundsOutCall` / `lzFundsOutCall` enclave paths. The params bind recipient, amount, burn id, source/destination chains, source address, finality proof, settlement data, and the unique `sourceBurnTxId`. The Bridge checks replay protection and isolated liquidity/rate limits, dispatches route verification and settlement bookkeeping, charges any token commission, releases the net amount, and emits `BridgeFundsOut` with the exact `settlementData`. NATIVE commission is disallowed because the release has no native-currency payer.
+- `setCommissionManager(newCommissionManager)` — `onlyOwner`. Rotates the manager used for fee quotes and custody. Production migration uses the typed `UpdateCommissionManager` operation so the Bridge and `MultisigProxy` pointers change atomically. At execution, the replacement must have deployed code and expose `bridgeAddress()` equal to the live Bridge proxy; otherwise the rotation reverts without changing either pointer.
+- `fundsOut(FundsOutParams)` — `onlyOwner`, called only by the typed `MultisigProxy.fundsOutCall` / `lzFundsOutCall` enclave paths. The params bind recipient, amount, burn id, source/destination chains, source address, finality proof, settlement data, and the unique `sourceBurnTxId`. The Bridge checks replay protection and isolated liquidity/rate limits, requires the quoted `tokenCommission + netAmount` to equal the gross release `amount` and `netAmount` to be non-zero, dispatches route verification and settlement bookkeeping, charges any token commission, releases the net amount, and emits `BridgeFundsOut` with the exact `settlementData`. A non-conserving quote reverts with `CommissionConservationBroken`, restoring liquidity, outflow buckets, burn consumption, and the enclosing enclave nonce. NATIVE commission is disallowed because the release has no native-currency payer.
 - `rebalanceLiquidity(RebalanceParams)` — `onlyOwner`, reached through the typed enclave-authorized `MultisigProxy.rebalanceCall` path. It migrates accounting between chain buckets without transferring tokens and emits `BridgeRebalance` with both signed route payloads: debit-leg `settlementDataOut` and credit-leg `settlementDataIn`.
 
 Owner **must** be `MultisigProxy`. `fundsOut` is reachable only through the purpose-built `fundsOutCall` or `lzFundsOutCall` entrypoints, and `rebalanceLiquidity` only through `rebalanceCall`; all require the registered source chain's M-of-N enclave signatures. These Bridge selectors are blocked from every federation generic-call lane.
@@ -96,20 +98,17 @@ Adding a new finality source (e.g. an Arch light client) is just a new verifier 
 Per-route plugin that owns route-specific bookkeeping. Interface: `onFundsIn(ctx)` + `beforeFundsOut(ctx)`, both invoked by `RouteRegistry` on behalf of the Bridge.
 
 - **`RgbSettlementModule`** — canonical RGB mint/burn ledger. On `fundsIn`, requires the canonical empty `destinationAddress`, stores the Bridge-derived `operationId => netAmount`, tags it with the destination RGB network, and returns the supplied RGB OpId so Bridge emits both `FundsIn` and `BridgeFundsIn`. On `fundsOut`, `settlementData = abi.encode(bytes32[] operationIds, uint256[] amounts)` must reference existing exact-amount records tagged with the debit network. Records are permanent proof-of-mint entries; replay and solvency are enforced independently by `consumedBurnIds` and isolated liquidity.
-- **`RgbOutboundSettlementModule`** — canonical-ledger reader for routes whose RGB debit is followed by a destination that must not create a new record. In production it serves the `96 -> 97` mint/burn-to-pool rebalance: it performs the network-scoped debit check, then returns `0` and writes nothing on the pool credit.
-- **`RgbPoolSettlementModule`** — asymmetric pool adapter pinned to immutable pool and backing-network ids. A credit into pool network `97` writes no canonical record and returns `0`, so a normal pool deposit emits only `BridgeFundsIn`. A physical release from `97` must cite exact records from the canonical mint/burn ledger tagged with network `96`.
+- **`RgbOutboundSettlementModule`** — canonical-ledger reader for routes whose RGB debit is followed by a destination that must not create a new record. For RGB mint/burn-to-Arch rebalances it performs the network-scoped debit check, then returns `0` and writes no RGB record on the non-RGB credit.
 - **`NullSettlementModule`** — stateless no-op. Used by routes whose settlement is handled entirely by an external delivery layer (e.g. LayerZero compose) or by routes whose verifier already binds the release to a specific deposit. Stateless ⇒ no auth.
 
-Production route-module topology:
+Production RGB mint/burn route-module topology:
 
 | Route | Settlement module | Result |
 |---|---|---|
 | `42161 -> 96` | `RgbSettlementModule` | writes canonical record; emits `FundsIn` + `BridgeFundsIn` |
 | `96 -> 42161` | `RgbSettlementModule` | verifies a network-96 canonical record |
-| `42161 -> 97` | `RgbPoolSettlementModule` | no record; emits only `BridgeFundsIn` |
-| `97 -> 42161` | `RgbPoolSettlementModule` | verifies backing records tagged with network 96 |
-| `96 -> 97` rebalance | `RgbOutboundSettlementModule` | verifies network 96; writes no pool record |
-| `97 -> 96` rebalance | `RgbSettlementModule` | accounting-only debit; writes the new network-96 record |
+
+RGB uses mint/burn routes only. Rebalances to non-RGB destinations use `RgbOutboundSettlementModule`; rebalances into RGB use `RgbSettlementModule` to create the destination mint record.
 
 ### CommissionManager (`src/CommissionManager.sol`)
 
@@ -128,7 +127,7 @@ Owner of `Bridge`, `RouteRegistry`, **and** `CommissionManager`. Two-level ECDSA
 
 - **Enclave signers (TEE)** — authorize only the purpose-built `fundsOutCall`, `lzFundsOutCall`, and `rebalanceCall` operations (M-of-N, bitmap encoding). Signer sets and replay-protection nonces are isolated per source chain; there is no generic enclave call dispatch.
 - **Federation signers (governance)** — two-phase timelock for admin operations. Instant `emergencyPause` / `emergencyUnpause` bypass the timelock.
-- **Emergency guardian** — a required non-zero constructor address that can call `guardianEmergencyPause` directly, without signatures or nonce consumption. Unpause requires federation authorization. Federation may rotate it, or set it to `address(0)` to disable this direct path, through a timelocked `SetEmergencyGuardian` proposal.
+- **Emergency guardian** — a required non-zero constructor address that can call `guardianEmergencyPause` directly, without signatures. Every successful call advances `emergencyNonce`, invalidating previously signed federation emergency commands. Unpause requires federation authorization. Federation may rotate it, or set it to `address(0)` to disable this direct path, through a timelocked `SetEmergencyGuardian` proposal.
 
 Federation-controlled operations (`OperationType`):
 
@@ -188,9 +187,15 @@ Administrative operations (signer rotation, configuration changes, commission wi
 1. **Propose.** A federation member submits the operation with M-of-N federation signatures. `MultisigProxy` stores the operation hash, the signed `expectedTarget` for address-bound operations, and the current `federationSignerSetVersion` and emits `ProposalCreated`. Nothing is executed yet.
 2. **Execute.** After `timelockDuration` elapses, anyone calls `executeProposal()` with the original data. `MultisigProxy` verifies the hash, timelock, signer-set version, and signed target address before executing. A successful federation rotation increments the version, automatically invalidating every still-pending proposal approved by the previous signer set; the live federation may still cancel those stale records for cleanup.
 
+`cancelProposal` requires federation signatures over the exact `proposalId` and `deadline`, with `block.timestamp <= deadline <= block.timestamp + MAX_PROPOSAL_LIFETIME` (30 days). The ceiling applies at submission, not to the age of the signature. Cancellation does not consume `proposalNonce`: unrelated proposals must not invalidate an already-authorized cancellation. A successful cancellation changes the target proposal from `Pending` to `Cancelled`, so the same authorization cannot be replayed; the signed `proposalId` prevents applying it to another proposal.
+
 Raw generic calls cannot invoke `transferOwnership(address)`. Ownership migration uses the typed `TransferManagedOwnership` operation, which binds the exact allowlisted target and new owner into the federation's EIP-712 signatures and revalidates the target at execution. `acceptOwnership()` remains available through the relevant generic lane for two-step deployment and migration handoffs.
 
-**Emergency pause/unpause** bypass the timelock — federation can stop or resume `Bridge` instantly with M-of-N signatures. The configured guardian can only pause directly, without signatures, through `guardianEmergencyPause`; this call does not advance `emergencyNonce` or `proposalNonce`.
+Managed ownership targets are the current Bridge, CommissionManager, LayerZero adapter, and Bridge route registry. A zero target is rejected before any allowlist comparison, so an unset adapter or zero registry cannot authorize ownership migration to the zero address.
+
+**Emergency pause/unpause** bypass the timelock — federation can stop or resume `Bridge` instantly with M-of-N signatures. The configured guardian can only pause directly, without signatures, through `guardianEmergencyPause`; each successful call advances `emergencyNonce`, including when the bridge is already paused. It does not advance `proposalNonce` or any TEE nonce.
+
+Federation `emergencyPause` and `emergencyUnpause` require `block.timestamp <= deadline <= block.timestamp + MAX_EMERGENCY_DEADLINE` (one day). Typed enclave operations use the separate `MAX_TEE_DEADLINE` limit, also currently one day. These limits constrain the deadline at submission, not the age of the signature: no signing timestamp is included. Emergency signing tools must read the current `emergencyNonce` after any guardian action; a rejected or reverted action consumes no nonce. The EIP-712 schemas are unchanged.
 
 The guardian is pause-only and cannot lift its own freeze or a federation freeze. Resuming both inflow and outflow requires federation signatures through `emergencyUnpause`. Use `EmergencyUnpause.s.sol` for this operation; the former guardian unpause function and script have been removed. A compromised guardian can still halt traffic; use a tightly controlled EOA or contract account and disable it with `SetEmergencyGuardian(address(0))` when direct pause access is not required.
 
@@ -242,11 +247,10 @@ set -a && source .env.interact && set +a   # before interact scripts
 - `BTC_RELAY_ADDRESS` — Atomiq BtcRelay contract address (consumed by `RGBVerifier`)
 - `LZ_ADAPTER` — initial LayerZero adapter address (optional; pass `0x0` if the adapter has not been deployed yet, then wire it in via federation governance after the adapter ships)
 - `ROUTE_REGISTRY_ADDRESS` — `RouteRegistry` address (step-by-step deployments only; `DeployAll` predicts it)
-- `RGB_SETTLEMENT_MODULE_ADDRESS`, `RGB_MINT_BURN_CHAIN_ID`, `RGB_POOL_CHAIN_ID` — standalone `DeployRgbPoolSettlementModule` inputs (`96` and `97` in production)
 - `COMMISSION_MANAGER` — `CommissionManager` address (step-by-step deploys only)
 - `COMMISSION_RECIPIENT` — immutable destination for every CM withdrawal; choose a long-lived treasury address
 - `EMERGENCY_GUARDIAN` — required non-zero initial guardian address with direct emergency pause-only authority
-- `MIN_FUNDS_IN_AMOUNT` / `MIN_FUNDS_OUT_AMOUNT` — required non-zero operation floors in token smallest units; configure the outbound value consistently in source-side tooling and TEE policy
+- `MIN_FUNDS_IN_AMOUNT` / `MIN_FUNDS_OUT_AMOUNT` — required non-zero operation floors in token smallest units, with `MIN_FUNDS_IN_AMOUNT >= MIN_FUNDS_OUT_AMOUNT`; configure the outbound value consistently in source-side tooling and TEE policy
 - `ETH_USD_FEED` / `ETH_USD_HEARTBEAT` — Chainlink ETH/USD aggregator + staleness window (required if any route uses NATIVE commission)
 - `ENCLAVE_SIGNERS` / `FEDERATION_SIGNERS` — comma-separated addresses, ordered by bitmap bit index
 - `ENCLAVE_THRESHOLD` / `FEDERATION_THRESHOLD` — M-of-N thresholds
@@ -284,7 +288,7 @@ Predicts the Bridge address from the deployer's future nonce, deploys in order:
 3. locked `Bridge` implementation
 4. atomically initialized `BridgeProxy` (the canonical Bridge address)
 5. `RGBVerifier` (wraps the BtcRelay)
-6. `RgbSettlementModule`, `NullVerifier`, `RgbOutboundSettlementModule`, `RgbPoolSettlementModule`, and `NullSettlementModule`
+6. `RgbSettlementModule`, `NullVerifier`, `RgbOutboundSettlementModule`, and `NullSettlementModule`
 7. `MultisigProxy`
 8. Optional `CommissionManager` oracle configuration
 9. `CommissionManager` / `Bridge` / `RouteRegistry` `transferOwnership` → `MultisigProxy`
@@ -299,7 +303,6 @@ forge script script/deploy/DeployRouteRegistry.s.sol         --rpc-url $RPC_URL 
 forge script script/deploy/DeployBridge.s.sol                --rpc-url $RPC_URL --broadcast --verify
 forge script script/deploy/DeployRGBVerifier.s.sol           --rpc-url $RPC_URL --broadcast --verify
 forge script script/deploy/DeployRgbSettlementModule.s.sol   --rpc-url $RPC_URL --broadcast --verify
-forge script script/deploy/DeployRgbPoolSettlementModule.s.sol --rpc-url $RPC_URL --broadcast --verify
 forge script script/deploy/DeployMultisigProxy.s.sol         --rpc-url $RPC_URL --broadcast --verify
 
 # Transfer ownerships to MultisigProxy
@@ -314,10 +317,18 @@ Note: `RouteRegistry.bridge` and `CommissionManager.bridgeAddress` must point to
 
 `MultisigProxy` validates upgrades both when proposed and when executed. The candidate must differ from the proxy's current implementation. Nonempty initialization calldata must contain at least a four-byte selector and must not directly call `fundsOut` or `rebalanceLiquidity`; violations revert before the upgrade or delegatecall. Empty calldata and reviewed versioned reinitializers remain supported. If another proposal installs the candidate first, execution of the pending upgrade reverts with `InvalidBridgeImplementation` and leaves it Pending.
 
-These checks restrict the federation governance entrypoint; `BridgeProxy` itself retains its owner-controlled API. The selector checks do not constrain arbitrary behavior or wrappers in a newly approved implementation, so implementation review remains required. The upgrade EIP-712 schema and execution payload are unchanged.
+Initialization calldata is limited to 4096 bytes including its selector. `MultisigProxy` enforces this at both proposal creation and execution, and `BridgeProxy` independently enforces it on direct upgrades. The limit applies to the initialization bytes, not the outer ABI-encoded proposal or execution payload. Oversized payloads revert with `UpgradeCallDataTooLong(length, maxLength)`; rejected proposal creation leaves the nonce unchanged, and rejected execution leaves the proposal Pending and the implementation unchanged. The cap bounds payload size, not the reinitializer's gas consumption.
+
+The candidate and selector checks restrict the federation governance entrypoint; `BridgeProxy` itself retains its owner-controlled API. The selector checks do not constrain arbitrary behavior or wrappers in a newly approved implementation, so implementation review remains required. The upgrade EIP-712 schema and execution payload are unchanged.
+
+Implementation compatibility uses the exact 32-byte UUID returned by `bridgeProxyCompatibilityUUID()`. The proxy does not classify a candidate based on its response to `implementation()`: an unrelated 32-byte fallback response is not evidence of proxy bytecode. Bridge's marker rejects delegatecall execution by comparing `address(this)` with its immutable implementation identity, so proxies forwarding the marker to Bridge are rejected. This is a compatibility contract, not a universal detector for arbitrary proxy bytecode or spoofed markers; candidate review must verify the direct-call-only marker and implementation behavior. No proxy code-hash allowlist is introduced.
+
+These limits are part of the deployed `BridgeProxy` and `MultisigProxy` code. Upgrading only the Bridge implementation does not add them to existing deployments. Constructor initialization calldata is outside this upgrade limit.
+
+The proxy reads the low 160 bits of the owner field at offset zero in the ERC-7201 `openzeppelin.storage.Ownable` namespace (`0x9016d09d72d40fdae2fd8ceac6b6234c7706214fd39c1cd1e609a0528c199300`). The caller must equal this stored owner before upgrade, and the same owner must remain stored afterward. A getter that reports the original owner cannot hide an initialization-time owner change; rejection rolls back the implementation slot, owner, initializer version, and other initialization writes. Conversely, a different address reported by the getter does not acquire upgrade authority. This validates stored ownership at the upgrade boundary; it does not validate all behavior of an approved implementation or replace namespace/dependency review. The slot reader is part of the proxy bytecode and cannot be added to an existing proxy through a Bridge implementation upgrade.
 
 1. Run `DeployBridgeImplementation.s.sol` to deploy a new locked implementation.
-2. Run `python3 script/storage-layout/storage_layout.py` after building the exact candidate artifact; review it against the frozen deployed baseline (see `storage-layout/README.md`). Prepare any versioned reinitializer calldata (`0x` if none). Upgrades must preserve the current owner: the proxy checks `owner()` after initialization and reverts the complete upgrade if the getter fails or returns a different address. Transfer ownership separately using the two-step ownership flow.
+2. Run `python3 script/storage-layout/storage_layout.py` after building the exact candidate artifact; review it against the frozen deployed baseline (see `storage-layout/README.md`). Separately verify that the Ownable namespace and owner field remain compatible with the proxy's fixed slot reader. Prepare any versioned reinitializer calldata (`0x` if none). Upgrades must preserve the stored owner: the proxy reads the Ownable slot after initialization and reverts the complete upgrade if the address changes. Transfer ownership separately using the two-step ownership flow.
 3. Run `MultisigProposeUpgradeBridge.s.sol`; the signed proposal binds the current proxy, new implementation, and `keccak256(UPGRADE_CALLDATA)`.
 4. After the timelock, execute the printed `opData` through `executeProposal`.
 5. Verify the implementation slot, Bridge state, token balance, and a post-upgrade funds-in/out smoke test.
@@ -363,7 +374,7 @@ forge script script/interact/BridgeFundsIn.s.sol --rpc-url $RPC_URL --broadcast
 4. Verify immutable commission destination: `CommissionManager.commissionRecipient()` returns the intended treasury.
 5. Verify Bridge ↔ Registry linkage: `Bridge.routeRegistry()` returns the live `RouteRegistry`; `RouteRegistry.bridge()` returns the live `Bridge`.
 6. Verify Bridge ↔ CM linkage: `CommissionManager.bridgeAddress()` returns the live `Bridge`; `Bridge.commissionManager()` returns the live `CommissionManager`.
-7. Verify amount floors: `Bridge.minFundsInAmount()` and `Bridge.minFundsOutAmount()` return the intended non-zero values, and source-side tooling rejects burns below the outbound floor.
+7. Verify amount floors: `Bridge.minFundsInAmount()` and `Bridge.minFundsOutAmount()` return the intended non-zero values with the inbound floor at least the outbound floor, and source-side tooling rejects burns below the outbound floor.
 8. Verify LZ adapter wiring: `Bridge.lzAdapter()` and `MultisigProxy.lzAdapter()` both return `address(0)` immediately after deploy. Once the adapter is live, federation must run two timelocked proposals:
    - `proposeAdminExecute` on the proxy with calldata `Bridge.setLZAdapter(adapter)` — opens the adapter `fundsIn` data path.
    - `proposeUpdateLZAdapter(adapter)` — opens the `AdminExecuteAdapter` governance path on the proxy.
@@ -391,7 +402,6 @@ src/
   settlement/
     RgbSettlementModule.sol    — canonical RGB mint/burn proof ledger
     RgbOutboundSettlementModule.sol — ledger reader with stateless credit
-    RgbPoolSettlementModule.sol — pool credit no-op + mint/burn-ledger debit check
     NullSettlementModule.sol   — Stateless no-op (routes settled by external delivery)
   interfaces/
     IBridge.sol                — Bridge interface, events, and custom errors
@@ -406,7 +416,7 @@ src/
 script/
   deploy/                      — DeployAll, DeployBridge, DeployBridgeImplementation, DeployMinimalBridge,
                                  DeployRouteRegistry, DeployRGBVerifier,
-                                 DeployRgbSettlementModule, DeployRgbPoolSettlementModule,
+                                 DeployRgbSettlementModule,
                                  DeployCommissionManager,
                                  DeployMultisigProxy
   interact/                    — BridgeFundsIn, MultisigExecuteFundsOut,
@@ -424,7 +434,6 @@ test/
   MinimalBridge.t.sol          — MinimalBridge tests
   RouteRegistry.t.sol          — RouteRegistry tests (setRoute, dispatch, enabled gating)
   RgbSettlementModule.t.sol    — canonical RGB ledger tests
-  RgbPoolSettlementModule.t.sol — asymmetric RGB pool settlement tests
   CommissionManager.t.sol      — CommissionManager tests (rules, pools, withdrawals, ETH/USD feed)
   MultisigProxy.t.sol          — MultisigProxy tests (EIP-712, bitmap sigs, proposals incl. SetRoute / UpdateRouteRegistry)
   Integration.t.sol            — End-to-end: user → Bridge → RouteRegistry → TEE multisig → fundsOut → CM withdrawal

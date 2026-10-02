@@ -8,6 +8,8 @@ interface IBridge {
     /// @dev Must be called directly on an implementation, never through delegatecall.
     function bridgeProxyCompatibilityUUID() external view returns (bytes32);
 
+    /// @notice Initializes proxy storage with non-zero amount floors.
+    /// @dev Requires `minFundsInAmount >= minFundsOutAmount`.
     function initialize(
         address usdt0,
         address routeRegistry,
@@ -26,10 +28,12 @@ interface IBridge {
     error InvalidSourceChainId();
     error ZeroAmount();
     error ZeroNetAmount();
+    error CommissionConservationBroken();
     error AmountBelowMinimum(uint256 amount, uint256 minimum);
     error InsufficientReceived(uint256 received, uint256 tokenCommission);
     error InvalidMinFundsInAmount();
     error InvalidMinFundsOutAmount();
+    error InvalidAmountFloors(uint256 minFundsInAmount, uint256 minFundsOutAmount);
     error AddressTooLong(uint256 length, uint256 maxLength);
     error ProofTooLong(uint256 length, uint256 maxLength);
     error SettlementDataTooLong(uint256 length, uint256 maxLength);
@@ -308,6 +312,7 @@ interface IBridge {
     /// @dev Per-chain / global outflow rate limiting uses the outflow
     ///      token-bucket library; bucket state is exposed via the `chainBuckets`
     ///      / `globalBucket` getters and the `availableOutflow` previews.
+    ///      Requires token commission + net payout == gross amount, with a non-zero net payout.
     function fundsOut(FundsOutParams calldata params) external;
 
     /// @notice Parameters for `rebalanceLiquidity`.
@@ -393,13 +398,16 @@ interface IBridge {
 
     /// @notice Updates the `CommissionManager` used for fee quotes and custody.
     ///         Owner-only (MultisigProxy via the typed, timelocked
-    ///         `UpdateCommissionManager` operation). Must be non-zero.
+    ///         `UpdateCommissionManager` operation). Must have deployed code
+    ///         and return this Bridge's address from `bridgeAddress()`.
     function setCommissionManager(address newCommissionManager) external;
 
     /// @notice Updates the minimum accepted `fundsIn` deposit (token smallest
     ///         units). Owner-only (MultisigProxy via the federation
     ///         propose -> timelock -> execute flow). Must be non-zero; reverts
     ///         `InvalidMinFundsInAmount` otherwise.
+    /// @dev Must be at least the current `minFundsOutAmount`; otherwise reverts
+    ///      `InvalidAmountFloors`. The comparison uses the value at execution.
     function setMinFundsInAmount(uint256 newMinimum) external;
 
     /// @notice Current minimum accepted `fundsIn` deposit in token smallest
@@ -410,6 +418,8 @@ interface IBridge {
     ///         units). Owner-only (MultisigProxy via the federation
     ///         propose -> timelock -> execute flow). Must be non-zero; reverts
     ///         `InvalidMinFundsOutAmount` otherwise.
+    /// @dev Must not exceed the current `minFundsInAmount`; otherwise reverts
+    ///      `InvalidAmountFloors`. The comparison uses the value at execution.
     function setMinFundsOutAmount(uint256 newMinimum) external;
 
     /// @notice Current minimum accepted `fundsOut` release in token smallest
