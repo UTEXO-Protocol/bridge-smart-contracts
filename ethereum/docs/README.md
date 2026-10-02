@@ -168,14 +168,15 @@ Standalone on-chain source of the RGB reject list read by RGB client-side valida
 
 Each entry is `(opId, reject)`: an RGB operation id and whether it is rejected or allowed. Validators do **not** query the contract per operation id — validation needs a lookup for every operation in the history, and a network round trip per lookup would be far too slow. Instead a client downloads the whole list once, caches it, and performs every lookup locally, exactly as with the hosted file.
 
-- `append(Entry[] batch)` — appender-only. Appends entries in order. Reverts as a whole on an empty batch, a zero `opId`, or an `opId` that is already listed — each operation id is listed at most once and a decision can never be overwritten.
+- `append(Entry[] batch)` — appender-only. Appends entries in order. Reverts as a whole on an empty batch or a zero `opId`.
 - `length()` / `entries(start, end)` — the read interface. `entries` returns `[start, end)` clamped to the list length, so clients can request fixed-size pages.
-- `isListed(opId)` — whether an operation id has an entry; used for uniqueness and monitoring, not by validators.
 - `setAppender(newAppender)` — `onlyOwner`. Appoints the appender and revokes the previous one. Must be non-zero.
 
-Two roles keep the hot key away from administration. The **owner** is a cold key that only appoints and rotates the appender; the **appender** is the hot key of the tool that publishes entries, and the only account that can append. A leaked appender key cannot take over the registry — the owner rotates it — but entries it already appended stay, since the list is append-only.
+Two roles keep the hot key away from administration. The **owner** is a cold key that only appoints and rotates the appender; the **appender** is the hot key of the tool that publishes entries, and the only account that can append. A leaked appender key cannot take over the registry — the owner rotates it — and its decisions can be reverted by appending corrective entries from the new appender.
 
-The list is **append-only by construction** — there is no edit or remove function — so a client caches entries up to the last index it has seen and on the next sync fetches only `[cachedLength, length())`. Reading `length()` and the pages at one fixed block keeps a sync consistent. Page size is bounded by the `eth_call` gas cap and timeout of the RPC node in use, so it is a client-side choice: start from a default and shrink it when the node rejects a call.
+The list is a log of decisions and **the latest entry for an operation id wins**: a rejected operation is allowed again by appending an allow entry for it. Clients apply entries in index order, so later entries override earlier ones. The log is the only state — there is no on-chain per-operation lookup.
+
+The log is **append-only by construction** — there is no edit or remove function — so a client caches entries up to the last index it has seen and on the next sync fetches only `[cachedLength, length())`. Reading `length()` and the pages at one fixed block keeps a sync consistent. Page size is bounded by the `eth_call` gas cap and timeout of the RPC node in use, so it is a client-side choice: start from a default and shrink it when the node rejects a call.
 
 The RGB contract references this registry by address at issuance, so neither the address nor the read interface can change. The contract is therefore **not upgradeable**, ownership is two-step (`Ownable2Step`), and `renounceOwnership` is blocked — losing the owner would freeze the list permanently.
 
@@ -463,7 +464,7 @@ test/
   MinimalBridge.t.sol          — MinimalBridge tests
   RouteRegistry.t.sol          — RouteRegistry tests (setRoute, dispatch, enabled gating)
   RgbSettlementModule.t.sol    — canonical RGB ledger tests
-  RgbRejectList.t.sol          — reject list append, paging, client sync, appender rotation and ownership tests
+  RgbRejectList.t.sol          — reject list append, latest-entry-wins, paging, client sync, appender rotation and ownership tests
   CommissionManager.t.sol      — CommissionManager tests (rules, pools, withdrawals, ETH/USD feed)
   MultisigProxy.t.sol          — MultisigProxy tests (EIP-712, bitmap sigs, proposals incl. SetRoute / UpdateRouteRegistry)
   Integration.t.sol            — End-to-end: user → Bridge → RouteRegistry → TEE multisig → fundsOut → CM withdrawal

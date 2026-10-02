@@ -16,6 +16,8 @@ import {IRgbRejectList} from "./interfaces/IRgbRejectList.sol";
 ///         There is deliberately no function that edits or removes an entry,
 ///         so append-only is a property of the contract rather than an
 ///         operational convention — the incremental client sync relies on it.
+///         A decision is changed by appending a newer entry for the same
+///         operation id; the latest entry wins.
 ///
 ///         Two roles. The owner — meant to be a cold key — only appoints and
 ///         rotates the appender; the appender — the hot key of the publishing
@@ -37,9 +39,6 @@ contract RgbRejectList is IRgbRejectList, Ownable2Step {
 
     /// @dev Entries in append order. Index i is stable forever once written.
     Entry[] private _entries;
-
-    /// @inheritdoc IRgbRejectList
-    mapping(bytes32 opId => bool listed) public override isListed;
 
     /// @inheritdoc IRgbRejectList
     address public override appender;
@@ -77,9 +76,7 @@ contract RgbRejectList is IRgbRejectList, Ownable2Step {
         for (uint256 i = 0; i < batch.length; i++) {
             Entry calldata entry = batch[i];
             if (entry.opId == bytes32(0)) revert InvalidOpId();
-            if (isListed[entry.opId]) revert AlreadyListed(entry.opId);
 
-            isListed[entry.opId] = true;
             _entries.push(entry);
             emit EntryAdded(index + i, entry.opId, entry.reject);
         }
