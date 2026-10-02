@@ -1693,7 +1693,7 @@ contract MultisigProxy is IMultisigProxy {
         if (target == bridge || target == commissionManager || target == lzAdapter) return;
 
         address registry = IBridge(bridge).routeRegistry();
-        if (target == registry && registry != address(0)) return;
+        if (target == registry) return;
 
         revert InvalidManagedOwnershipTarget(target);
     }
