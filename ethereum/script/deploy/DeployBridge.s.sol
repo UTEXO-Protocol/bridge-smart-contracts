@@ -34,11 +34,13 @@ import {BridgeProxy} from "../../src/BridgeProxy.sol";
 ///   MIN_FUNDS_IN_AMOUNT       — Minimum accepted `fundsIn` deposit in token
 ///                               smallest units (USDT0 has 6 decimals, so e.g.
 ///                               10000 = 0.01 USDT0). Required and must be
-///                               non-zero; retune later via federation
+///                               non-zero and >= MIN_FUNDS_OUT_AMOUNT;
+///                               retune later via federation
 ///                               governance with
 ///                               `Bridge.setMinFundsInAmount(newMinimum)`.
 ///   MIN_FUNDS_OUT_AMOUNT      — Minimum accepted `fundsOut` release in token
-///                               smallest units. Required and must be non-zero;
+///                               smallest units. Required, non-zero and
+///                               <= MIN_FUNDS_IN_AMOUNT;
 ///                               retune later with
 ///                               `Bridge.setMinFundsOutAmount(newMinimum)`.
 ///                               Set it above the per-release settlement cost

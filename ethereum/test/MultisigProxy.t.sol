@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {MultisigProxy} from "../src/MultisigProxy.sol";
@@ -120,7 +120,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     event ProposalCancelled(bytes32 indexed proposalId);
     event ProposalExecuted(bytes32 indexed proposalId, IMultisigProxy.OperationType indexed opType);
     event EnclaveSignersUpdated(uint256 indexed sourceChainId, address[] newSigners, uint256 newThreshold);
-    event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
+    event FederationSignersUpdated(address[] newSigners, uint256 newThreshold, uint256 indexed newVersion);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
     event TimelockDurationUpdated(uint256 newDuration);
@@ -2104,6 +2104,66 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         assertEq(bridge.owner(), address(proxy));
     }
 
+    function test_upgradeCalldata_acceptsExactly4096BytesThroughGovernance() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4060));
+        assertEq(initializationData.length, 4096);
+        bytes32 id = _submitBridgeUpgrade(address(candidate), initializationData);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        // The ABI-encoded operation envelope may be larger than 4096 bytes.
+        proxy.executeProposal(id, abi.encode(address(bridge), address(candidate), initializationData));
+        assertEq(IBridgeProxy(address(bridge)).implementation(), address(candidate));
+        assertEq(BridgeV2Mock(address(bridge)).upgradeValue(), 777);
+        assertEq(bridge.owner(), address(proxy));
+        assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Executed));
+    }
+
+    function test_upgradeCalldata_rejects4097BytesAtProposal() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4061));
+        _expectRejectedBridgeUpgrade(
+            address(candidate),
+            initializationData,
+            abi.encodeWithSelector(IMultisigProxy.UpgradeCallDataTooLong.selector, uint256(4097), uint256(4096))
+        );
+    }
+
+    function test_upgradeCalldata_executionRejectsOversizedPayloadIndependently() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes32 id = _submitBridgeUpgrade(address(candidate), "");
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4061));
+        bytes memory original = abi.encode(address(bridge), address(candidate), bytes(""));
+        bytes memory opData = abi.encode(address(bridge), address(candidate), initializationData);
+        _seedUpgradePayloadHash(id, original, opData);
+        uint256 nonceBefore = proxy.proposalNonce();
+        address implementationBefore = IBridgeProxy(address(bridge)).implementation();
+        uint256 balanceBefore = token.balanceOf(address(bridge));
+        uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        // A distinct downstream error proves MultisigProxy rejects the payload
+        // itself, rather than relying on BridgeProxy's identical length error.
+        vm.mockCallRevert(
+            address(bridge),
+            abi.encodeCall(IBridgeProxy.upgradeToAndCall, (address(candidate), initializationData)),
+            bytes("unexpected proxy call")
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(IMultisigProxy.UpgradeCallDataTooLong.selector, uint256(4097), uint256(4096))
+        );
+        proxy.executeProposal(id, opData);
+        vm.clearMockedCalls();
+        assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+        assertEq(proxy.proposalNonce(), nonceBefore);
+        assertEq(IBridgeProxy(address(bridge)).implementation(), implementationBefore);
+        assertEq(bridge.owner(), address(proxy));
+        assertEq(token.balanceOf(address(bridge)), balanceBefore);
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore);
+    }
+
     function test_upgrade_rechecksCurrentImplementationAtExecution() public {
         BridgeV2Mock candidate = new BridgeV2Mock();
         bytes32 first = _submitBridgeUpgrade(address(candidate), "");
@@ -2470,6 +2530,60 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     // ========================================================================
     // Cancel
     // ========================================================================
+
+    function _prepareCancellation(uint256 cancelDeadline)
+        internal
+        returns (bytes32 id, uint256 bitmap, bytes[] memory cancelSigs)
+    {
+        address newBridge = makeAddr("cancel-deadline-bridge");
+        uint256 nonce = proxy.proposalNonce();
+        uint256 proposalDeadline = block.timestamp + 1 days;
+        (uint256[] memory pks, uint256 bits) = _fedSigSet2of3();
+        bitmap = bits;
+        bytes32 proposalDigest = MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, nonce, proposalDeadline);
+        id = proxy.proposeUpdateBridge(
+            newBridge, nonce, proposalDeadline, bitmap, MultisigHelper.signAll(vm, proposalDigest, pks)
+        );
+        cancelSigs = MultisigHelper.signAll(vm, MultisigHelper.digestCancelProposal(domainSep, id, cancelDeadline), pks);
+    }
+
+    function test_cancelProposal_revertsOnDeadlineTooFar() public {
+        uint256[2] memory deadlines =
+            [block.timestamp + proxy.MAX_PROPOSAL_LIFETIME() + 1, block.timestamp + 10 * 365 days];
+        for (uint256 i; i < deadlines.length; ++i) {
+            (bytes32 id, uint256 bitmap, bytes[] memory sigs) = _prepareCancellation(deadlines[i]);
+            uint256 nonceBefore = proxy.proposalNonce();
+            uint256 emergencyNonceBefore = proxy.emergencyNonce();
+            uint256 teeNonceBefore = proxy.teeNonce(RGB_CHAIN_ID);
+            vm.expectRevert(IMultisigProxy.DeadlineTooFar.selector);
+            proxy.cancelProposal(id, deadlines[i], bitmap, sigs);
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+            assertEq(proxy.proposalNonce(), nonceBefore);
+            assertEq(proxy.emergencyNonce(), emergencyNonceBefore);
+            assertEq(proxy.teeNonce(RGB_CHAIN_ID), teeNonceBefore);
+        }
+    }
+
+    function test_cancelProposal_acceptsExactDeadlineBoundaries() public {
+        uint256[2] memory deadlines = [block.timestamp, block.timestamp + proxy.MAX_PROPOSAL_LIFETIME()];
+        for (uint256 i; i < deadlines.length; ++i) {
+            (bytes32 id, uint256 bitmap, bytes[] memory sigs) = _prepareCancellation(deadlines[i]);
+            uint256 nonceBefore = proxy.proposalNonce();
+            proxy.cancelProposal(id, deadlines[i], bitmap, sigs);
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Cancelled));
+            assertEq(proxy.proposalNonce(), nonceBefore);
+        }
+    }
+
+    function test_cancelProposal_revertsOnExpiredDeadline() public {
+        uint256 deadline = block.timestamp - 1;
+        (bytes32 id, uint256 bitmap, bytes[] memory sigs) = _prepareCancellation(deadline);
+        uint256 nonceBefore = proxy.proposalNonce();
+        vm.expectRevert(IMultisigProxy.Expired.selector);
+        proxy.cancelProposal(id, deadline, bitmap, sigs);
+        assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+        assertEq(proxy.proposalNonce(), nonceBefore);
+    }
 
     function test_cancelProposal_cancels() public {
         address newBridge = makeAddr("newBridge");
@@ -3890,6 +4004,48 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         // live-timelock check this would revert TimelockActive.
         proxy.executeProposal(bridgeProposalId, abi.encode(newBridge));
         assertEq(proxy.bridge(), newBridge, "snapshotted proposal executes despite the live timelock raise");
+    }
+
+    function test_federationRotation_emitsOneCompleteEventPerRotation() public {
+        (address[] memory newSigners, uint256[] memory newPks) = _fedFromPks(0xFA1, 3);
+        (uint256[] memory currentPks, uint256 bitmap) = _fedSigSet2of3();
+        assertEq(proxy.federationSignerSetVersion(), 1);
+
+        vm.recordLogs();
+        _rotateFedMeasured(newSigners, 2, currentPks, bitmap);
+        _assertFederationRotationLogs(vm.getRecordedLogs(), newSigners, 2, 2);
+
+        // Updating only the threshold is still a rotation and advances the version.
+        vm.recordLogs();
+        _rotateFedMeasured(newSigners, 3, _slice(newPks, 2), _bitmapFor(2));
+        _assertFederationRotationLogs(vm.getRecordedLogs(), newSigners, 3, 3);
+    }
+
+    function _assertFederationRotationLogs(
+        Vm.Log[] memory entries,
+        address[] memory expectedSigners,
+        uint256 expectedThreshold,
+        uint256 expectedVersion
+    ) internal view {
+        bytes32 combinedTopic = keccak256("FederationSignersUpdated(address[],uint256,uint256)");
+        bytes32 legacySignersTopic = keccak256("FederationSignersUpdated(address[],uint256)");
+        bytes32 legacyVersionTopic = keccak256("FederationSignerSetVersionUpdated(uint256)");
+        uint256 count;
+        for (uint256 i; i < entries.length; ++i) {
+            if (entries[i].emitter != address(proxy) || entries[i].topics.length == 0) continue;
+            bytes32 topic = entries[i].topics[0];
+            assertTrue(topic != legacySignersTopic, "legacy signer event must not be emitted");
+            assertTrue(topic != legacyVersionTopic, "legacy version event must not be emitted");
+            if (topic != combinedTopic) continue;
+            count++;
+            assertEq(entries[i].topics.length, 2, "version is the only indexed field");
+            assertEq(entries[i].topics[1], bytes32(expectedVersion), "indexed version");
+            assertEq(entries[i].data, abi.encode(expectedSigners, expectedThreshold), "signers and threshold");
+        }
+        assertEq(count, 1, "one complete event per rotation");
+        assertEq(proxy.federationSignerSetVersion(), expectedVersion);
+        assertEq(proxy.getFederationSigners(), expectedSigners);
+        assertEq(proxy.federationThreshold(), expectedThreshold);
     }
 
     function test_federationRotationInvalidatesPendingProposals() public {

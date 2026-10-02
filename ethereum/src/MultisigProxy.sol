@@ -105,7 +105,7 @@ contract MultisigProxy is IMultisigProxy {
     // Constants
     // =========================================================================
 
-    /// @notice Maximum allowed time between proposal creation and its deadline.
+    /// @notice Maximum future deadline offset at submission for proposals and cancellations.
     uint256 public constant MAX_PROPOSAL_LIFETIME = 30 days;
 
     /// @notice Maximum future deadline offset at submission for typed enclave operations.
@@ -131,6 +131,10 @@ contract MultisigProxy is IMultisigProxy {
     ///         to guard `callData` against payloads too short to even carry a
     ///         selector before it is sliced via `calldataload`.
     uint256 public constant SELECTOR_LENGTH = 4;
+
+    /// @dev Maximum upgrade initialization bytes, including the selector.
+    ///      Keep aligned with BridgeProxy's direct upgrade limit.
+    uint256 private constant _MAX_UPGRADE_CALLDATA_LENGTH = 4096;
 
     /// @notice CommissionManager withdrawal selectors that generic raw-call
     ///         paths are NOT allowed to call.
@@ -1122,6 +1126,7 @@ contract MultisigProxy is IMultisigProxy {
         external
     {
         if (block.timestamp > deadline) revert Expired();
+        if (deadline > block.timestamp + MAX_PROPOSAL_LIFETIME) revert DeadlineTooFar();
 
         Proposal storage p = _proposals[proposalId];
         if (p.status != ProposalStatus.Pending) revert NotPending();
@@ -1344,8 +1349,7 @@ contract MultisigProxy is IMultisigProxy {
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
             federationSignerSetVersion++;
-            emit FederationSignersUpdated(newSigners, newThreshold);
-            emit FederationSignerSetVersionUpdated(federationSignerSetVersion);
+            emit FederationSignersUpdated(newSigners, newThreshold, federationSignerSetVersion);
         } else if (opType == OperationType.UpdateBridge) {
             address newBridge = abi.decode(opData, (address));
             if (newBridge == address(0)) revert ZeroBridge();
@@ -1628,6 +1632,9 @@ contract MultisigProxy is IMultisigProxy {
                 || newImplementation == IBridgeProxy(bridgeProxy).implementation()
         ) revert InvalidBridgeImplementation(newImplementation);
 
+        if (initializationData.length > _MAX_UPGRADE_CALLDATA_LENGTH) {
+            revert UpgradeCallDataTooLong(initializationData.length, _MAX_UPGRADE_CALLDATA_LENGTH);
+        }
         if (initializationData.length != 0) {
             if (initializationData.length < SELECTOR_LENGTH) revert CallDataTooShort();
             _requireNotBridgeReleaseSelector(_firstSelector(initializationData));
@@ -1686,7 +1693,7 @@ contract MultisigProxy is IMultisigProxy {
         if (target == bridge || target == commissionManager || target == lzAdapter) return;
 
         address registry = IBridge(bridge).routeRegistry();
-        if (target == registry && registry != address(0)) return;
+        if (target == registry) return;
 
         revert InvalidManagedOwnershipTarget(target);
     }
