@@ -264,6 +264,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
 
     /// @notice Atomically initializes proxy storage for the first Bridge implementation.
     /// @dev Must be supplied as BridgeProxy constructor calldata; it can execute only once.
+    ///      Amount floors must be non-zero with the inbound floor at least the outbound floor.
     function initialize(
         address usdt0_,
         address routeRegistry_,
@@ -279,6 +280,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (commissionManager_ == address(0)) revert InvalidCommissionManagerAddress();
         if (minFundsInAmount_ == 0) revert InvalidMinFundsInAmount();
         if (minFundsOutAmount_ == 0) revert InvalidMinFundsOutAmount();
+        if (minFundsInAmount_ < minFundsOutAmount_) {
+            revert InvalidAmountFloors(minFundsInAmount_, minFundsOutAmount_);
+        }
 
         routeRegistry = routeRegistry_;
         commissionManager = ICommissionManager(commissionManager_);
@@ -341,9 +345,10 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @dev Owner is `MultisigProxy`; federation gates this on its M-of-N
     ///      timelock flow (generic `proposeAdminExecute` -> execute). Must be
     ///      non-zero: a non-zero floor is what rejects zero-amount and dust
-    ///      deposits on the inbound path.
+    ///      deposits on the inbound path. Must be at least the current outbound floor.
     function setMinFundsInAmount(uint256 newMinimum) external override onlyOwner {
         if (newMinimum == 0) revert InvalidMinFundsInAmount();
+        if (newMinimum < minFundsOutAmount) revert InvalidAmountFloors(newMinimum, minFundsOutAmount);
         uint256 old = minFundsInAmount;
         minFundsInAmount = newMinimum;
         emit MinFundsInAmountUpdated(old, newMinimum);
@@ -352,9 +357,10 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @inheritdoc IBridge
     /// @dev Owner is `MultisigProxy`; federation gates this on its M-of-N
     ///      timelock flow (generic `proposeAdminExecute` -> execute). Must be
-    ///      non-zero
+    ///      non-zero and no higher than the current inbound floor.
     function setMinFundsOutAmount(uint256 newMinimum) external override onlyOwner {
         if (newMinimum == 0) revert InvalidMinFundsOutAmount();
+        if (newMinimum > minFundsInAmount) revert InvalidAmountFloors(minFundsInAmount, newMinimum);
         uint256 old = minFundsOutAmount;
         minFundsOutAmount = newMinimum;
         emit MinFundsOutAmountUpdated(old, newMinimum);
