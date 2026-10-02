@@ -63,6 +63,7 @@ import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.so
 ///   MIN_FUNDS_IN_AMOUNT, MIN_FUNDS_OUT_AMOUNT,
 ///   INITIAL_CHAIN_BURST_BPS, INITIAL_CHAIN_REFILL_BPS_PER_WINDOW,
 ///   GLOBAL_BURST_BPS, GLOBAL_REFILL_BPS_PER_WINDOW
+///   Amount floors must be non-zero with MIN_FUNDS_IN_AMOUNT >= MIN_FUNDS_OUT_AMOUNT.
 ///
 /// Env (optional):
 ///   ETH_USD_FEED      — Chainlink ETH/USD aggregator (wired in before CM

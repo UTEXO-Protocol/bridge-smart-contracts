@@ -21,3 +21,9 @@ deployed layout as well. Checking only v1 would not protect state added in v2.
 Baseline changes require explicit storage-migration review. The checker covers
 compiler-reported storage; OpenZeppelin namespaced storage and dependency upgrades
 still require separate review against the deployed dependency version.
+
+`BridgeProxy` reads the Ownable owner directly at byte offset zero of the
+ERC-7201 `openzeppelin.storage.Ownable` slot
+`0x9016d09d72d40fdae2fd8ceac6b6234c7706214fd39c1cd1e609a0528c199300`.
+Every candidate and dependency upgrade must preserve this address field and
+namespace. The checker above does not verify this namespaced dependency layout.
