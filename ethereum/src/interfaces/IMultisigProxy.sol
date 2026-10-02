@@ -192,8 +192,7 @@ interface IMultisigProxy {
 
     // Emitted when proposals are executed
     event EnclaveSignersUpdated(uint256 indexed sourceChainId, address[] newSigners, uint256 newThreshold);
-    event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
-    event FederationSignerSetVersionUpdated(uint256 indexed newVersion);
+    event FederationSignersUpdated(address[] newSigners, uint256 newThreshold, uint256 indexed newVersion);
     event ManagedOwnershipTransferStarted(address indexed target, address indexed newOwner);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);

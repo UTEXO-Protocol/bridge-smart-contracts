@@ -191,6 +191,8 @@ Administrative operations (signer rotation, configuration changes, commission wi
 
 Raw generic calls cannot invoke `transferOwnership(address)`. Ownership migration uses the typed `TransferManagedOwnership` operation, which binds the exact allowlisted target and new owner into the federation's EIP-712 signatures and revalidates the target at execution. `acceptOwnership()` remains available through the relevant generic lane for two-step deployment and migration handoffs.
 
+Managed ownership targets are the current Bridge, CommissionManager, LayerZero adapter, and Bridge route registry. A zero target is rejected before any allowlist comparison, so an unset adapter or zero registry cannot authorize ownership migration to the zero address.
+
 **Emergency pause/unpause** bypass the timelock — federation can stop or resume `Bridge` instantly with M-of-N signatures. The configured guardian can only pause directly, without signatures, through `guardianEmergencyPause`; each successful call advances `emergencyNonce`, including when the bridge is already paused. It does not advance `proposalNonce` or any TEE nonce.
 
 Federation `emergencyPause` and `emergencyUnpause` require `block.timestamp <= deadline <= block.timestamp + MAX_EMERGENCY_DEADLINE` (one day). Typed enclave operations use the separate `MAX_TEE_DEADLINE` limit, also currently one day. These limits constrain the deadline at submission, not the age of the signature: no signing timestamp is included. Emergency signing tools must read the current `emergencyNonce` after any guardian action; a rejected or reverted action consumes no nonce. The EIP-712 schemas are unchanged.
