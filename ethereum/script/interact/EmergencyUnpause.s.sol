@@ -8,7 +8,7 @@ import {MultisigHelper} from "../../test/mocks/MultisigHelper.sol";
 /// @title EmergencyUnpause
 /// @notice Locally signs and submits MultisigProxy.emergencyUnpause().
 ///
-/// Env: same as EmergencyPause.
+/// Env: same as EmergencyPause; DEADLINE_OFFSET must be at most 86400.
 contract EmergencyUnpause is Script {
     function run() external {
         uint256 pk = vm.envUint("PRIVATE_KEY");

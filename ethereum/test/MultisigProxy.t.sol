@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {MultisigProxy} from "../src/MultisigProxy.sol";
@@ -29,6 +29,7 @@ import {
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockBtcRelay} from "./mocks/MockBtcRelay.sol";
 import {MultisigHelper} from "./mocks/MultisigHelper.sol";
+import {GovernanceTargetMock} from "./mocks/GovernanceTargetMock.sol";
 import {BridgeProxyTestUtils} from "./mocks/BridgeProxyTestUtils.sol";
 import {BridgeV2Mock} from "./mocks/BridgeV2Mock.sol";
 import {EmergencyPause} from "../script/interact/EmergencyPause.s.sol";
@@ -119,7 +120,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     event ProposalCancelled(bytes32 indexed proposalId);
     event ProposalExecuted(bytes32 indexed proposalId, IMultisigProxy.OperationType indexed opType);
     event EnclaveSignersUpdated(uint256 indexed sourceChainId, address[] newSigners, uint256 newThreshold);
-    event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
+    event FederationSignersUpdated(address[] newSigners, uint256 newThreshold, uint256 indexed newVersion);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
     event TimelockDurationUpdated(uint256 newDuration);
@@ -1469,7 +1470,130 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         assertFalse(bridge.paused());
     }
 
-    function test_guardianEmergencyPause_worksWithoutSignaturesOrNonceMovement() public {
+    function _emergencySignatures(bool unpause, uint256 nonce, uint256 deadline)
+        internal
+        view
+        returns (uint256 bitmap, bytes[] memory signatures)
+    {
+        bytes32 digest = unpause
+            ? MultisigHelper.digestEmergencyUnpause(domainSep, nonce, deadline)
+            : MultisigHelper.digestEmergencyPause(domainSep, nonce, deadline);
+        (uint256[] memory keys, uint256 bits) = _fedSigSet2of3();
+        return (bits, MultisigHelper.signAll(vm, digest, keys));
+    }
+
+    function _submitEmergency(bool unpause, uint256 nonce, uint256 deadline, uint256 bitmap, bytes[] memory signatures)
+        internal
+    {
+        if (unpause) proxy.emergencyUnpause(nonce, deadline, bitmap, signatures);
+        else proxy.emergencyPause(nonce, deadline, bitmap, signatures);
+    }
+
+    function test_guardianPause_invalidatesPreviouslySignedPauseAndUnpause() public {
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+        (uint256 bitmap, bytes[] memory pauseSignatures) = _emergencySignatures(false, nonce, deadline);
+        (, bytes[] memory unpauseSignatures) = _emergencySignatures(true, nonce, deadline);
+        uint256 proposalNonceBefore = proxy.proposalNonce();
+        uint256 teeNonceBefore = proxy.teeNonce(RGB_CHAIN_ID);
+        vm.prank(emergencyGuardian);
+        proxy.guardianEmergencyPause();
+
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.emergencyPause(nonce, deadline, bitmap, pauseSignatures);
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.emergencyUnpause(nonce, deadline, bitmap, unpauseSignatures);
+        assertTrue(bridge.paused());
+        assertTrue(bridge.outflowPaused());
+        assertEq(proxy.emergencyNonce(), nonce + 1);
+        assertEq(proxy.proposalNonce(), proposalNonceBefore);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), teeNonceBefore);
+
+        (, bytes[] memory freshSignatures) = _emergencySignatures(true, nonce + 1, deadline);
+        proxy.emergencyUnpause(nonce + 1, deadline, bitmap, freshSignatures);
+        assertFalse(bridge.paused());
+        assertFalse(bridge.outflowPaused());
+        assertEq(proxy.emergencyNonce(), nonce + 2);
+    }
+
+    function test_guardianPause_repeatedPauseInvalidatesNewlyCollectedUnpause() public {
+        vm.prank(emergencyGuardian);
+        proxy.guardianEmergencyPause();
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 deadline = block.timestamp + 1 hours;
+        (uint256 bitmap, bytes[] memory signatures) = _emergencySignatures(true, nonce, deadline);
+        vm.prank(emergencyGuardian);
+        proxy.guardianEmergencyPause();
+        assertEq(proxy.emergencyNonce(), nonce + 1);
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.emergencyUnpause(nonce, deadline, bitmap, signatures);
+        assertTrue(bridge.paused());
+        assertTrue(bridge.outflowPaused());
+    }
+
+    function test_guardianPause_revertPreservesEmergencyNonce() public {
+        uint256 nonce = proxy.emergencyNonce();
+        vm.mockCallRevert(
+            address(bridge),
+            abi.encodeWithSignature("emergencyPauseAll()"),
+            abi.encodeWithSignature("Error(string)", "bridge failure")
+        );
+        vm.prank(emergencyGuardian);
+        vm.expectRevert(bytes("bridge failure"));
+        proxy.guardianEmergencyPause();
+        assertEq(proxy.emergencyNonce(), nonce);
+        assertFalse(bridge.paused());
+        assertFalse(bridge.outflowPaused());
+    }
+
+    function test_emergencyTiming_rejectsDistantDeadlinesForBothActions() public {
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 proposalNonceBefore = proxy.proposalNonce();
+        uint256[2] memory deadlines =
+            [block.timestamp + proxy.MAX_EMERGENCY_DEADLINE() + 1, block.timestamp + 10 * 365 days];
+        for (uint256 action; action < 2; ++action) {
+            for (uint256 i; i < deadlines.length; ++i) {
+                (uint256 bitmap, bytes[] memory signatures) = _emergencySignatures(action == 1, nonce, deadlines[i]);
+                vm.expectRevert(IMultisigProxy.DeadlineTooFar.selector);
+                _submitEmergency(action == 1, nonce, deadlines[i], bitmap, signatures);
+                assertEq(proxy.emergencyNonce(), nonce);
+                assertEq(proxy.proposalNonce(), proposalNonceBefore);
+                assertFalse(bridge.paused());
+                assertFalse(bridge.outflowPaused());
+            }
+        }
+    }
+
+    function test_emergencyTiming_acceptsExactDeadlineBoundaries() public {
+        uint256[2] memory deadlines = [block.timestamp, block.timestamp + proxy.MAX_EMERGENCY_DEADLINE()];
+        for (uint256 i; i < deadlines.length; ++i) {
+            uint256 nonce = proxy.emergencyNonce();
+            (uint256 bitmap, bytes[] memory signatures) = _emergencySignatures(false, nonce, deadlines[i]);
+            proxy.emergencyPause(nonce, deadlines[i], bitmap, signatures);
+            assertTrue(bridge.paused());
+            assertTrue(bridge.outflowPaused());
+            (, signatures) = _emergencySignatures(true, nonce + 1, deadlines[i]);
+            proxy.emergencyUnpause(nonce + 1, deadlines[i], bitmap, signatures);
+            assertFalse(bridge.paused());
+            assertFalse(bridge.outflowPaused());
+            assertEq(proxy.emergencyNonce(), nonce + 2);
+        }
+    }
+
+    function test_emergencyTiming_rejectsExpiredUnpauseWithoutConsumingNonce() public {
+        vm.prank(emergencyGuardian);
+        proxy.guardianEmergencyPause();
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 deadline = block.timestamp - 1;
+        (uint256 bitmap, bytes[] memory signatures) = _emergencySignatures(true, nonce, deadline);
+        vm.expectRevert(IMultisigProxy.Expired.selector);
+        proxy.emergencyUnpause(nonce, deadline, bitmap, signatures);
+        assertEq(proxy.emergencyNonce(), nonce);
+        assertTrue(bridge.paused());
+        assertTrue(bridge.outflowPaused());
+    }
+
+    function test_guardianEmergencyPause_advancesOnlyEmergencyNonce() public {
         uint256 emergencyNonceBefore = proxy.emergencyNonce();
         uint256 proposalNonceBefore = proxy.proposalNonce();
 
@@ -1480,15 +1604,19 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
         assertTrue(bridge.paused(), "inflow frozen");
         assertTrue(bridge.outflowPaused(), "outflow frozen");
-        assertEq(proxy.emergencyNonce(), emergencyNonceBefore, "federation emergency lane unchanged");
+        assertEq(proxy.emergencyNonce(), emergencyNonceBefore + 1, "guardian invalidates emergency signatures");
         assertEq(proxy.proposalNonce(), proposalNonceBefore, "proposal lane unchanged");
     }
 
     function test_guardianEmergencyPause_revertsForUnauthorizedCaller() public {
+        uint256 nonce = proxy.emergencyNonce();
+        uint256 proposalNonceBefore = proxy.proposalNonce();
         address attacker = makeAddr("guardian-attacker");
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnauthorizedEmergencyGuardian.selector, attacker));
         vm.prank(attacker);
         proxy.guardianEmergencyPause();
+        assertEq(proxy.emergencyNonce(), nonce);
+        assertEq(proxy.proposalNonce(), proposalNonceBefore);
     }
 
     function test_guardianCannotLiftFederationFreeze() public {
@@ -1720,7 +1848,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         // Propose the inflow-only pause (federation signed).
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = t + 1 days;
-        bytes32 digest = MultisigHelper.digestProposePauseInflow(domainSep, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposePauseInflow(domainSep, proxy.bridge(), nonce, deadline);
         (uint256[] memory fpks, uint256 fbitmap) = _fedSigSet2of3();
         bytes32 id = proxy.proposePauseInflow(nonce, deadline, fbitmap, MultisigHelper.signAll(vm, digest, fpks));
 
@@ -1888,6 +2016,213 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         assertEq(token.balanceOf(address(upgraded)), balanceBefore);
     }
 
+    function _submitBridgeUpgrade(address nextImplementation, bytes memory initializationData)
+        internal
+        returns (bytes32)
+    {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeUpgradeBridgeImplementation(
+            domainSep, address(bridge), nextImplementation, initializationData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        return proxy.proposeUpgradeBridgeImplementation(
+            address(bridge),
+            nextImplementation,
+            initializationData,
+            nonce,
+            deadline,
+            bitmap,
+            MultisigHelper.signAll(vm, digest, pks)
+        );
+    }
+
+    function _expectRejectedBridgeUpgrade(address nextImplementation, bytes memory data, bytes memory expectedError)
+        internal
+    {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 teeNonceBefore = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 balanceBefore = token.balanceOf(address(bridge));
+        address implementationBefore = IBridgeProxy(address(bridge)).implementation();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeUpgradeBridgeImplementation(
+            domainSep, address(bridge), nextImplementation, data, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory signatures = MultisigHelper.signAll(vm, digest, pks);
+        vm.expectRevert(expectedError);
+        proxy.proposeUpgradeBridgeImplementation(
+            address(bridge), nextImplementation, data, nonce, deadline, bitmap, signatures
+        );
+        assertEq(proxy.proposalNonce(), nonce);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), teeNonceBefore);
+        assertEq(IBridgeProxy(address(bridge)).implementation(), implementationBefore);
+        assertEq(token.balanceOf(address(bridge)), balanceBefore);
+    }
+
+    function test_upgrade_rejectsCurrentImplementationWithEmptyOrReleaseData() public {
+        address current = IBridgeProxy(address(bridge)).implementation();
+        bytes memory errorData = abi.encodeWithSelector(IMultisigProxy.InvalidBridgeImplementation.selector, current);
+        _expectRejectedBridgeUpgrade(current, "", errorData);
+        _expectRejectedBridgeUpgrade(current, abi.encodeCall(IBridge.fundsOut, (_fundsOutParams())), errorData);
+        _expectRejectedBridgeUpgrade(
+            current, abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams())), errorData
+        );
+    }
+
+    function test_upgrade_rejectsReleaseSelectorsOnDifferentImplementation() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes[2] memory payloads = [
+            abi.encodeCall(IBridge.fundsOut, (_fundsOutParams())),
+            abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams()))
+        ];
+        for (uint256 i; i < payloads.length; ++i) {
+            bytes4 selector = bytes4(payloads[i]);
+            bytes memory errorData =
+                abi.encodeWithSelector(IMultisigProxy.ForbiddenBridgeReleaseSelector.selector, selector);
+            _expectRejectedBridgeUpgrade(address(candidate), payloads[i], errorData);
+            _expectRejectedBridgeUpgrade(address(candidate), abi.encodePacked(selector), errorData);
+            _expectRejectedBridgeUpgrade(address(candidate), bytes.concat(payloads[i], hex"ff"), errorData);
+        }
+    }
+
+    function test_upgrade_rejectsNonemptyTruncatedSelector() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        for (uint256 length = 1; length < 4; ++length) {
+            _expectRejectedBridgeUpgrade(
+                address(candidate), new bytes(length), abi.encodeWithSelector(IMultisigProxy.CallDataTooShort.selector)
+            );
+        }
+    }
+
+    function test_upgrade_emptyInitializationDataWorks() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes32 id = _submitBridgeUpgrade(address(candidate), "");
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(id, abi.encode(address(bridge), address(candidate), bytes("")));
+        assertEq(IBridgeProxy(address(bridge)).implementation(), address(candidate));
+        assertEq(bridge.owner(), address(proxy));
+    }
+
+    function test_upgradeCalldata_acceptsExactly4096BytesThroughGovernance() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4060));
+        assertEq(initializationData.length, 4096);
+        bytes32 id = _submitBridgeUpgrade(address(candidate), initializationData);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        // The ABI-encoded operation envelope may be larger than 4096 bytes.
+        proxy.executeProposal(id, abi.encode(address(bridge), address(candidate), initializationData));
+        assertEq(IBridgeProxy(address(bridge)).implementation(), address(candidate));
+        assertEq(BridgeV2Mock(address(bridge)).upgradeValue(), 777);
+        assertEq(bridge.owner(), address(proxy));
+        assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Executed));
+    }
+
+    function test_upgradeCalldata_rejects4097BytesAtProposal() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4061));
+        _expectRejectedBridgeUpgrade(
+            address(candidate),
+            initializationData,
+            abi.encodeWithSelector(IMultisigProxy.UpgradeCallDataTooLong.selector, uint256(4097), uint256(4096))
+        );
+    }
+
+    function test_upgradeCalldata_executionRejectsOversizedPayloadIndependently() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes32 id = _submitBridgeUpgrade(address(candidate), "");
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4061));
+        bytes memory original = abi.encode(address(bridge), address(candidate), bytes(""));
+        bytes memory opData = abi.encode(address(bridge), address(candidate), initializationData);
+        _seedUpgradePayloadHash(id, original, opData);
+        uint256 nonceBefore = proxy.proposalNonce();
+        address implementationBefore = IBridgeProxy(address(bridge)).implementation();
+        uint256 balanceBefore = token.balanceOf(address(bridge));
+        uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        // A distinct downstream error proves MultisigProxy rejects the payload
+        // itself, rather than relying on BridgeProxy's identical length error.
+        vm.mockCallRevert(
+            address(bridge),
+            abi.encodeCall(IBridgeProxy.upgradeToAndCall, (address(candidate), initializationData)),
+            bytes("unexpected proxy call")
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(IMultisigProxy.UpgradeCallDataTooLong.selector, uint256(4097), uint256(4096))
+        );
+        proxy.executeProposal(id, opData);
+        vm.clearMockedCalls();
+        assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+        assertEq(proxy.proposalNonce(), nonceBefore);
+        assertEq(IBridgeProxy(address(bridge)).implementation(), implementationBefore);
+        assertEq(bridge.owner(), address(proxy));
+        assertEq(token.balanceOf(address(bridge)), balanceBefore);
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore);
+    }
+
+    function test_upgrade_rechecksCurrentImplementationAtExecution() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes32 first = _submitBridgeUpgrade(address(candidate), "");
+        bytes memory initializationData = abi.encodeCall(BridgeV2Mock.initializeV2, (777));
+        bytes32 second = _submitBridgeUpgrade(address(candidate), initializationData);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(first, abi.encode(address(bridge), address(candidate), bytes("")));
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.InvalidBridgeImplementation.selector, address(candidate)));
+        proxy.executeProposal(second, abi.encode(address(bridge), address(candidate), initializationData));
+        assertEq(BridgeV2Mock(address(bridge)).upgradeValue(), 0, "second initializer did not run");
+        assertEq(uint256(proxy.getProposal(second).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+    }
+
+    /// @dev Seed a legacy-style pending payload to exercise execution defenses
+    ///      independently of the propose guard. This is test-only storage setup,
+    ///      not a capability available to a transaction submitter.
+    function _seedUpgradePayloadHash(bytes32 id, bytes memory original, bytes memory replacement) internal {
+        vm.record();
+        proxy.getProposal(id);
+        (bytes32[] memory reads,) = vm.accesses(address(proxy));
+        for (uint256 i; i < reads.length; ++i) {
+            if (vm.load(address(proxy), reads[i]) == keccak256(original)) {
+                vm.store(address(proxy), reads[i], keccak256(replacement));
+                return;
+            }
+        }
+        revert("proposal dataHash slot not found");
+    }
+
+    function test_upgrade_executionRejectsReleasePayloadsIndependently() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes[2] memory payloads = [
+            abi.encodeCall(IBridge.fundsOut, (_fundsOutParams())),
+            abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams()))
+        ];
+        address originalImplementation = IBridgeProxy(address(bridge)).implementation();
+        uint256 balanceBefore = token.balanceOf(address(bridge));
+        uint256 recipientBefore = token.balanceOf(recipient);
+        uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 teeNonceBefore = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 startedAt = block.timestamp;
+        for (uint256 i; i < payloads.length; ++i) {
+            bytes32 id = _submitBridgeUpgrade(address(candidate), "");
+            bytes memory opData = abi.encode(address(bridge), address(candidate), payloads[i]);
+            _seedUpgradePayloadHash(id, abi.encode(address(bridge), address(candidate), bytes("")), opData);
+            vm.warp(startedAt + (i + 1) * (TIMELOCK + 1));
+            vm.expectRevert(
+                abi.encodeWithSelector(IMultisigProxy.ForbiddenBridgeReleaseSelector.selector, bytes4(payloads[i]))
+            );
+            proxy.executeProposal(id, opData);
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+            assertEq(IBridgeProxy(address(bridge)).implementation(), originalImplementation);
+            assertEq(token.balanceOf(address(bridge)), balanceBefore);
+            assertEq(token.balanceOf(recipient), recipientBefore);
+            assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore);
+            assertEq(proxy.teeNonce(RGB_CHAIN_ID), teeNonceBefore);
+        }
+    }
+
     function test_proposeUpgradeBridgeImplementation_signatureBindsInitializationData() public {
         BridgeV2Mock nextImplementation = new BridgeV2Mock();
         bytes memory signedData = abi.encodeCall(BridgeV2Mock.initializeV2, (777));
@@ -2052,8 +2387,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
 
-        bytes32 digest =
-            MultisigHelper.digestProposeAdminExecute(domainSep, bytes4(callData), callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeAdminExecute(
+            domainSep, proxy.bridge(), bytes4(callData), callData, nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
@@ -2117,7 +2453,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
 
-        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(domainSep, address(newCm), nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(
+            domainSep, proxy.bridge(), address(newCm), nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
@@ -2168,7 +2506,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 deadline = block.timestamp + 1 days;
 
         bytes32 digest = MultisigHelper.digestProposeWithdrawTokenCommissionCM(
-            domainSep, address(token), expectedCommission, nonce, deadline
+            domainSep, proxy.commissionManager(), address(token), expectedCommission, nonce, deadline
         );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
@@ -2192,6 +2530,60 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     // ========================================================================
     // Cancel
     // ========================================================================
+
+    function _prepareCancellation(uint256 cancelDeadline)
+        internal
+        returns (bytes32 id, uint256 bitmap, bytes[] memory cancelSigs)
+    {
+        address newBridge = makeAddr("cancel-deadline-bridge");
+        uint256 nonce = proxy.proposalNonce();
+        uint256 proposalDeadline = block.timestamp + 1 days;
+        (uint256[] memory pks, uint256 bits) = _fedSigSet2of3();
+        bitmap = bits;
+        bytes32 proposalDigest = MultisigHelper.digestProposeUpdateBridge(domainSep, newBridge, nonce, proposalDeadline);
+        id = proxy.proposeUpdateBridge(
+            newBridge, nonce, proposalDeadline, bitmap, MultisigHelper.signAll(vm, proposalDigest, pks)
+        );
+        cancelSigs = MultisigHelper.signAll(vm, MultisigHelper.digestCancelProposal(domainSep, id, cancelDeadline), pks);
+    }
+
+    function test_cancelProposal_revertsOnDeadlineTooFar() public {
+        uint256[2] memory deadlines =
+            [block.timestamp + proxy.MAX_PROPOSAL_LIFETIME() + 1, block.timestamp + 10 * 365 days];
+        for (uint256 i; i < deadlines.length; ++i) {
+            (bytes32 id, uint256 bitmap, bytes[] memory sigs) = _prepareCancellation(deadlines[i]);
+            uint256 nonceBefore = proxy.proposalNonce();
+            uint256 emergencyNonceBefore = proxy.emergencyNonce();
+            uint256 teeNonceBefore = proxy.teeNonce(RGB_CHAIN_ID);
+            vm.expectRevert(IMultisigProxy.DeadlineTooFar.selector);
+            proxy.cancelProposal(id, deadlines[i], bitmap, sigs);
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+            assertEq(proxy.proposalNonce(), nonceBefore);
+            assertEq(proxy.emergencyNonce(), emergencyNonceBefore);
+            assertEq(proxy.teeNonce(RGB_CHAIN_ID), teeNonceBefore);
+        }
+    }
+
+    function test_cancelProposal_acceptsExactDeadlineBoundaries() public {
+        uint256[2] memory deadlines = [block.timestamp, block.timestamp + proxy.MAX_PROPOSAL_LIFETIME()];
+        for (uint256 i; i < deadlines.length; ++i) {
+            (bytes32 id, uint256 bitmap, bytes[] memory sigs) = _prepareCancellation(deadlines[i]);
+            uint256 nonceBefore = proxy.proposalNonce();
+            proxy.cancelProposal(id, deadlines[i], bitmap, sigs);
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Cancelled));
+            assertEq(proxy.proposalNonce(), nonceBefore);
+        }
+    }
+
+    function test_cancelProposal_revertsOnExpiredDeadline() public {
+        uint256 deadline = block.timestamp - 1;
+        (bytes32 id, uint256 bitmap, bytes[] memory sigs) = _prepareCancellation(deadline);
+        uint256 nonceBefore = proxy.proposalNonce();
+        vm.expectRevert(IMultisigProxy.Expired.selector);
+        proxy.cancelProposal(id, deadline, bitmap, sigs);
+        assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+        assertEq(proxy.proposalNonce(), nonceBefore);
+    }
 
     function test_cancelProposal_cancels() public {
         address newBridge = makeAddr("newBridge");
@@ -2456,16 +2848,15 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
 
-        bytes32 digest =
-            MultisigHelper.digestProposeAdminExecuteAdapter(domainSep, bytes4(callData), callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteAdapter(
+            domainSep, proxy.lzAdapter(), bytes4(callData), callData, nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
-        bytes32 id = proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
-
-        vm.warp(block.timestamp + TIMELOCK + 1);
         vm.expectRevert(IMultisigProxy.ZeroTarget.selector);
-        proxy.executeProposal(id, callData);
+        proxy.proposeAdminExecuteAdapter(callData, nonce, deadline, bitmap, sigs);
+        assertEq(proxy.proposalNonce(), nonce);
     }
 
     function test_proposeAdminExecuteAdapter_executesCallOnAdapter() public {
@@ -2485,8 +2876,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = firstExec + 1 days;
 
-        bytes32 digest =
-            MultisigHelper.digestProposeAdminExecuteAdapter(domainSep, bytes4(callData), callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteAdapter(
+            domainSep, proxy.lzAdapter(), bytes4(callData), callData, nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
@@ -2522,8 +2914,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
 
-        bytes32 digest =
-            MultisigHelper.digestProposeAdminExecuteAdapter(domainSep, bytes4(callData), callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteAdapter(
+            domainSep, proxy.lzAdapter(), bytes4(callData), callData, nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
@@ -2544,8 +2937,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
-        bytes32 digest =
-            MultisigHelper.digestProposeSetRoute(domainSep, srcId, dstId, enabled, verifier, module, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeSetRoute(
+            domainSep, IBridge(proxy.bridge()).routeRegistry(), srcId, dstId, enabled, verifier, module, nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
         id = proxy.proposeSetRoute(srcId, dstId, enabled, verifier, module, nonce, deadline, bitmap, sigs);
@@ -2629,7 +3023,8 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     function _proposeUpdateRouteRegistry(address newRegistry) internal returns (bytes32 id) {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
-        bytes32 digest = MultisigHelper.digestProposeUpdateRouteRegistry(domainSep, newRegistry, nonce, deadline);
+        bytes32 digest =
+            MultisigHelper.digestProposeUpdateRouteRegistry(domainSep, proxy.bridge(), newRegistry, nonce, deadline);
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
         id = proxy.proposeUpdateRouteRegistry(newRegistry, nonce, deadline, bitmap, sigs);
@@ -3277,8 +3672,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 deadline = block.timestamp + 1 days;
 
         // Same proposal digest the federation would sign...
-        bytes32 digest =
-            MultisigHelper.digestProposeAdminExecute(domainSep, bytes4(callData), callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeAdminExecute(
+            domainSep, proxy.bridge(), bytes4(callData), callData, nonce, deadline
+        );
         // ...but signed by the ENCLAVE (TEE) keys instead of the federation.
         (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
@@ -3511,8 +3907,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
 
-        bytes32 digest =
-            MultisigHelper.digestProposeAdminExecute(domainSep, bytes4(callData), callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeAdminExecute(
+            domainSep, proxy.bridge(), bytes4(callData), callData, nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes32 proposalId =
             proxy.proposeAdminExecute(callData, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks));
@@ -3607,6 +4004,48 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         // live-timelock check this would revert TimelockActive.
         proxy.executeProposal(bridgeProposalId, abi.encode(newBridge));
         assertEq(proxy.bridge(), newBridge, "snapshotted proposal executes despite the live timelock raise");
+    }
+
+    function test_federationRotation_emitsOneCompleteEventPerRotation() public {
+        (address[] memory newSigners, uint256[] memory newPks) = _fedFromPks(0xFA1, 3);
+        (uint256[] memory currentPks, uint256 bitmap) = _fedSigSet2of3();
+        assertEq(proxy.federationSignerSetVersion(), 1);
+
+        vm.recordLogs();
+        _rotateFedMeasured(newSigners, 2, currentPks, bitmap);
+        _assertFederationRotationLogs(vm.getRecordedLogs(), newSigners, 2, 2);
+
+        // Updating only the threshold is still a rotation and advances the version.
+        vm.recordLogs();
+        _rotateFedMeasured(newSigners, 3, _slice(newPks, 2), _bitmapFor(2));
+        _assertFederationRotationLogs(vm.getRecordedLogs(), newSigners, 3, 3);
+    }
+
+    function _assertFederationRotationLogs(
+        Vm.Log[] memory entries,
+        address[] memory expectedSigners,
+        uint256 expectedThreshold,
+        uint256 expectedVersion
+    ) internal view {
+        bytes32 combinedTopic = keccak256("FederationSignersUpdated(address[],uint256,uint256)");
+        bytes32 legacySignersTopic = keccak256("FederationSignersUpdated(address[],uint256)");
+        bytes32 legacyVersionTopic = keccak256("FederationSignerSetVersionUpdated(uint256)");
+        uint256 count;
+        for (uint256 i; i < entries.length; ++i) {
+            if (entries[i].emitter != address(proxy) || entries[i].topics.length == 0) continue;
+            bytes32 topic = entries[i].topics[0];
+            assertTrue(topic != legacySignersTopic, "legacy signer event must not be emitted");
+            assertTrue(topic != legacyVersionTopic, "legacy version event must not be emitted");
+            if (topic != combinedTopic) continue;
+            count++;
+            assertEq(entries[i].topics.length, 2, "version is the only indexed field");
+            assertEq(entries[i].topics[1], bytes32(expectedVersion), "indexed version");
+            assertEq(entries[i].data, abi.encode(expectedSigners, expectedThreshold), "signers and threshold");
+        }
+        assertEq(count, 1, "one complete event per rotation");
+        assertEq(proxy.federationSignerSetVersion(), expectedVersion);
+        assertEq(proxy.getFederationSigners(), expectedSigners);
+        assertEq(proxy.federationThreshold(), expectedThreshold);
     }
 
     function test_federationRotationInvalidatesPendingProposals() public {
@@ -3805,8 +4244,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         RouteRegistry replacement = new RouteRegistry(address(bridge), address(proxy));
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
-        bytes32 digest =
-            MultisigHelper.digestProposeUpdateRouteRegistry(domainSep, address(replacement), nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeUpdateRouteRegistry(
+            domainSep, proxy.bridge(), address(replacement), nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes32 updateId = proxy.proposeUpdateRouteRegistry(
             address(replacement), nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks)
@@ -3848,8 +4288,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         );
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
-        bytes32 digest =
-            MultisigHelper.digestProposeAdminExecuteCM(domainSep, bytes4(callData), callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(
+            domainSep, proxy.commissionManager(), bytes4(callData), callData, nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
@@ -3863,8 +4304,9 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         bytes memory callData = abi.encodeWithSignature("acceptOwnership()");
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 1 days;
-        bytes32 digest =
-            MultisigHelper.digestProposeAdminExecuteCM(domainSep, bytes4(callData), callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(
+            domainSep, proxy.commissionManager(), bytes4(callData), callData, nonce, deadline
+        );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
@@ -4298,5 +4740,644 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 g10 = _rotateFedMeasured(f10, 6, _slice(p5, 3), _bitmapFor(3)); // signed by f5 (t=3)
         emit log_named_uint("gas: updateFederationSigners size=10 @32x20", g10);
         assertLt(g10, BLOCK_GAS_LIMIT, "fed(10) rotation exceeds block gas limit");
+    }
+}
+
+contract MultisigTargetBindingTest is Test {
+    MultisigProxy private proxy;
+    GovernanceTargetMock private bridge;
+    GovernanceTargetMock private cm;
+    GovernanceTargetMock private registry;
+    GovernanceTargetMock private adapter;
+    GovernanceTargetMock private replacement;
+    bytes32 private domain;
+    uint256 private constant DELAY = 1 hours;
+
+    function setUp() public {
+        bridge = new GovernanceTargetMock();
+        cm = new GovernanceTargetMock();
+        registry = new GovernanceTargetMock();
+        adapter = new GovernanceTargetMock();
+        replacement = new GovernanceTargetMock();
+        bridge.setRouteRegistry(address(registry));
+        address[] memory enclaves = new address[](2);
+        enclaves[0] = vm.addr(11);
+        enclaves[1] = vm.addr(12);
+        address[] memory federation = new address[](2);
+        federation[0] = vm.addr(21);
+        federation[1] = vm.addr(22);
+        proxy = new MultisigProxy(
+            address(bridge), address(cm), address(0x123), enclaves, 2, 1, federation, 2, DELAY, DELAY
+        );
+        domain = proxy.DOMAIN_SEPARATOR();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 id = proxy.proposeUpdateLZAdapter(
+            address(adapter),
+            0,
+            deadline,
+            3,
+            _sign(MultisigHelper.digestProposeUpdateLZAdapter(domain, address(adapter), 0, deadline))
+        );
+        vm.warp(block.timestamp + DELAY);
+        proxy.executeProposal(id, abi.encode(address(adapter)));
+    }
+
+    function _sign(bytes32 digest) private view returns (bytes[] memory) {
+        uint256[] memory keys = new uint256[](2);
+        keys[0] = 21;
+        keys[1] = 22;
+        return MultisigHelper.signAll(vm, digest, keys);
+    }
+
+    function _target(uint256 lane) private view returns (address) {
+        if (lane == 1 || lane == 4 || lane == 5) return proxy.commissionManager();
+        if (lane == 2 || lane == 6) return GovernanceTargetMock(proxy.bridge()).routeRegistry();
+        if (lane == 3) return proxy.lzAdapter();
+        return proxy.bridge();
+    }
+
+    function _rotation(uint256 lane) private returns (bytes32 id, bytes memory opData) {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        opData = abi.encode(address(replacement));
+        if (lane == 1 || lane == 4 || lane == 5) {
+            id = proxy.proposeUpdateCommissionManager(
+                address(replacement),
+                nonce,
+                deadline,
+                3,
+                _sign(
+                    MultisigHelper.digestProposeUpdateCommissionManager(
+                        domain, proxy.bridge(), address(replacement), nonce, deadline
+                    )
+                )
+            );
+        } else if (lane == 2 || lane == 6) {
+            id = proxy.proposeUpdateRouteRegistry(
+                address(replacement),
+                nonce,
+                deadline,
+                3,
+                _sign(
+                    MultisigHelper.digestProposeUpdateRouteRegistry(
+                        domain, proxy.bridge(), address(replacement), nonce, deadline
+                    )
+                )
+            );
+        } else if (lane == 3) {
+            id = proxy.proposeUpdateLZAdapter(
+                address(replacement),
+                nonce,
+                deadline,
+                3,
+                _sign(MultisigHelper.digestProposeUpdateLZAdapter(domain, address(replacement), nonce, deadline))
+            );
+        } else {
+            id = proxy.proposeUpdateBridge(
+                address(replacement),
+                nonce,
+                deadline,
+                3,
+                _sign(MultisigHelper.digestProposeUpdateBridge(domain, address(replacement), nonce, deadline))
+            );
+        }
+    }
+
+    /// @dev Assemble the public ABI call and independently check the EIP-712
+    ///      schema against literal type strings, not helper hash constants.
+    function _signedCall(uint256 lane, address target, bool legacy)
+        private
+        view
+        returns (bytes memory submitData, bytes memory opData)
+    {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes memory data = abi.encodeWithSignature("ping(uint256)", uint256(7));
+        bytes32 digest;
+        bytes32 independentHash;
+        if (lane == 0) {
+            digest = MultisigHelper.digestProposeAdminExecute(domain, target, bytes4(data), data, nonce, deadline);
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256(
+                        "ProposeAdminExecute(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+                    ),
+                    target,
+                    bytes4(data),
+                    keccak256(data),
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "ProposeAdminExecute(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+                                ),
+                                bytes4(data),
+                                keccak256(data),
+                                nonce,
+                                deadline
+                            )
+                        )
+                    )
+                );
+            }
+            submitData = abi.encodeCall(MultisigProxy.proposeAdminExecute, (data, nonce, deadline, 3, _sign(digest)));
+            opData = data;
+        } else if (lane == 1) {
+            digest = MultisigHelper.digestProposeAdminExecuteCM(domain, target, bytes4(data), data, nonce, deadline);
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256(
+                        "ProposeAdminExecuteCommissionManager(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+                    ),
+                    target,
+                    bytes4(data),
+                    keccak256(data),
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "ProposeAdminExecuteCommissionManager(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+                                ),
+                                bytes4(data),
+                                keccak256(data),
+                                nonce,
+                                deadline
+                            )
+                        )
+                    )
+                );
+            }
+            submitData = abi.encodeCall(
+                MultisigProxy.proposeAdminExecuteCommissionManager, (data, nonce, deadline, 3, _sign(digest))
+            );
+            opData = data;
+        } else if (lane == 2) {
+            digest = MultisigHelper.digestProposeAdminExecuteRouteRegistry(
+                domain, target, bytes4(data), data, nonce, deadline
+            );
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256(
+                        "ProposeAdminExecuteRouteRegistry(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+                    ),
+                    target,
+                    bytes4(data),
+                    keccak256(data),
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "ProposeAdminExecuteRouteRegistry(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+                                ),
+                                bytes4(data),
+                                keccak256(data),
+                                nonce,
+                                deadline
+                            )
+                        )
+                    )
+                );
+            }
+            submitData = abi.encodeCall(
+                MultisigProxy.proposeAdminExecuteRouteRegistry, (data, nonce, deadline, 3, _sign(digest))
+            );
+            opData = data;
+        } else if (lane == 3) {
+            digest =
+                MultisigHelper.digestProposeAdminExecuteAdapter(domain, target, bytes4(data), data, nonce, deadline);
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256(
+                        "ProposeAdminExecuteAdapter(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+                    ),
+                    target,
+                    bytes4(data),
+                    keccak256(data),
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "ProposeAdminExecuteAdapter(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+                                ),
+                                bytes4(data),
+                                keccak256(data),
+                                nonce,
+                                deadline
+                            )
+                        )
+                    )
+                );
+            }
+            submitData =
+                abi.encodeCall(MultisigProxy.proposeAdminExecuteAdapter, (data, nonce, deadline, 3, _sign(digest)));
+            opData = data;
+        } else if (lane == 4) {
+            digest = MultisigHelper.digestProposeWithdrawTokenCommissionCM(
+                domain, target, address(0xCAFE), uint256(7), nonce, deadline
+            );
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256(
+                        "ProposeWithdrawTokenCommissionCM(address target,address token,uint256 amount,uint256 nonce,uint256 deadline)"
+                    ),
+                    target,
+                    address(0xCAFE),
+                    uint256(7),
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "ProposeWithdrawTokenCommissionCM(address token,uint256 amount,uint256 nonce,uint256 deadline)"
+                                ),
+                                address(0xCAFE),
+                                uint256(7),
+                                nonce,
+                                deadline
+                            )
+                        )
+                    )
+                );
+            }
+            submitData = abi.encodeCall(
+                MultisigProxy.proposeWithdrawTokenCommissionCM,
+                (address(0xCAFE), uint256(7), nonce, deadline, 3, _sign(digest))
+            );
+            opData = abi.encode(address(0xCAFE), uint256(7));
+        } else if (lane == 5) {
+            digest = MultisigHelper.digestProposeWithdrawNativeCommissionCM(domain, target, uint256(7), nonce, deadline);
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256(
+                        "ProposeWithdrawNativeCommissionCM(address target,uint256 amount,uint256 nonce,uint256 deadline)"
+                    ),
+                    target,
+                    uint256(7),
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "ProposeWithdrawNativeCommissionCM(uint256 amount,uint256 nonce,uint256 deadline)"
+                                ),
+                                uint256(7),
+                                nonce,
+                                deadline
+                            )
+                        )
+                    )
+                );
+            }
+            submitData = abi.encodeCall(
+                MultisigProxy.proposeWithdrawNativeCommissionCM, (uint256(7), nonce, deadline, 3, _sign(digest))
+            );
+            opData = abi.encode(uint256(7));
+        } else if (lane == 6) {
+            digest = MultisigHelper.digestProposeSetRoute(
+                domain, target, uint256(1), uint256(2), true, address(0x111), address(0x222), nonce, deadline
+            );
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256(
+                        "ProposeSetRoute(address target,uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)"
+                    ),
+                    target,
+                    uint256(1),
+                    uint256(2),
+                    true,
+                    address(0x111),
+                    address(0x222),
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "ProposeSetRoute(uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)"
+                                ),
+                                uint256(1),
+                                uint256(2),
+                                true,
+                                address(0x111),
+                                address(0x222),
+                                nonce,
+                                deadline
+                            )
+                        )
+                    )
+                );
+            }
+            submitData = abi.encodeCall(
+                MultisigProxy.proposeSetRoute,
+                (uint256(1), uint256(2), true, address(0x111), address(0x222), nonce, deadline, 3, _sign(digest))
+            );
+            opData = abi.encode(uint256(1), uint256(2), true, address(0x111), address(0x222));
+        } else if (lane == 7) {
+            digest = MultisigHelper.digestProposeUpdateCommissionManager(
+                domain, target, address(replacement), nonce, deadline
+            );
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256(
+                        "ProposeUpdateCommissionManager(address target,address newCommissionManager,uint256 nonce,uint256 deadline)"
+                    ),
+                    target,
+                    address(replacement),
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "ProposeUpdateCommissionManager(address newCommissionManager,uint256 nonce,uint256 deadline)"
+                                ),
+                                address(replacement),
+                                nonce,
+                                deadline
+                            )
+                        )
+                    )
+                );
+            }
+            submitData = abi.encodeCall(
+                MultisigProxy.proposeUpdateCommissionManager, (address(replacement), nonce, deadline, 3, _sign(digest))
+            );
+            opData = abi.encode(address(replacement));
+        } else if (lane == 8) {
+            digest =
+                MultisigHelper.digestProposeUpdateRouteRegistry(domain, target, address(replacement), nonce, deadline);
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256(
+                        "ProposeUpdateRouteRegistry(address target,address newRouteRegistry,uint256 nonce,uint256 deadline)"
+                    ),
+                    target,
+                    address(replacement),
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "ProposeUpdateRouteRegistry(address newRouteRegistry,uint256 nonce,uint256 deadline)"
+                                ),
+                                address(replacement),
+                                nonce,
+                                deadline
+                            )
+                        )
+                    )
+                );
+            }
+            submitData = abi.encodeCall(
+                MultisigProxy.proposeUpdateRouteRegistry, (address(replacement), nonce, deadline, 3, _sign(digest))
+            );
+            opData = abi.encode(address(replacement));
+        } else if (lane == 9) {
+            digest = MultisigHelper.digestProposePauseInflow(domain, target, nonce, deadline);
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256("ProposePauseInflow(address target,uint256 nonce,uint256 deadline)"),
+                    target,
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(keccak256("ProposePauseInflow(uint256 nonce,uint256 deadline)"), nonce, deadline)
+                        )
+                    )
+                );
+            }
+            submitData = abi.encodeCall(MultisigProxy.proposePauseInflow, (nonce, deadline, 3, _sign(digest)));
+            opData = bytes("");
+        } else if (lane == 10) {
+            digest = MultisigHelper.digestProposeUnpauseInflow(domain, target, nonce, deadline);
+            independentHash = keccak256(
+                abi.encode(
+                    keccak256("ProposeUnpauseInflow(address target,uint256 nonce,uint256 deadline)"),
+                    target,
+                    nonce,
+                    deadline
+                )
+            );
+            assertEq(digest, keccak256(abi.encodePacked("\x19\x01", domain, independentHash)));
+            if (legacy) {
+                digest = keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        domain,
+                        keccak256(
+                            abi.encode(
+                                keccak256("ProposeUnpauseInflow(uint256 nonce,uint256 deadline)"), nonce, deadline
+                            )
+                        )
+                    )
+                );
+            }
+            submitData = abi.encodeCall(MultisigProxy.proposeUnpauseInflow, (nonce, deadline, 3, _sign(digest)));
+            opData = bytes("");
+        } else {
+            revert("unknown lane");
+        }
+    }
+
+    function _submit(bytes memory data) private returns (bytes32 id) {
+        (bool ok, bytes memory result) = address(proxy).call(data);
+        if (!ok) assembly ("memory-safe") { revert(add(result, 32), mload(result)) }
+        return abi.decode(result, (bytes32));
+    }
+
+    function test_allLanes_executeOnSignedTarget() public {
+        for (uint256 lane; lane < 11; ++lane) {
+            uint256 snapshot = vm.snapshotState();
+            address target = _target(lane);
+            (bytes memory data, bytes memory opData) = _signedCall(lane, target, false);
+            bytes32 id = _submit(data);
+            assertEq(proxy.getProposal(id).expectedTarget, target);
+            uint256 beforeCalls = GovernanceTargetMock(target).calls();
+            vm.warp(block.timestamp + DELAY);
+            proxy.executeProposal(id, opData);
+            assertEq(GovernanceTargetMock(target).calls(), beforeCalls + 1);
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Executed));
+            assertTrue(vm.revertToState(snapshot));
+        }
+    }
+
+    function test_allLanes_pendingProposalCannotFollowRotatedTarget() public {
+        for (uint256 lane; lane < 11; ++lane) {
+            uint256 snapshot = vm.snapshotState();
+            address target = _target(lane);
+            (bytes memory data, bytes memory opData) = _signedCall(lane, target, false);
+            bytes32 id = _submit(data);
+            (bytes32 rotation, bytes memory rotationData) = _rotation(lane);
+            vm.warp(block.timestamp + DELAY);
+            proxy.executeProposal(rotation, rotationData);
+            uint256 oldCalls = GovernanceTargetMock(target).calls();
+            uint256 newCalls = replacement.calls();
+            uint256 nonce = proxy.proposalNonce();
+            vm.expectRevert(
+                abi.encodeWithSelector(IMultisigProxy.StaleProposalTarget.selector, target, address(replacement))
+            );
+            proxy.executeProposal(id, opData);
+            assertEq(GovernanceTargetMock(target).calls(), oldCalls);
+            assertEq(replacement.calls(), newCalls);
+            assertEq(proxy.proposalNonce(), nonce);
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+            assertTrue(vm.revertToState(snapshot));
+        }
+    }
+
+    function test_allLanes_signaturesCannotFollowRotationBeforeSubmission() public {
+        for (uint256 lane; lane < 11; ++lane) {
+            uint256 snapshot = vm.snapshotState();
+            (bytes32 rotation, bytes memory rotationData) = _rotation(lane);
+            (bytes memory data,) = _signedCall(lane, _target(lane), false);
+            uint256 nonce = proxy.proposalNonce();
+            vm.warp(block.timestamp + DELAY);
+            proxy.executeProposal(rotation, rotationData);
+            (bool ok, bytes memory result) = address(proxy).call(data);
+            assertFalse(ok);
+            assertEq(result, abi.encodeWithSelector(IMultisigProxy.InvalidSignature.selector));
+            assertEq(proxy.proposalNonce(), nonce);
+            assertTrue(vm.revertToState(snapshot));
+        }
+    }
+
+    function test_allLanes_rejectWrongTargetAndLegacySignatures() public {
+        for (uint256 lane; lane < 11; ++lane) {
+            uint256 nonce = proxy.proposalNonce();
+            (bytes memory wrong,) = _signedCall(lane, address(replacement), false);
+            (bool ok, bytes memory result) = address(proxy).call(wrong);
+            assertFalse(ok);
+            assertEq(result, abi.encodeWithSelector(IMultisigProxy.InvalidSignature.selector));
+            (bytes memory legacy,) = _signedCall(lane, _target(lane), true);
+            (ok, result) = address(proxy).call(legacy);
+            assertFalse(ok);
+            assertEq(result, abi.encodeWithSelector(IMultisigProxy.InvalidSignature.selector));
+            assertEq(proxy.proposalNonce(), nonce);
+        }
+    }
+
+    function test_allLanes_rejectTamperedExecutionData() public {
+        for (uint256 lane; lane < 11; ++lane) {
+            uint256 snapshot = vm.snapshotState();
+            (bytes memory data, bytes memory opData) = _signedCall(lane, _target(lane), false);
+            bytes32 id = _submit(data);
+            vm.warp(block.timestamp + DELAY);
+            vm.expectRevert(IMultisigProxy.DataMismatch.selector);
+            proxy.executeProposal(id, bytes.concat(opData, hex"01"));
+            assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+            assertTrue(vm.revertToState(snapshot));
+        }
+    }
+
+    function test_adapterDisableInvalidatesPendingAdminCall() public {
+        (bytes memory data, bytes memory opData) = _signedCall(3, address(adapter), false);
+        bytes32 id = _submit(data);
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 disable = proxy.proposeDisableLZAdapter(
+            nonce, deadline, 3, _sign(MultisigHelper.digestProposeDisableLZAdapter(domain, nonce, deadline))
+        );
+        vm.warp(block.timestamp + DELAY);
+        proxy.executeProposal(disable, "");
+        vm.expectRevert(
+            abi.encodeWithSelector(IMultisigProxy.StaleProposalTarget.selector, address(adapter), address(0))
+        );
+        proxy.executeProposal(id, opData);
+        assertEq(adapter.calls(), 0);
+        assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+    }
+
+    function test_registryLanesRejectUnsetRegistryWithoutConsumingNonce() public {
+        bridge.setRouteRegistry(address(0));
+        for (uint256 lane = 2; lane <= 6; lane += 4) {
+            uint256 nonce = proxy.proposalNonce();
+            (bytes memory data,) = _signedCall(lane, address(0), false);
+            (bool ok, bytes memory result) = address(proxy).call(data);
+            assertFalse(ok);
+            assertEq(result, abi.encodeWithSelector(IMultisigProxy.ZeroTarget.selector));
+            assertEq(proxy.proposalNonce(), nonce);
+        }
     }
 }

@@ -13,7 +13,7 @@ import {MultisigHelper} from "../../test/mocks/MultisigHelper.sol";
 ///   PROXY_ADDRESS     — MultisigProxy address
 ///   FED_PKS           — comma-separated federation private keys
 ///   FED_BITMAP        — participating signer bitmap
-///   DEADLINE_OFFSET   — seconds from now
+///   DEADLINE_OFFSET   — seconds from now, at most 86400
 contract EmergencyPause is Script {
     function run() external {
         uint256 pk = vm.envUint("PRIVATE_KEY");

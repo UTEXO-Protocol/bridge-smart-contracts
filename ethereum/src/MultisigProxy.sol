@@ -85,11 +85,10 @@ contract MultisigProxy is IMultisigProxy {
     ///         (`_propose` and all typed proposal entrypoints).
     uint256 public proposalNonce;
 
-    /// @notice Sequential nonce for the emergency lane: `emergencyPause` /
-    ///         `emergencyUnpause`. Kept separate from `proposalNonce` so an
+    /// @notice Sequential nonce shared by federation emergency pause/unpause
+    ///         and every successful guardian pause. Kept separate from `proposalNonce` so an
     ///         emergency action cannot invalidate an already-signed regular
-    ///         proposal. Cross-lane replay is independently prevented by
-    ///         each operation's distinct EIP-712 typehash.
+    ///         proposal.
     uint256 public emergencyNonce;
 
     /// @notice Minimum delay (seconds) between proposal creation and execution.
@@ -106,15 +105,16 @@ contract MultisigProxy is IMultisigProxy {
     // Constants
     // =========================================================================
 
-    /// @notice Maximum allowed time between proposal creation and its deadline.
+    /// @notice Maximum future deadline offset at submission for proposals and cancellations.
     uint256 public constant MAX_PROPOSAL_LIFETIME = 30 days;
 
-    /// @notice Maximum allowed lifetime of a TEE-signed `fundsOutCall` /
-    ///         `lzFundsOutCall` deadline. Tighter than `MAX_PROPOSAL_LIFETIME` because enclave
-    ///         operations (e.g. `fundsOut`) are meant to be executed promptly
-    ///         after signing; a short ceiling limits how long a leaked or
-    ///         pre-signed payload stays executable while its nonce is unconsumed.
+    /// @notice Maximum future deadline offset at submission for typed enclave operations.
+    /// @dev Bounds the deadline relative to block time, not the age of a signature.
     uint256 public constant MAX_TEE_DEADLINE = 1 days;
+
+    /// @notice Maximum future deadline offset at submission for federation emergency pause/unpause.
+    /// @dev Bounds the deadline relative to block time, not the age of a signature.
+    uint256 public constant MAX_EMERGENCY_DEADLINE = 1 days;
 
     /// @notice Hard upper bound on the size of either signer set. Bounds the
     ///         O(N^2) duplicate/disjointness checks and stays far within the
@@ -131,6 +131,10 @@ contract MultisigProxy is IMultisigProxy {
     ///         to guard `callData` against payloads too short to even carry a
     ///         selector before it is sliced via `calldataload`.
     uint256 public constant SELECTOR_LENGTH = 4;
+
+    /// @dev Maximum upgrade initialization bytes, including the selector.
+    ///      Keep aligned with BridgeProxy's direct upgrade limit.
+    uint256 private constant _MAX_UPGRADE_CALLDATA_LENGTH = 4096;
 
     /// @notice CommissionManager withdrawal selectors that generic raw-call
     ///         paths are NOT allowed to call.
@@ -182,7 +186,7 @@ contract MultisigProxy is IMultisigProxy {
 
     // Federation propose — typed EIP-712 structs per operation (Bridge side)
     bytes32 private constant _PROPOSE_ADMIN_EXECUTE_TYPEHASH =
-        keccak256("ProposeAdminExecute(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
+        keccak256("ProposeAdminExecute(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH = keccak256(
         "ProposeUpdateEnclaveSigners(uint256 sourceChainId,address[] newSigners,uint256 newThreshold,uint256 nonce,uint256 deadline)"
     );
@@ -203,20 +207,24 @@ contract MultisigProxy is IMultisigProxy {
 
     // Federation propose — CommissionManager side
     bytes32 private constant _PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH = keccak256(
-        "ProposeAdminExecuteCommissionManager(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+        "ProposeAdminExecuteCommissionManager(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
     );
-    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH =
-        keccak256("ProposeAdminExecuteRouteRegistry(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
-    bytes32 private constant _PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH =
-        keccak256("ProposeWithdrawTokenCommissionCM(address token,uint256 amount,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH = keccak256(
+        "ProposeAdminExecuteRouteRegistry(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+    );
+    bytes32 private constant _PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH = keccak256(
+        "ProposeWithdrawTokenCommissionCM(address target,address token,uint256 amount,uint256 nonce,uint256 deadline)"
+    );
     bytes32 private constant _PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH =
-        keccak256("ProposeWithdrawNativeCommissionCM(uint256 amount,uint256 nonce,uint256 deadline)");
-    bytes32 private constant _PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH =
-        keccak256("ProposeUpdateCommissionManager(address newCommissionManager,uint256 nonce,uint256 deadline)");
+        keccak256("ProposeWithdrawNativeCommissionCM(address target,uint256 amount,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH = keccak256(
+        "ProposeUpdateCommissionManager(address target,address newCommissionManager,uint256 nonce,uint256 deadline)"
+    );
 
     // Federation propose — LZAdapter side
-    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH =
-        keccak256("ProposeAdminExecuteAdapter(bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
+    bytes32 private constant _PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH = keccak256(
+        "ProposeAdminExecuteAdapter(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)"
+    );
     bytes32 private constant _PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH =
         keccak256("ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH =
@@ -224,10 +232,10 @@ contract MultisigProxy is IMultisigProxy {
 
     // Federation propose — RouteRegistry side
     bytes32 private constant _PROPOSE_SET_ROUTE_TYPEHASH = keccak256(
-        "ProposeSetRoute(uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)"
+        "ProposeSetRoute(address target,uint256 sourceChainId,uint256 destChainId,bool enabled,address finalityVerifier,address settlementModule,uint256 nonce,uint256 deadline)"
     );
     bytes32 private constant _PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH =
-        keccak256("ProposeUpdateRouteRegistry(address newRouteRegistry,uint256 nonce,uint256 deadline)");
+        keccak256("ProposeUpdateRouteRegistry(address target,address newRouteRegistry,uint256 nonce,uint256 deadline)");
 
     // Cancel
     bytes32 private constant _CANCEL_PROPOSAL_TYPEHASH =
@@ -240,9 +248,9 @@ contract MultisigProxy is IMultisigProxy {
 
     // Federation propose — planned inflow-only pause (timelocked)
     bytes32 private constant _PROPOSE_PAUSE_INFLOW_TYPEHASH =
-        keccak256("ProposePauseInflow(uint256 nonce,uint256 deadline)");
+        keccak256("ProposePauseInflow(address target,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_UNPAUSE_INFLOW_TYPEHASH =
-        keccak256("ProposeUnpauseInflow(uint256 nonce,uint256 deadline)");
+        keccak256("ProposeUnpauseInflow(address target,uint256 nonce,uint256 deadline)");
 
     // =========================================================================
     // Constructor
@@ -307,7 +315,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external {
-        _checkTeeTiming(deadline);
+        _checkDeadline(deadline, MAX_TEE_DEADLINE);
         // Select the enclave set by the release's source chain. `sourceChainId`
         // is committed to in the digest below, so a signature is bound to the
         // set of exactly one source chain. A zero threshold = unregistered.
@@ -373,7 +381,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external {
-        _checkTeeTiming(deadline);
+        _checkDeadline(deadline, MAX_TEE_DEADLINE);
         if (enclaveThreshold[params.sourceChainId] == 0) revert UnknownSourceChain(params.sourceChainId);
         if (nonce != teeNonce[params.sourceChainId]) revert InvalidNonce();
 
@@ -446,7 +454,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 enclaveBitmap,
         bytes[] calldata enclaveSigs
     ) external payable {
-        _checkTeeTiming(deadline);
+        _checkDeadline(deadline, MAX_TEE_DEADLINE);
         if (enclaveThreshold[params.sourceChainId] == 0) revert UnknownSourceChain(params.sourceChainId);
         if (nonce != teeNonce[params.sourceChainId]) revert InvalidNonce();
 
@@ -543,11 +551,10 @@ contract MultisigProxy is IMultisigProxy {
         );
     }
 
-    /// @dev Shared timing guard for the typed enclave methods: not expired, and
-    ///      the signed deadline cannot sit further than `MAX_TEE_DEADLINE` ahead.
-    function _checkTeeTiming(uint256 deadline) private view {
+    /// @dev Reject expired deadlines and deadlines further than the supplied maximum offset ahead.
+    function _checkDeadline(uint256 deadline, uint256 maxDeadlineOffset) private view {
         if (block.timestamp > deadline) revert Expired();
-        if (deadline > block.timestamp + MAX_TEE_DEADLINE) revert DeadlineTooFar();
+        if (deadline > block.timestamp + maxDeadlineOffset) revert DeadlineTooFar();
     }
 
     // =========================================================================
@@ -556,7 +563,7 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @inheritdoc IMultisigProxy
     function emergencyPause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external {
-        if (block.timestamp > deadline) revert Expired();
+        _checkDeadline(deadline, MAX_EMERGENCY_DEADLINE);
         if (nonce != emergencyNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(_EMERGENCY_PAUSE_TYPEHASH, nonce, deadline)));
@@ -574,7 +581,7 @@ contract MultisigProxy is IMultisigProxy {
 
     /// @inheritdoc IMultisigProxy
     function emergencyUnpause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external {
-        if (block.timestamp > deadline) revert Expired();
+        _checkDeadline(deadline, MAX_EMERGENCY_DEADLINE);
         if (nonce != emergencyNonce) revert InvalidNonce();
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(_EMERGENCY_UNPAUSE_TYPEHASH, nonce, deadline)));
@@ -591,6 +598,7 @@ contract MultisigProxy is IMultisigProxy {
     /// @inheritdoc IMultisigProxy
     function guardianEmergencyPause() external {
         if (msg.sender != emergencyGuardian) revert UnauthorizedEmergencyGuardian(msg.sender);
+        emergencyNonce++;
         _emergencyPauseBridge();
         emit GuardianEmergencyPaused(msg.sender);
     }
@@ -614,10 +622,15 @@ contract MultisigProxy is IMultisigProxy {
 
         _requireAllowedGenericSelector(selector);
 
-        bytes32 structHash =
-            keccak256(abi.encode(_PROPOSE_ADMIN_EXECUTE_TYPEHASH, selector, keccak256(callData), nonce, deadline));
+        address target = bridge;
 
-        return _propose(OperationType.AdminExecute, callData, nonce, deadline, structHash, fedBitmap, fedSigs);
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_ADMIN_EXECUTE_TYPEHASH, target, selector, keccak256(callData), nonce, deadline)
+        );
+
+        return _proposeForTarget(
+            OperationType.AdminExecute, callData, nonce, deadline, structHash, fedBitmap, fedSigs, target
+        );
     }
 
     /// @inheritdoc IMultisigProxy
@@ -720,10 +733,7 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        if (bridgeProxy != bridge) revert StaleBridgeTarget(bridgeProxy, bridge);
-        if (newImplementation.code.length == 0 || newImplementation == bridgeProxy) {
-            revert InvalidBridgeImplementation(newImplementation);
-        }
+        _requireValidBridgeUpgrade(bridgeProxy, newImplementation, initializationData);
 
         bytes32 structHash = keccak256(
             abi.encode(
@@ -802,11 +812,21 @@ contract MultisigProxy is IMultisigProxy {
         // on this generic path up front (recipient safety remains in CM).
         _requireAllowedGenericSelector(selector);
 
-        bytes32 structHash =
-            keccak256(abi.encode(_PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, selector, keccak256(callData), nonce, deadline));
+        address target = commissionManager;
 
-        return _propose(
-            OperationType.AdminExecuteCommissionManager, callData, nonce, deadline, structHash, fedBitmap, fedSigs
+        bytes32 structHash = keccak256(
+            abi.encode(_PROPOSE_ADMIN_EXECUTE_CM_TYPEHASH, target, selector, keccak256(callData), nonce, deadline)
+        );
+
+        return _proposeForTarget(
+            OperationType.AdminExecuteCommissionManager,
+            callData,
+            nonce,
+            deadline,
+            structHash,
+            fedBitmap,
+            fedSigs,
+            target
         );
     }
 
@@ -825,12 +845,17 @@ contract MultisigProxy is IMultisigProxy {
 
         _requireAllowedGenericSelector(selector);
 
+        address target = IBridge(bridge).routeRegistry();
+
         bytes32 structHash = keccak256(
-            abi.encode(_PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH, selector, keccak256(callData), nonce, deadline)
+            abi.encode(
+                _PROPOSE_ADMIN_EXECUTE_ROUTE_REGISTRY_TYPEHASH, target, selector, keccak256(callData), nonce, deadline
+            )
         );
 
-        return
-            _propose(OperationType.AdminExecuteRouteRegistry, callData, nonce, deadline, structHash, fedBitmap, fedSigs);
+        return _proposeForTarget(
+            OperationType.AdminExecuteRouteRegistry, callData, nonce, deadline, structHash, fedBitmap, fedSigs, target
+        );
     }
 
     /// @inheritdoc IMultisigProxy
@@ -842,18 +867,21 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
+        address target = commissionManager;
+
         bytes32 structHash = keccak256(
-            abi.encode(_PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH, token, amount, nonce, deadline)
+            abi.encode(_PROPOSE_WITHDRAW_TOKEN_COMMISSION_CM_TYPEHASH, target, token, amount, nonce, deadline)
         );
 
-        return _propose(
+        return _proposeForTarget(
             OperationType.WithdrawTokenCommissionCM,
             abi.encode(token, amount),
             nonce,
             deadline,
             structHash,
             fedBitmap,
-            fedSigs
+            fedSigs,
+            target
         );
     }
 
@@ -865,18 +893,20 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(
-            abi.encode(_PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH, amount, nonce, deadline)
-        );
+        address target = commissionManager;
 
-        return _propose(
+        bytes32 structHash =
+            keccak256(abi.encode(_PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH, target, amount, nonce, deadline));
+
+        return _proposeForTarget(
             OperationType.WithdrawNativeCommissionCM,
             abi.encode(amount),
             nonce,
             deadline,
             structHash,
             fedBitmap,
-            fedSigs
+            fedSigs,
+            target
         );
     }
 
@@ -888,18 +918,21 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
+        address target = bridge;
+
         bytes32 structHash = keccak256(
-            abi.encode(_PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH, newCommissionManager, nonce, deadline)
+            abi.encode(_PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH, target, newCommissionManager, nonce, deadline)
         );
 
-        return _propose(
+        return _proposeForTarget(
             OperationType.UpdateCommissionManager,
             abi.encode(newCommissionManager),
             nonce,
             deadline,
             structHash,
             fedBitmap,
-            fedSigs
+            fedSigs,
+            target
         );
     }
 
@@ -922,11 +955,15 @@ contract MultisigProxy is IMultisigProxy {
 
         _requireAllowedGenericSelector(selector);
 
+        address target = lzAdapter;
+
         bytes32 structHash = keccak256(
-            abi.encode(_PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, selector, keccak256(callData), nonce, deadline)
+            abi.encode(_PROPOSE_ADMIN_EXECUTE_ADAPTER_TYPEHASH, target, selector, keccak256(callData), nonce, deadline)
         );
 
-        return _propose(OperationType.AdminExecuteAdapter, callData, nonce, deadline, structHash, fedBitmap, fedSigs);
+        return _proposeForTarget(
+            OperationType.AdminExecuteAdapter, callData, nonce, deadline, structHash, fedBitmap, fedSigs, target
+        );
     }
 
     /// @inheritdoc IMultisigProxy
@@ -970,9 +1007,12 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
+        address target = IBridge(bridge).routeRegistry();
+
         bytes32 structHash = keccak256(
             abi.encode(
                 _PROPOSE_SET_ROUTE_TYPEHASH,
+                target,
                 sourceChainId,
                 destChainId,
                 enabled,
@@ -983,14 +1023,15 @@ contract MultisigProxy is IMultisigProxy {
             )
         );
 
-        return _propose(
+        return _proposeForTarget(
             OperationType.SetRoute,
             abi.encode(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule),
             nonce,
             deadline,
             structHash,
             fedBitmap,
-            fedSigs
+            fedSigs,
+            target
         );
     }
 
@@ -1002,18 +1043,20 @@ contract MultisigProxy is IMultisigProxy {
         uint256 fedBitmap,
         bytes[] calldata fedSigs
     ) external returns (bytes32) {
-        bytes32 structHash = keccak256(
-            abi.encode(_PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH, newRouteRegistry, nonce, deadline)
-        );
+        address target = bridge;
 
-        return _propose(
+        bytes32 structHash =
+            keccak256(abi.encode(_PROPOSE_UPDATE_ROUTE_REGISTRY_TYPEHASH, target, newRouteRegistry, nonce, deadline));
+
+        return _proposeForTarget(
             OperationType.UpdateRouteRegistry,
             abi.encode(newRouteRegistry),
             nonce,
             deadline,
             structHash,
             fedBitmap,
-            fedSigs
+            fedSigs,
+            target
         );
     }
 
@@ -1053,9 +1096,11 @@ contract MultisigProxy is IMultisigProxy {
         external
         returns (bytes32)
     {
-        bytes32 structHash = keccak256(abi.encode(_PROPOSE_PAUSE_INFLOW_TYPEHASH, nonce, deadline));
+        address target = bridge;
 
-        return _propose(OperationType.PauseInflow, "", nonce, deadline, structHash, fedBitmap, fedSigs);
+        bytes32 structHash = keccak256(abi.encode(_PROPOSE_PAUSE_INFLOW_TYPEHASH, target, nonce, deadline));
+
+        return _proposeForTarget(OperationType.PauseInflow, "", nonce, deadline, structHash, fedBitmap, fedSigs, target);
     }
 
     /// @inheritdoc IMultisigProxy
@@ -1064,9 +1109,12 @@ contract MultisigProxy is IMultisigProxy {
         external
         returns (bytes32)
     {
-        bytes32 structHash = keccak256(abi.encode(_PROPOSE_UNPAUSE_INFLOW_TYPEHASH, nonce, deadline));
+        address target = bridge;
 
-        return _propose(OperationType.UnpauseInflow, "", nonce, deadline, structHash, fedBitmap, fedSigs);
+        bytes32 structHash = keccak256(abi.encode(_PROPOSE_UNPAUSE_INFLOW_TYPEHASH, target, nonce, deadline));
+
+        return
+            _proposeForTarget(OperationType.UnpauseInflow, "", nonce, deadline, structHash, fedBitmap, fedSigs, target);
     }
 
     // =========================================================================
@@ -1078,6 +1126,7 @@ contract MultisigProxy is IMultisigProxy {
         external
     {
         if (block.timestamp > deadline) revert Expired();
+        if (deadline > block.timestamp + MAX_PROPOSAL_LIFETIME) revert DeadlineTooFar();
 
         Proposal storage p = _proposals[proposalId];
         if (p.status != ProposalStatus.Pending) revert NotPending();
@@ -1107,9 +1156,19 @@ contract MultisigProxy is IMultisigProxy {
         if (block.timestamp > p.deadline) revert ProposalExpired();
         if (keccak256(opData) != p.dataHash) revert DataMismatch();
 
+        address currentTarget;
+        // Bound proposals cannot be created with a zero target. Zero marks
+        // local operations and lanes with their own explicit-target checks.
+        if (p.expectedTarget != address(0)) {
+            currentTarget = _proposalTarget(p.opType);
+            if (currentTarget != p.expectedTarget) {
+                revert StaleProposalTarget(p.expectedTarget, currentTarget);
+            }
+        }
+
         p.status = ProposalStatus.Executed;
 
-        _executeByType(p.opType, opData);
+        _executeByType(p.opType, opData, currentTarget);
 
         emit ProposalExecuted(proposalId, p.opType);
     }
@@ -1169,6 +1228,34 @@ contract MultisigProxy is IMultisigProxy {
         bytes32 structHash,
         uint256 fedBitmap,
         bytes[] calldata fedSigs
+    ) private returns (bytes32) {
+        return _storeProposal(opType, opData, nonce, deadline, structHash, fedBitmap, fedSigs, address(0));
+    }
+
+    /// @dev A zero snapshot is reserved for operations without dynamic targets.
+    function _proposeForTarget(
+        OperationType opType,
+        bytes memory opData,
+        uint256 nonce,
+        uint256 deadline,
+        bytes32 structHash,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs,
+        address expectedTarget
+    ) private returns (bytes32) {
+        if (expectedTarget == address(0)) revert ZeroTarget();
+        return _storeProposal(opType, opData, nonce, deadline, structHash, fedBitmap, fedSigs, expectedTarget);
+    }
+
+    function _storeProposal(
+        OperationType opType,
+        bytes memory opData,
+        uint256 nonce,
+        uint256 deadline,
+        bytes32 structHash,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs,
+        address expectedTarget
     ) private returns (bytes32 proposalId) {
         if (block.timestamp > deadline) revert Expired();
         if (deadline > block.timestamp + MAX_PROPOSAL_LIFETIME) revert DeadlineTooFar();
@@ -1187,6 +1274,7 @@ contract MultisigProxy is IMultisigProxy {
 
         _proposals[proposalId] = Proposal({
             dataHash: dataHash,
+            expectedTarget: expectedTarget,
             proposedAt: block.timestamp,
             deadline: deadline,
             timelockSnapshot: timelockDuration,
@@ -1202,12 +1290,32 @@ contract MultisigProxy is IMultisigProxy {
     // Internal — execute router
     // =========================================================================
 
+    /// @dev External targets for the eleven governance lanes that previously
+    ///      resolved a mutable pointer only at execution. Local configuration,
+    ///      explicit ownership transfers and upgrades use their existing rules.
+    function _proposalTarget(OperationType opType) private view returns (address) {
+        if (
+            opType == OperationType.AdminExecute || opType == OperationType.UpdateCommissionManager
+                || opType == OperationType.UpdateRouteRegistry || opType == OperationType.PauseInflow
+                || opType == OperationType.UnpauseInflow
+        ) return bridge;
+        if (
+            opType == OperationType.AdminExecuteCommissionManager || opType == OperationType.WithdrawTokenCommissionCM
+                || opType == OperationType.WithdrawNativeCommissionCM
+        ) return commissionManager;
+        if (opType == OperationType.AdminExecuteAdapter) return lzAdapter;
+        if (opType == OperationType.AdminExecuteRouteRegistry || opType == OperationType.SetRoute) {
+            return IBridge(bridge).routeRegistry();
+        }
+        return address(0);
+    }
+
     /// @dev Routes an executed proposal to the appropriate handler.
-    function _executeByType(OperationType opType, bytes calldata opData) private {
+    function _executeByType(OperationType opType, bytes calldata opData, address target) private {
         if (opType == OperationType.AdminExecute) {
             // opData = raw bridge callData
             _requireAllowedGenericSelector(_firstSelector(opData));
-            (bool ok, bytes memory ret) = bridge.call(opData);
+            (bool ok, bytes memory ret) = target.call(opData);
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.UpdateEnclaveSigners) {
             (uint256 sourceChainId, address[] memory newSigners, uint256 newThreshold) =
@@ -1241,8 +1349,7 @@ contract MultisigProxy is IMultisigProxy {
             _federationSigners = newSigners;
             federationThreshold = newThreshold;
             federationSignerSetVersion++;
-            emit FederationSignersUpdated(newSigners, newThreshold);
-            emit FederationSignerSetVersionUpdated(federationSignerSetVersion);
+            emit FederationSignersUpdated(newSigners, newThreshold, federationSignerSetVersion);
         } else if (opType == OperationType.UpdateBridge) {
             address newBridge = abi.decode(opData, (address));
             if (newBridge == address(0)) revert ZeroBridge();
@@ -1266,7 +1373,7 @@ contract MultisigProxy is IMultisigProxy {
             // governance operations.
             bytes4 selector = _firstSelector(opData);
             _requireAllowedGenericSelector(selector);
-            (bool ok, bytes memory ret) = commissionManager.call(opData);
+            (bool ok, bytes memory ret) = target.call(opData);
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.AdminExecuteRouteRegistry) {
             // opData = raw RouteRegistry callData. Registry resolved from Bridge
@@ -1274,7 +1381,7 @@ contract MultisigProxy is IMultisigProxy {
             // remains available for Ownable2Step handoffs; initiating a transfer
             // is reserved for the typed managed-ownership operation.
             _requireAllowedGenericSelector(_firstSelector(opData));
-            address registry = IBridge(bridge).routeRegistry();
+            address registry = target;
             if (registry == address(0)) revert ZeroTarget();
             (bool ok, bytes memory ret) = registry.call(opData);
             _propagateRevert(ok, ret);
@@ -1282,21 +1389,21 @@ contract MultisigProxy is IMultisigProxy {
             (address token, uint256 amount) = abi.decode(opData, (address, uint256));
             address recipient = commissionRecipient();
             (bool ok, bytes memory ret) =
-                commissionManager.call(abi.encodeCall(ICommissionManager.withdrawTokenCommission, (token, amount)));
+                target.call(abi.encodeCall(ICommissionManager.withdrawTokenCommission, (token, amount)));
             _propagateRevert(ok, ret);
             emit CommissionWithdrawn(token, amount, recipient);
         } else if (opType == OperationType.WithdrawNativeCommissionCM) {
             uint256 amount = abi.decode(opData, (uint256));
             address recipient = commissionRecipient();
             (bool ok, bytes memory ret) =
-                commissionManager.call(abi.encodeCall(ICommissionManager.withdrawNativeCommission, (amount)));
+                target.call(abi.encodeCall(ICommissionManager.withdrawNativeCommission, (amount)));
             _propagateRevert(ok, ret);
             emit NativeCommissionWithdrawn(amount, recipient);
         } else if (opType == OperationType.UpdateCommissionManager) {
             address newCm = abi.decode(opData, (address));
             if (newCm == address(0)) revert ZeroCommissionManager();
             address old = commissionManager;
-            IBridge(bridge).setCommissionManager(newCm);
+            IBridge(target).setCommissionManager(newCm);
             commissionManager = newCm;
             emit CommissionManagerUpdated(old, newCm);
         } else if (opType == OperationType.AdminExecuteAdapter) {
@@ -1304,7 +1411,7 @@ contract MultisigProxy is IMultisigProxy {
             // first via UpdateLZAdapter; a zero target closes the path.
             _requireAllowedGenericSelector(_firstSelector(opData));
             if (lzAdapter == address(0)) revert ZeroTarget();
-            (bool ok, bytes memory ret) = lzAdapter.call(opData);
+            (bool ok, bytes memory ret) = target.call(opData);
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.UpdateLZAdapter) {
             address newAdapter = abi.decode(opData, (address));
@@ -1327,7 +1434,7 @@ contract MultisigProxy is IMultisigProxy {
                 address settlementModule
             ) = abi.decode(opData, (uint256, uint256, bool, address, address));
 
-            address registry = IBridge(bridge).routeRegistry();
+            address registry = target;
             if (registry == address(0)) revert ZeroTarget();
             IRouteRegistry(registry).setRoute(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule);
         } else if (opType == OperationType.UpdateRouteRegistry) {
@@ -1336,28 +1443,26 @@ contract MultisigProxy is IMultisigProxy {
             // constructor `bridge_`; otherwise dispatcher calls revert
             // `NotBridge` and the route plane goes dark.
             address newRegistry = abi.decode(opData, (address));
-            IBridge(bridge).setRouteRegistry(newRegistry);
+            IBridge(target).setRouteRegistry(newRegistry);
         } else if (opType == OperationType.PauseInflow) {
             // Planned inflow-only freeze (no payload). Withdrawals stay open.
-            (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("pauseInflow()"));
+            (bool ok, bytes memory ret) = target.call(abi.encodeWithSignature("pauseInflow()"));
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.UnpauseInflow) {
-            (bool ok, bytes memory ret) = bridge.call(abi.encodeWithSignature("unpauseInflow()"));
+            (bool ok, bytes memory ret) = target.call(abi.encodeWithSignature("unpauseInflow()"));
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.TransferManagedOwnership) {
-            (address target, address newOwner) = abi.decode(opData, (address, address));
-            _requireManagedOwnershipTarget(target);
+            (address ownershipTarget, address newOwner) = abi.decode(opData, (address, address));
+            _requireManagedOwnershipTarget(ownershipTarget);
             if (newOwner == address(0)) revert ZeroNewOwner();
-            (bool ok, bytes memory ret) = target.call(abi.encodeWithSelector(_SEL_TRANSFER_OWNERSHIP, newOwner));
+            (bool ok, bytes memory ret) =
+                ownershipTarget.call(abi.encodeWithSelector(_SEL_TRANSFER_OWNERSHIP, newOwner));
             _propagateRevert(ok, ret);
-            emit ManagedOwnershipTransferStarted(target, newOwner);
+            emit ManagedOwnershipTransferStarted(ownershipTarget, newOwner);
         } else if (opType == OperationType.UpgradeBridgeImplementation) {
             (address bridgeProxy, address newImplementation, bytes memory initializationData) =
                 abi.decode(opData, (address, address, bytes));
-            if (bridgeProxy != bridge) revert StaleBridgeTarget(bridgeProxy, bridge);
-            if (newImplementation.code.length == 0 || newImplementation == bridgeProxy) {
-                revert InvalidBridgeImplementation(newImplementation);
-            }
+            _requireValidBridgeUpgrade(bridgeProxy, newImplementation, initializationData);
             IBridgeProxy(bridgeProxy).upgradeToAndCall(newImplementation, initializationData);
             emit BridgeImplementationUpgraded(bridgeProxy, newImplementation);
         } else {
@@ -1514,6 +1619,28 @@ contract MultisigProxy is IMultisigProxy {
         }
     }
 
+    /// @dev Check at both proposal creation and execution: another matured
+    ///      upgrade can make a previously valid candidate the current implementation.
+    ///      Initialization must not directly invoke enclave-only release operations.
+    function _requireValidBridgeUpgrade(address bridgeProxy, address newImplementation, bytes memory initializationData)
+        private
+        view
+    {
+        if (bridgeProxy != bridge) revert StaleBridgeTarget(bridgeProxy, bridge);
+        if (
+            newImplementation.code.length == 0 || newImplementation == bridgeProxy
+                || newImplementation == IBridgeProxy(bridgeProxy).implementation()
+        ) revert InvalidBridgeImplementation(newImplementation);
+
+        if (initializationData.length > _MAX_UPGRADE_CALLDATA_LENGTH) {
+            revert UpgradeCallDataTooLong(initializationData.length, _MAX_UPGRADE_CALLDATA_LENGTH);
+        }
+        if (initializationData.length != 0) {
+            if (initializationData.length < SELECTOR_LENGTH) revert CallDataTooShort();
+            _requireNotBridgeReleaseSelector(_firstSelector(initializationData));
+        }
+    }
+
     /// @dev First 4 bytes of `data` as a selector, or `0x00000000` if `data` is
     ///      shorter than a selector (such a payload can never be a withdrawal
     ///      call and the downstream raw call rejects it anyway).
@@ -1566,7 +1693,7 @@ contract MultisigProxy is IMultisigProxy {
         if (target == bridge || target == commissionManager || target == lzAdapter) return;
 
         address registry = IBridge(bridge).routeRegistry();
-        if (target == registry && registry != address(0)) return;
+        if (target == registry) return;
 
         revert InvalidManagedOwnershipTarget(target);
     }

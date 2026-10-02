@@ -85,8 +85,10 @@ interface IMultisigProxy {
     error LZAdapterNotSet();
     error InvalidLZAdapter();
     error UnauthorizedEmergencyGuardian(address caller);
+    error StaleProposalTarget(address expectedTarget, address currentTarget);
     error StaleBridgeTarget(address signedBridge, address currentBridge);
     error InvalidBridgeImplementation(address implementation);
+    error UpgradeCallDataTooLong(uint256 length, uint256 maxLength);
 
     // =========================================================================
     // Types
@@ -140,6 +142,8 @@ interface IMultisigProxy {
         bytes32 sourceBurnTxId;
     }
 
+    /// @notice expectedTarget is the signed external target for address-bound lanes;
+    ///         zero for operations using local state or existing explicit-target rules.
     struct Proposal {
         bytes32 dataHash;
         uint256 proposedAt;
@@ -148,6 +152,7 @@ interface IMultisigProxy {
         uint256 federationVersion;
         OperationType opType;
         ProposalStatus status;
+        address expectedTarget;
     }
 
     // =========================================================================
@@ -187,8 +192,7 @@ interface IMultisigProxy {
 
     // Emitted when proposals are executed
     event EnclaveSignersUpdated(uint256 indexed sourceChainId, address[] newSigners, uint256 newThreshold);
-    event FederationSignersUpdated(address[] newSigners, uint256 newThreshold);
-    event FederationSignerSetVersionUpdated(uint256 indexed newVersion);
+    event FederationSignersUpdated(address[] newSigners, uint256 newThreshold, uint256 indexed newVersion);
     event ManagedOwnershipTransferStarted(address indexed target, address indexed newOwner);
     event BridgeAddressUpdated(address indexed oldBridge, address indexed newBridge);
     event CommissionManagerUpdated(address indexed oldCm, address indexed newCm);
@@ -248,13 +252,16 @@ interface IMultisigProxy {
     // =========================================================================
 
     /// @notice Emergency pause the Bridge. Instant, no timelock.
+    /// @dev Deadline must be between the current timestamp and one day ahead.
     function emergencyPause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
     /// @notice Emergency unpause the Bridge. Instant, no timelock.
+    /// @dev Deadline must be between the current timestamp and one day ahead.
     function emergencyUnpause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
     /// @notice Emergency pause the Bridge directly as the configured guardian.
-    /// @dev Requires `msg.sender == emergencyGuardian`; no signatures, nonce, or deadline.
+    /// @dev Requires `msg.sender == emergencyGuardian`; no signatures, nonce argument, or deadline.
+    ///      Every successful call increments emergencyNonce, even if already paused.
     function guardianEmergencyPause() external;
 
     // =========================================================================
@@ -313,6 +320,9 @@ interface IMultisigProxy {
     /// @notice Propose upgrading the currently configured Bridge proxy.
     /// @dev The signed proxy address prevents a pending proposal from being
     ///      redirected if `bridge` changes before execution.
+    ///      Initialization calldata is capped at 4096 bytes including its selector,
+    ///      at both proposal creation and execution. Empty calldata is allowed;
+    ///      nonempty calldata must contain a full selector.
     function proposeUpgradeBridgeImplementation(
         address bridgeProxy,
         address newImplementation,
@@ -512,7 +522,8 @@ interface IMultisigProxy {
     // =========================================================================
 
     /// @notice Cancel a pending proposal. Requires M-of-N federation signatures.
-    /// @dev The authorization is bound directly to `proposalId`;
+    /// @dev Authorization is bound to `proposalId` and does not consume proposalNonce.
+    ///      Deadline must be between the current timestamp and MAX_PROPOSAL_LIFETIME ahead.
     function cancelProposal(bytes32 proposalId, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
     /// @notice Execute a proposal after the timelock has elapsed. Permissionless.

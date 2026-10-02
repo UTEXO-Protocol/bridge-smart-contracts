@@ -33,6 +33,49 @@ contract MalformedOwnerImplementation is MissingOwnerImplementation {
     }
 }
 
+/// @dev A view getter can report a different owner without changing storage.
+contract SpoofedOwnerImplementation is BridgeV2Mock {
+    address private immutable _reportedOwner;
+
+    constructor(address reportedOwner_) {
+        _reportedOwner = reportedOwner_;
+    }
+
+    function owner() public view override returns (address) {
+        return _reportedOwner;
+    }
+}
+
+/// @dev A genuine implementation may answer unknown selectors with one word.
+contract WordFallbackImplementation is BridgeV2Mock {
+    fallback() external {
+        assembly ("memory-safe") {
+            mstore(0, 42)
+            return(0, 32)
+        }
+    }
+}
+
+contract InvalidCompatibilityMarkerImplementation {
+    uint8 private immutable _mode;
+
+    constructor(uint8 mode_) {
+        _mode = mode_;
+    }
+
+    function initializeStub() external pure {}
+
+    fallback() external {
+        if (_mode == 2) revert("marker reverted");
+        bytes32 response = _mode == 0 ? bytes32(0) : keccak256("utexo.bridge.proxy.compatibility.v1");
+        uint256 length = _mode == 1 ? 31 : 32;
+        assembly ("memory-safe") {
+            mstore(0, response)
+            return(0, length)
+        }
+    }
+}
+
 contract BridgeProxyTest is Test {
     Bridge internal implementation;
     BridgeProxy internal proxy;
@@ -55,21 +98,86 @@ contract BridgeProxyTest is Test {
         assertEq(proxy.implementation(), address(implementation));
         assertEq(bridge.TOKEN(), address(token));
         assertEq(bridge.owner(), owner);
+        assertEq(_storedOwner(), owner, "owner occupies the OpenZeppelin Ownable namespace");
         assertEq(bridge.routeRegistry(), routeRegistry);
         assertEq(address(bridge.commissionManager()), commissionManager);
         assertEq(bridge.lzAdapter(), lzAdapter);
-        assertEq(bridge.minFundsInAmount(), 11);
-        assertEq(bridge.minFundsOutAmount(), 22);
+        assertEq(bridge.minFundsInAmount(), 22);
+        assertEq(bridge.minFundsOutAmount(), 11);
     }
 
     function test_implementationCannotBeInitialized() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        implementation.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 11, 22, owner);
+        implementation.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 22, 11, owner);
     }
 
     function test_proxyCannotBeInitializedTwice() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        bridge.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 11, 22, owner);
+        bridge.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 22, 11, owner);
+    }
+
+    function test_compatibilityMarker_constructorAcceptsImplementationWithWordFallback() public {
+        WordFallbackImplementation candidate = new WordFallbackImplementation();
+        BridgeProxy created = new BridgeProxy(address(candidate), _initializationData());
+        assertEq(created.implementation(), address(candidate));
+        assertEq(Bridge(address(created)).owner(), owner);
+        assertEq(Bridge(address(created)).TOKEN(), address(token));
+        assertEq(Bridge(address(created)).minFundsInAmount(), 22);
+        assertEq(Bridge(address(created)).minFundsOutAmount(), 11);
+    }
+
+    function test_compatibilityMarker_upgradeAcceptsImplementationWithWordFallback() public {
+        WordFallbackImplementation candidate = new WordFallbackImplementation();
+        // No implementation() getter exists: the fallback returns an arbitrary word.
+        (bool ok, bytes memory response) = address(candidate).staticcall(abi.encodeCall(BridgeProxy.implementation, ()));
+        assertTrue(ok);
+        assertEq(response.length, 32);
+        assertEq(abi.decode(response, (uint256)), 42);
+        assertEq(candidate.bridgeProxyCompatibilityUUID(), keccak256("utexo.bridge.proxy.compatibility.v1"));
+        token.mint(address(proxy), 123 ether);
+
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), abi.encodeCall(BridgeV2Mock.initializeV2, (777)));
+        assertEq(proxy.implementation(), address(candidate));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 777);
+        assertEq(bridge.owner(), owner);
+        assertEq(token.balanceOf(address(proxy)), 123 ether);
+    }
+
+    function test_compatibilityMarker_constructorRejectsNestedBridgeProxy() public {
+        Bridge candidateImplementation = new Bridge();
+        BridgeProxy candidate = new BridgeProxy(address(candidateImplementation), _initializationData());
+        vm.expectRevert(
+            abi.encodeWithSelector(BridgeProxy.IncompatibleBridgeImplementation.selector, address(candidate))
+        );
+        // The base constructor initializes before compatibility validation. Use
+        // a nondelegating selector to reach the marker check without recursion.
+        new BridgeProxy(address(candidate), abi.encodeCall(BridgeProxy.implementation, ()));
+    }
+
+    function test_compatibilityMarker_upgradeRejectsWrongTruncatedAndRevertingResponses() public {
+        for (uint8 mode; mode < 3; ++mode) {
+            InvalidCompatibilityMarkerImplementation candidate = new InvalidCompatibilityMarkerImplementation(mode);
+            vm.expectRevert(
+                abi.encodeWithSelector(BridgeProxy.IncompatibleBridgeImplementation.selector, address(candidate))
+            );
+            vm.prank(owner);
+            proxy.upgradeToAndCall(address(candidate), bytes(""));
+            assertEq(proxy.implementation(), address(implementation));
+            assertEq(bridge.owner(), owner);
+        }
+    }
+
+    function test_compatibilityMarker_constructorRejectsWrongTruncatedAndRevertingResponses() public {
+        for (uint8 mode; mode < 3; ++mode) {
+            InvalidCompatibilityMarkerImplementation candidate = new InvalidCompatibilityMarkerImplementation(mode);
+            vm.expectRevert(
+                abi.encodeWithSelector(BridgeProxy.IncompatibleBridgeImplementation.selector, address(candidate))
+            );
+            new BridgeProxy(
+                address(candidate), abi.encodeCall(InvalidCompatibilityMarkerImplementation.initializeStub, ())
+            );
+        }
     }
 
     function test_upgradeRequiresOwner() public {
@@ -163,10 +271,55 @@ contract BridgeProxyTest is Test {
         assertEq(upgraded.routeRegistry(), routeRegistry);
         assertEq(address(upgraded.commissionManager()), commissionManager);
         assertEq(upgraded.lzAdapter(), lzAdapter);
-        assertEq(upgraded.minFundsInAmount(), 11);
-        assertEq(upgraded.minFundsOutAmount(), 22);
+        assertEq(upgraded.minFundsInAmount(), 22);
+        assertEq(upgraded.minFundsOutAmount(), 11);
         assertTrue(upgraded.paused());
         assertEq(token.balanceOf(address(proxy)), 123 ether);
+    }
+
+    function test_upgradeCalldata_acceptsExactly4096Bytes() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4060));
+        assertEq(initializationData.length, 4096);
+
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), initializationData);
+        assertEq(proxy.implementation(), address(candidate));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 777);
+        assertEq(bridge.owner(), owner);
+    }
+
+    function test_upgradeCalldata_rejects4097BytesAndAllowsRetry() public {
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(4061));
+        token.mint(address(proxy), 123 ether);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(BridgeProxy.UpgradeCallDataTooLong.selector, uint256(4097), uint256(4096))
+        );
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), initializationData);
+        assertEq(proxy.implementation(), address(implementation));
+        assertEq(bridge.owner(), owner);
+        assertEq(token.balanceOf(address(proxy)), 123 ether);
+
+        // The rejected call did not consume the reinitializer version.
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), abi.encodeCall(BridgeV2Mock.initializeV2, (42)));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 42);
+    }
+
+    function testFuzz_upgradeCalldata_rejectsOversizedPayloads(uint256 length) public {
+        length = bound(length, 4097, 65_536);
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        bytes memory initializationData =
+            bytes.concat(abi.encodeCall(BridgeV2Mock.initializeV2, (777)), new bytes(length - 36));
+        vm.expectRevert(abi.encodeWithSelector(BridgeProxy.UpgradeCallDataTooLong.selector, length, uint256(4096)));
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), initializationData);
+        assertEq(proxy.implementation(), address(implementation));
     }
 
     function test_failedUpgradeInitializationRollsBackImplementation() public {
@@ -184,7 +337,7 @@ contract BridgeProxyTest is Test {
         new BridgeProxy(address(nextImplementation), bytes(""));
     }
 
-    function test_upgradeRejectsMissingRevertingAndMalformedOwner() public {
+    function test_storedOwnerUpgrade_recoversFromMissingRevertingAndMalformedGetter() public {
         address[3] memory candidates = [
             address(new MissingOwnerImplementation()),
             address(new RevertingOwnerImplementation()),
@@ -192,15 +345,101 @@ contract BridgeProxyTest is Test {
         ];
         for (uint256 i; i < candidates.length; ++i) {
             vm.prank(owner);
-            vm.expectRevert();
             proxy.upgradeToAndCall(candidates[i], bytes(""));
+            assertEq(proxy.implementation(), candidates[i]);
+            assertEq(_storedOwner(), owner);
+
+            vm.expectRevert(abi.encodeWithSelector(BridgeProxy.UnauthorizedBridgeOwner.selector, address(this)));
+            proxy.upgradeToAndCall(address(implementation), bytes(""));
+            vm.prank(owner);
+            proxy.upgradeToAndCall(address(implementation), bytes(""));
             assertEq(proxy.implementation(), address(implementation));
             assertEq(bridge.owner(), owner);
         }
-        // Failed upgrades do not prevent a later valid upgrade.
-        BridgeV2Mock valid = new BridgeV2Mock();
+    }
+
+    function test_storedOwnerUpgrade_rejectsHiddenOwnerChangesAndRollsBackInitializer() public {
+        SpoofedOwnerImplementation candidate = new SpoofedOwnerImplementation(owner);
+        address[2] memory changedOwners = [address(0), makeAddr("hiddenOwner")];
+        token.mint(address(proxy), 123 ether);
+        for (uint256 i; i < changedOwners.length; ++i) {
+            vm.expectRevert(
+                abi.encodeWithSelector(BridgeProxy.IncompatibleBridgeImplementation.selector, address(candidate))
+            );
+            vm.prank(owner);
+            proxy.upgradeToAndCall(
+                address(candidate), abi.encodeCall(BridgeV2Mock.initializeV2WithOwner, (changedOwners[i]))
+            );
+            assertEq(proxy.implementation(), address(implementation));
+            assertEq(_storedOwner(), owner);
+            assertEq(bridge.owner(), owner);
+            assertEq(token.balanceOf(address(proxy)), 123 ether);
+        }
+
+        // Neither the write to upgradeValue nor the reinitializer version persisted.
         vm.prank(owner);
-        proxy.upgradeToAndCall(address(valid), bytes(""));
+        proxy.upgradeToAndCall(address(candidate), bytes(""));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 0);
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), abi.encodeCall(BridgeV2Mock.initializeV2, (42)));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 42);
+    }
+
+    function test_storedOwnerUpgrade_rejectsGetterImpersonatorAndAllowsRealOwnerRecovery() public {
+        address impostor = makeAddr("getterImpostor");
+        SpoofedOwnerImplementation candidate = new SpoofedOwnerImplementation(impostor);
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), bytes(""));
+        assertEq(bridge.owner(), impostor, "getter reports an address without upgrade authority");
+        assertEq(_storedOwner(), owner);
+
+        vm.expectRevert(abi.encodeWithSelector(BridgeProxy.UnauthorizedBridgeOwner.selector, impostor));
+        vm.prank(impostor);
+        proxy.upgradeToAndCall(address(implementation), bytes(""));
+        assertEq(proxy.implementation(), address(candidate));
+
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(implementation), bytes(""));
+        assertEq(proxy.implementation(), address(implementation));
+        assertEq(bridge.owner(), owner);
+    }
+
+    function test_storedOwnerUpgrade_rejectsGetterAuthorityWhenSlotIsZero() public {
+        SpoofedOwnerImplementation candidate = new SpoofedOwnerImplementation(owner);
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), bytes(""));
+        // Test-only corruption: a getter cannot grant authority if storage has no owner.
+        vm.store(address(proxy), _ownableOwnerSlot(), bytes32(0));
+        assertEq(bridge.owner(), owner);
+        vm.expectRevert(abi.encodeWithSelector(BridgeProxy.UnauthorizedBridgeOwner.selector, owner));
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(implementation), bytes(""));
+        assertEq(proxy.implementation(), address(candidate));
+        assertEq(_storedOwner(), address(0));
+    }
+
+    function test_storedOwnerUpgrade_usesOnlyAddressBitsOfOwnerSlot() public {
+        bytes32 ownerWord = bytes32((uint256(type(uint96).max) << 160) | uint256(uint160(owner)));
+        vm.store(address(proxy), _ownableOwnerSlot(), ownerWord);
+        assertEq(bridge.owner(), owner);
+        BridgeV2Mock candidate = new BridgeV2Mock();
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), abi.encodeCall(BridgeV2Mock.initializeV2, (42)));
+        assertEq(proxy.implementation(), address(candidate));
+        assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 42);
+        assertEq(vm.load(address(proxy), _ownableOwnerSlot()), ownerWord);
+    }
+
+    function testFuzz_storedOwnerUpgrade_rejectsHiddenOwnerChanges(address changedOwner) public {
+        vm.assume(changedOwner != owner);
+        SpoofedOwnerImplementation candidate = new SpoofedOwnerImplementation(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(BridgeProxy.IncompatibleBridgeImplementation.selector, address(candidate))
+        );
+        vm.prank(owner);
+        proxy.upgradeToAndCall(address(candidate), abi.encodeCall(BridgeV2Mock.initializeV2WithOwner, (changedOwner)));
+        assertEq(proxy.implementation(), address(implementation));
+        assertEq(_storedOwner(), owner);
     }
 
     function test_upgradeRollsBackZeroOrChangedOwnerAndInitializerWrites() public {
@@ -224,10 +463,21 @@ contract BridgeProxyTest is Test {
         assertEq(BridgeV2Mock(address(proxy)).upgradeValue(), 42);
     }
 
+    /// @dev Derive the ERC-7201 slot independently of BridgeProxy's constant.
+    function _ownableOwnerSlot() internal pure returns (bytes32) {
+        return bytes32(
+            uint256(keccak256(abi.encode(uint256(keccak256("openzeppelin.storage.Ownable")) - 1))) & ~uint256(0xff)
+        );
+    }
+
+    function _storedOwner() internal view returns (address) {
+        return address(uint160(uint256(vm.load(address(proxy), _ownableOwnerSlot()))));
+    }
+
     function _initializationData() internal view returns (bytes memory) {
         return abi.encodeCall(
             Bridge.initialize,
-            (address(token), routeRegistry, commissionManager, lzAdapter, uint256(11), uint256(22), owner)
+            (address(token), routeRegistry, commissionManager, lzAdapter, uint256(22), uint256(11), owner)
         );
     }
 }

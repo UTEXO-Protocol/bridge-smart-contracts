@@ -3,6 +3,7 @@ pragma solidity 0.8.35;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {MultisigProxy} from "../../src/MultisigProxy.sol";
+import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {MultisigHelper} from "../../test/mocks/MultisigHelper.sol";
 
 /// @title MultisigProposeSetRoute
@@ -41,11 +42,13 @@ contract MultisigProposeSetRoute is Script {
         uint256 offset = vm.envUint("DEADLINE_OFFSET");
 
         MultisigProxy proxy = MultisigProxy(proxyAddr);
+        address target = IBridge(proxy.bridge()).routeRegistry();
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + offset;
 
         bytes32 digest = MultisigHelper.digestProposeSetRoute(
             proxy.DOMAIN_SEPARATOR(),
+            target,
             sourceChainId,
             destChainId,
             enabled,
@@ -65,6 +68,7 @@ contract MultisigProposeSetRoute is Script {
         console2.log("proposeSetRoute submitted");
         console2.log("  proposalId:        ");
         console2.logBytes32(proposalId);
+        console2.log("  signed registry:   ", target);
         console2.log("  nonce:             ", nonce);
         console2.log("  deadline (unix s): ", deadline);
         console2.log("");

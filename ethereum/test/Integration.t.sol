@@ -424,7 +424,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 wdNonce = proxy.proposalNonce();
         uint256 wdDeadline = block.timestamp + 7 days;
         bytes32 wdDigest = MultisigHelper.digestProposeWithdrawTokenCommissionCM(
-            domainSep, address(token), totalCommission, wdNonce, wdDeadline
+            domainSep, proxy.commissionManager(), address(token), totalCommission, wdNonce, wdDeadline
         );
         bytes[] memory fedSigs = _signFed2of3(wdDigest);
 
@@ -518,8 +518,9 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         // Federation withdraws native commission.
         uint256 wdNonce = proxy.proposalNonce();
         uint256 wdDeadline = block.timestamp + 7 days;
-        bytes32 wdDigest =
-            MultisigHelper.digestProposeWithdrawNativeCommissionCM(domainSep, nativeQuote, wdNonce, wdDeadline);
+        bytes32 wdDigest = MultisigHelper.digestProposeWithdrawNativeCommissionCM(
+            domainSep, proxy.commissionManager(), nativeQuote, wdNonce, wdDeadline
+        );
         bytes[] memory fedSigs = _signFed2of3(wdDigest);
 
         bytes32 proposalId = proxy.proposeWithdrawNativeCommissionCM(nativeQuote, wdNonce, wdDeadline, 3, fedSigs);
@@ -535,6 +536,142 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
     }
 
     // =========================================================================
+    // Commission manager rotation
+    // =========================================================================
+
+    function _proposeCommissionManagerRotation(address candidate) internal returns (bytes32 proposalId) {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = block.timestamp + 7 days;
+        bytes32 digest =
+            MultisigHelper.digestProposeUpdateCommissionManager(domainSep, proxy.bridge(), candidate, nonce, deadline);
+        proposalId = proxy.proposeUpdateCommissionManager(candidate, nonce, deadline, 3, _signFed2of3(digest));
+    }
+
+    function test_commissionManagerRotation_rechecksBindingAtExecution() public {
+        CommissionManager candidate = new CommissionManager(address(bridge), commissionReceiver);
+        bytes32 proposalId = _proposeCommissionManagerRotation(address(candidate));
+        uint256 nonceAfterProposal = proxy.proposalNonce();
+        candidate.setBridgeAddress(makeAddr("other-bridge"));
+        vm.warp(block.timestamp + TIMELOCK + 1);
+
+        vm.expectRevert(IBridge.InvalidCommissionManagerAddress.selector);
+        proxy.executeProposal(proposalId, abi.encode(address(candidate)));
+
+        assertEq(address(bridge.commissionManager()), address(cm));
+        assertEq(proxy.commissionManager(), address(cm));
+        assertEq(proxy.proposalNonce(), nonceAfterProposal);
+        assertEq(uint256(proxy.getProposal(proposalId).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+
+        candidate.setBridgeAddress(address(bridge));
+        proxy.executeProposal(proposalId, abi.encode(address(candidate)));
+        assertEq(address(bridge.commissionManager()), address(candidate));
+        assertEq(proxy.commissionManager(), address(candidate));
+    }
+
+    function test_rotatedCommissionManager_inflatedQuoteRejectsSignedReleaseAndAllowsRetry() public {
+        _configTokenCommissionRoutes();
+        _openOutflowLimits();
+        bytes32 opId = _depositN(10, RGB_OP_ID);
+        uint256 amount = _netIn();
+        CommissionManager replacement = new CommissionManager(address(bridge), commissionReceiver);
+        replacement.setCommissionRule(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            CommissionConfig({
+                stablePercent: FUNDS_OUT_PERCENT,
+                baseFee: 0,
+                multiplier: FUNDS_OUT_MULT,
+                side: CommissionSide.FUNDS_OUT,
+                currency: CommissionCurrency.TOKEN,
+                isSet: true
+            })
+        );
+        bytes32 proposalId = _proposeCommissionManagerRotation(address(replacement));
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        proxy.executeProposal(proposalId, abi.encode(address(replacement)));
+        assertEq(address(bridge.commissionManager()), address(replacement));
+        assertEq(proxy.commissionManager(), address(replacement));
+
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, amount, amount, "", _validProof());
+        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes[] memory sigs = _signEnclave2of3(MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline));
+        ReleaseState memory beforeState = _releaseState(burnId);
+        vm.mockCall(
+            address(replacement),
+            abi.encodeCall(
+                ICommissionManager.calculateFundsOutCommission, (RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), amount)
+            ),
+            abi.encode(uint256(0), uint256(0), amount * 2)
+        );
+        vm.expectRevert(IBridge.CommissionConservationBroken.selector);
+        proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
+        _assertReleaseUnchanged(burnId, beforeState);
+        assertEq(token.balanceOf(address(replacement)), 0);
+        assertEq(replacement.tokenCommissionPool(address(token)), 0);
+
+        // Restore the production quote and retry the same enclave authorization.
+        vm.clearMockedCalls();
+        proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
+        uint256 fee = amount * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
+        assertEq(token.balanceOf(recipient), beforeState.recipientBalance + amount - fee);
+        assertEq(token.balanceOf(address(replacement)), fee);
+        assertEq(replacement.tokenCommissionPool(address(token)), fee);
+        assertEq(token.balanceOf(address(cm)), beforeState.cmBalance);
+        assertEq(cm.tokenCommissionPool(address(token)), beforeState.tokenPool);
+        assertEq(token.balanceOf(address(bridge)), beforeState.bridgeBalance - amount);
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), beforeState.chainLiquidity - amount);
+        assertEq(bridge.totalLockedLiquidity(), beforeState.totalLiquidity - amount);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce + 1);
+        assertTrue(bridge.consumedBurnIds(burnId));
+    }
+
+    // =========================================================================
+    // Amount-floor governance
+    // =========================================================================
+
+    function test_amountFloors_pendingOutflowRaiseRechecksCurrentInflowMinimum() public {
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsInAmount, (100)));
+        bytes memory pendingCall = abi.encodeCall(IBridge.setMinFundsOutAmount, (80));
+        bytes32 pendingId = _proposeBridgeAdminCall(pendingCall);
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsInAmount, (50)));
+        uint256 nonceBeforeExecution = proxy.proposalNonce();
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidAmountFloors.selector, uint256(50), uint256(80)));
+        proxy.executeProposal(pendingId, pendingCall);
+        assertEq(bridge.minFundsInAmount(), 50);
+        assertEq(bridge.minFundsOutAmount(), 1);
+        assertEq(proxy.proposalNonce(), nonceBeforeExecution);
+        assertEq(uint256(proxy.getProposal(pendingId).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsInAmount, (100)));
+        proxy.executeProposal(pendingId, pendingCall);
+        assertEq(bridge.minFundsInAmount(), 100);
+        assertEq(bridge.minFundsOutAmount(), 80);
+    }
+
+    function test_amountFloors_pendingInflowLowerRechecksCurrentOutflowMinimum() public {
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsInAmount, (100)));
+        bytes memory pendingCall = abi.encodeCall(IBridge.setMinFundsInAmount, (50));
+        bytes32 pendingId = _proposeBridgeAdminCall(pendingCall);
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsOutAmount, (80)));
+        uint256 nonceBeforeExecution = proxy.proposalNonce();
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidAmountFloors.selector, uint256(50), uint256(80)));
+        proxy.executeProposal(pendingId, pendingCall);
+        assertEq(bridge.minFundsInAmount(), 100);
+        assertEq(bridge.minFundsOutAmount(), 80);
+        assertEq(proxy.proposalNonce(), nonceBeforeExecution);
+        assertEq(uint256(proxy.getProposal(pendingId).status), uint256(IMultisigProxy.ProposalStatus.Pending));
+
+        _proposeAndExecuteBridgeAdminCall(abi.encodeCall(IBridge.setMinFundsOutAmount, (40)));
+        proxy.executeProposal(pendingId, pendingCall);
+        assertEq(bridge.minFundsInAmount(), 50);
+        assertEq(bridge.minFundsOutAmount(), 40);
+    }
+
+    // =========================================================================
     // Helpers
     // =========================================================================
 
@@ -547,7 +684,9 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bytes4 selector;
         assembly { selector := mload(add(callData, 32)) }
 
-        bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(domainSep, selector, callData, nonce, deadline);
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(
+            domainSep, proxy.commissionManager(), selector, callData, nonce, deadline
+        );
         bytes[] memory sigs = _signFed2of3(digest);
 
         bytes32 proposalId = proxy.proposeAdminExecuteCommissionManager(callData, nonce, deadline, 3, sigs);
@@ -556,13 +695,18 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         proxy.executeProposal(proposalId, callData);
     }
 
-    function _proposeAndExecuteBridgeAdminCall(bytes memory callData) internal {
+    function _proposeBridgeAdminCall(bytes memory callData) internal returns (bytes32) {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = block.timestamp + 7 days;
         bytes4 selector;
         assembly { selector := mload(add(callData, 32)) }
-        bytes32 digest = MultisigHelper.digestProposeAdminExecute(domainSep, selector, callData, nonce, deadline);
-        bytes32 proposalId = proxy.proposeAdminExecute(callData, nonce, deadline, 3, _signFed2of3(digest));
+        bytes32 digest =
+            MultisigHelper.digestProposeAdminExecute(domainSep, proxy.bridge(), selector, callData, nonce, deadline);
+        return proxy.proposeAdminExecute(callData, nonce, deadline, 3, _signFed2of3(digest));
+    }
+
+    function _proposeAndExecuteBridgeAdminCall(bytes memory callData) internal {
+        bytes32 proposalId = _proposeBridgeAdminCall(callData);
         vm.warp(block.timestamp + TIMELOCK + 1);
         proxy.executeProposal(proposalId, callData);
     }
@@ -1120,11 +1264,13 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID + 100));
         _assertReleaseUnchanged(burnId, beforeState);
 
-        bytes32 unpauseDigest = MultisigHelper.digestEmergencyUnpause(domainSep, emergencyNonceBefore, deadline);
-        proxy.emergencyUnpause(emergencyNonceBefore, deadline, 3, _signFed2of3(unpauseDigest));
+        uint256 unpauseNonce = proxy.emergencyNonce();
+        assertEq(unpauseNonce, emergencyNonceBefore + 1, "guardian consumes emergency nonce");
+        bytes32 unpauseDigest = MultisigHelper.digestEmergencyUnpause(domainSep, unpauseNonce, deadline);
+        proxy.emergencyUnpause(unpauseNonce, deadline, 3, _signFed2of3(unpauseDigest));
         assertFalse(bridge.paused(), "federation resumed inflow");
         assertFalse(bridge.outflowPaused(), "federation resumed outflow");
-        assertEq(proxy.emergencyNonce(), emergencyNonceBefore + 1, "federation consumes emergency nonce");
+        assertEq(proxy.emergencyNonce(), emergencyNonceBefore + 2, "guardian and federation each consume a nonce");
         assertEq(proxy.proposalNonce(), proposalNonceBefore, "guardian does not consume proposal nonce");
 
         proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
@@ -1185,7 +1331,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 wdNonce = proxy.proposalNonce();
         uint256 wdDeadline = block.timestamp + 7 days;
         bytes32 wdDigest = MultisigHelper.digestProposeWithdrawTokenCommissionCM(
-            domainSep, address(token), totalCommission, wdNonce, wdDeadline
+            domainSep, proxy.commissionManager(), address(token), totalCommission, wdNonce, wdDeadline
         );
         bytes32 proposalId = proxy.proposeWithdrawTokenCommissionCM(
             address(token), totalCommission, wdNonce, wdDeadline, 3, _signFed2of3(wdDigest)
