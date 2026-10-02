@@ -12,7 +12,7 @@ import {MultisigProxy} from "../../src/MultisigProxy.sol";
 ///   PRIVATE_KEY           — deployer private key
 ///   BRIDGE_ADDRESS        — existing Bridge deployment
 ///   COMMISSION_MANAGER    — existing CommissionManager deployment
-///   EMERGENCY_GUARDIAN     — non-zero direct emergency pause/unpause operator
+///   EMERGENCY_GUARDIAN     — non-zero direct emergency pause-only operator
 ///   ENCLAVE_SIGNERS       — comma-separated TEE signer addresses
 ///   ENCLAVE_THRESHOLD     — M for enclave M-of-N
 ///   INITIAL_ENCLAVE_SOURCE_CHAIN_ID — source chain id the initial enclave set authorises (non-zero)

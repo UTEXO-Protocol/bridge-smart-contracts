@@ -32,6 +32,12 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract ZeroNetCommissionManager {
+    address public immutable bridgeAddress;
+
+    constructor(address bridge_) {
+        bridgeAddress = bridge_;
+    }
+
     function calculateFundsOutCommission(uint256, uint256, address, uint256 amount)
         external
         pure
