@@ -41,9 +41,34 @@ contract RgbRejectListTest is Test {
         }
     }
 
+    function _appendOne(bytes32 opId, bool reject) internal {
+        IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](1);
+        b[0] = IRgbRejectList.Entry({opId: opId, reject: reject});
+        vm.prank(appender);
+        list.append(b);
+    }
+
     function _append(uint256 from, uint256 n) internal {
         vm.prank(appender);
         list.append(_batch(from, n));
+    }
+
+    /// @dev The rule rgb-lib applies: walk the log in index order; the last
+    ///      entry for `opId` decides. `listed` is false if `opId` never appears.
+    function _replay(bytes32 opId) internal view returns (bool listed, bool reject) {
+        IRgbRejectList.Entry[] memory log = list.entries(0, list.length());
+        for (uint256 i = 0; i < log.length; i++) {
+            if (log[i].opId == opId) {
+                listed = true;
+                reject = log[i].reject;
+            }
+        }
+    }
+
+    function _assertDecision(bytes32 opId, bool reject, string memory err) internal view {
+        (bool listed, bool decided) = _replay(opId);
+        assertTrue(listed, err);
+        assertEq(decided, reject, err);
     }
 
     function _assertEntry(IRgbRejectList.Entry memory got, uint256 i) internal pure {
@@ -96,15 +121,6 @@ contract RgbRejectListTest is Test {
         }
     }
 
-    function test_append_marksEntriesListed() public {
-        _append(0, 3);
-
-        for (uint256 i = 0; i < 3; i++) {
-            assertTrue(list.isListed(_opId(i)), "appended opId is listed");
-        }
-        assertFalse(list.isListed(_opId(3)), "other opId is not listed");
-    }
-
     /// @notice Indices are global across batches, so a client can key its cache
     ///         on them.
     function test_append_emitsEntryAddedWithGlobalIndex() public {
@@ -152,53 +168,73 @@ contract RgbRejectListTest is Test {
         list.append(b);
     }
 
-    function test_append_revertsOnDuplicateAcrossBatches() public {
-        _append(0, 1);
-        IRgbRejectList.Entry[] memory b = _batch(0, 1);
+    /// @notice The use case the latest-wins rule exists for: a rejected
+    ///         operation id is allowed again by a later entry. Both entries
+    ///         stay in the log; the current decision is the latest one.
+    function test_append_laterEntryReallowsRejectedOpId() public {
+        bytes32 opId = _opId(0);
+        _appendOne(opId, true);
+        _assertDecision(opId, true, "rejected");
 
-        vm.expectRevert(abi.encodeWithSelector(IRgbRejectList.AlreadyListed.selector, _opId(0)));
-        vm.prank(appender);
-        list.append(b);
+        _appendOne(opId, false);
+        _assertDecision(opId, false, "allowed again");
+
+        assertEq(list.length(), 2, "both decisions are kept in the log");
+        IRgbRejectList.Entry[] memory log = list.entries(0, 2);
+        assertTrue(log[0].reject, "original reject still at index 0");
+        assertFalse(log[1].reject, "override at index 1");
     }
 
-    /// @notice A decision can never be overwritten, not even by flipping the
-    ///         flag for the same operation id.
-    function test_append_revertsOnDuplicateWithOppositeFlag() public {
-        _append(0, 1); // id 0 is a reject
-        IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](1);
-        b[0] = IRgbRejectList.Entry({opId: _opId(0), reject: false});
+    function test_append_laterEntryCanRejectAgain() public {
+        bytes32 opId = _opId(0);
+        _appendOne(opId, true);
+        _appendOne(opId, false);
+        _appendOne(opId, true);
 
-        vm.expectRevert(abi.encodeWithSelector(IRgbRejectList.AlreadyListed.selector, _opId(0)));
-        vm.prank(appender);
-        list.append(b);
+        _assertDecision(opId, true, "rejected again");
+        assertEq(list.length(), 3);
     }
 
-    function test_append_revertsOnDuplicateWithinBatch() public {
+    /// @notice Within one batch the later entry also wins.
+    function test_append_laterEntryInSameBatchWins() public {
         IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](2);
-        b[0] = _entry(7);
-        b[1] = _entry(7);
+        b[0] = IRgbRejectList.Entry({opId: _opId(9), reject: true});
+        b[1] = IRgbRejectList.Entry({opId: _opId(9), reject: false});
 
-        vm.expectRevert(abi.encodeWithSelector(IRgbRejectList.AlreadyListed.selector, _opId(7)));
         vm.prank(appender);
         list.append(b);
+
+        _assertDecision(_opId(9), false, "later entry in the batch wins");
+        assertEq(list.length(), 2);
+    }
+
+    /// @notice Repeating the current decision is accepted: the list mirrors
+    ///         the existing reject list entry for entry, redundant ones included.
+    function test_append_acceptsRepeatedSameDecision() public {
+        _appendOne(_opId(0), true);
+        _appendOne(_opId(0), true);
+
+        _assertDecision(_opId(0), true, "still rejected");
+        assertEq(list.length(), 2);
     }
 
     /// @notice A batch is recorded entirely or not at all: entries before the
     ///         offending one are rolled back too.
     function test_append_isAtomic() public {
-        _append(0, 1);
+        _append(0, 1); // id 0 is a reject
         IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](3);
         b[0] = _entry(1);
-        b[1] = _entry(2);
-        b[2] = _entry(0); // duplicate of an existing entry
+        b[1] = IRgbRejectList.Entry({opId: _opId(0), reject: false}); // would re-allow id 0
+        b[2] = IRgbRejectList.Entry({opId: bytes32(0), reject: true}); // invalid
 
-        vm.expectRevert(abi.encodeWithSelector(IRgbRejectList.AlreadyListed.selector, _opId(0)));
+        vm.expectRevert(IRgbRejectList.InvalidOpId.selector);
         vm.prank(appender);
         list.append(b);
 
         assertEq(list.length(), 1, "nothing from the failed batch recorded");
-        assertFalse(list.isListed(_opId(1)), "first entry rolled back");
-        assertFalse(list.isListed(_opId(2)), "second entry rolled back");
+        (bool listed,) = _replay(_opId(1));
+        assertFalse(listed, "first entry rolled back");
+        _assertDecision(_opId(0), true, "override rolled back");
     }
 
     /// @notice Append-only: entries already written are never altered by later
@@ -276,6 +312,27 @@ contract RgbRejectListTest is Test {
             cached += page.length;
         }
         assertEq(cached, n, "every entry read exactly once");
+    }
+
+    /// @notice The log keeps every submission in order, overrides included —
+    ///         nothing collapses repeated operation ids, so a client replaying
+    ///         it reaches the latest decision for each one. Operation ids are
+    ///         drawn from a small space so repeats occur.
+    function testFuzz_append_keepsEverySubmissionInOrder(uint8[64] memory ids, bool[64] memory flags, uint8 n) public {
+        n = uint8(bound(n, 1, 64));
+        IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](n);
+        for (uint256 i = 0; i < n; i++) {
+            b[i] = IRgbRejectList.Entry({opId: _opId(ids[i] % 8), reject: flags[i]});
+        }
+        vm.prank(appender);
+        list.append(b);
+
+        IRgbRejectList.Entry[] memory log = list.entries(0, list.length());
+        assertEq(log.length, n, "one log entry per submission");
+        for (uint256 i = 0; i < n; i++) {
+            assertEq(log[i].opId, b[i].opId, "opId in submission order");
+            assertEq(log[i].reject, b[i].reject, "flag in submission order");
+        }
     }
 
     /// @notice The intended client flow: a full sync, then an incremental sync

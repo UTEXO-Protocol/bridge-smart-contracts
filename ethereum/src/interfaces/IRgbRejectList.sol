@@ -11,6 +11,13 @@ pragma solidity 0.8.35;
 ///         of a branch on an allow) that make each lookup depend on the
 ///         previous one.
 ///
+///         Latest entry wins. The list is a log of decisions: an operation id
+///         may appear any number of times, and its current decision is the
+///         one in its LAST entry — e.g. a rejected operation is allowed again
+///         by appending an allow entry for it. Clients apply entries in index
+///         order, so later entries override earlier ones. The log is the only
+///         state: there is no on-chain per-operation lookup.
+///
 ///         Append-only. Entries can be added and never changed or removed, so a
 ///         client caches entries up to the last index it has seen and on the
 ///         next sync fetches only `[cachedLength, length())`. Reading `length()`
@@ -24,8 +31,9 @@ pragma solidity 0.8.35;
 ///         Roles. The owner is the cold administrative key: it only appoints
 ///         and rotates the appender. The appender is the hot key of the tool
 ///         that publishes entries, and the only account that can append.
-///         Compromising the appender therefore cannot take over the registry —
-///         the owner revokes it — although entries it already appended stay.
+///         Compromising the appender therefore cannot take over the registry:
+///         the owner revokes it, and the new appender reverses its decisions by
+///         appending corrective entries. The rogue entries stay in the log.
 interface IRgbRejectList {
     // =========================================================================
     // Types
@@ -52,10 +60,6 @@ interface IRgbRejectList {
     ///         has; rejected to catch uninitialised input.
     error InvalidOpId();
 
-    /// @notice The operation id already has an entry. Each operation id may be
-    ///         listed at most once, so a decision can never be overwritten.
-    error AlreadyListed(bytes32 opId);
-
     /// @notice The caller of `append` is not the appender.
     error NotAppender(address caller);
 
@@ -81,9 +85,11 @@ interface IRgbRejectList {
     // Appender-only
     // =========================================================================
 
-    /// @notice Append a batch of entries, in order. Appender-only. Reverts as a
-    ///         whole if any entry is invalid or already listed, so a batch is
-    ///         either recorded entirely or not at all.
+    /// @notice Append a batch of entries, in order. Appender-only. An entry for
+    ///         an operation id that is already listed supersedes its earlier
+    ///         decision, including within the same batch. Reverts as a whole if
+    ///         any entry is invalid, so a batch is either recorded entirely or
+    ///         not at all.
     function append(Entry[] calldata batch) external;
 
     // =========================================================================
@@ -107,11 +113,6 @@ interface IRgbRejectList {
     ///         reverting, so a client can request fixed-size pages without
     ///         knowing the exact length.
     function entries(uint256 start, uint256 end) external view returns (Entry[] memory page);
-
-    /// @notice Whether `opId` already has an entry. Enforces uniqueness on
-    ///         `append` and is convenient for monitoring; validators use their
-    ///         downloaded copy instead.
-    function isListed(bytes32 opId) external view returns (bool);
 
     /// @notice The account currently allowed to append entries.
     function appender() external view returns (address);
