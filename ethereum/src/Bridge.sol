@@ -321,7 +321,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @dev Owner is `MultisigProxy`; federation gates this on its M-of-N
     ///      timelock flow via `proposeUpdateRouteRegistry`.
     function setRouteRegistry(address newRouteRegistry) external override onlyOwner {
-        if (newRouteRegistry == address(0)) revert InvalidRouteRegistryAddress();
+        if (newRouteRegistry == address(0) || newRouteRegistry.code.length == 0) {
+            revert InvalidRouteRegistryAddress();
+        }
         address old = routeRegistry;
         routeRegistry = newRouteRegistry;
         emit RouteRegistryUpdated(old, newRouteRegistry);

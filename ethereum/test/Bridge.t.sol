@@ -148,6 +148,12 @@ contract BridgeTest is BridgeTestBase {
         bridge.setRouteRegistry(address(0));
     }
 
+    function test_setRouteRegistry_revertsOnEOA() public {
+        vm.prank(multisig);
+        vm.expectRevert(IBridge.InvalidRouteRegistryAddress.selector);
+        bridge.setRouteRegistry(makeAddr("eoa-registry"));
+    }
+
     function test_setRouteRegistry_revertsIfNotOwner() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
