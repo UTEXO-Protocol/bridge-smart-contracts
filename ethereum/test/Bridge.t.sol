@@ -583,8 +583,13 @@ contract BridgeTest is BridgeTestBase {
         assertEq(permissiveModule.onFundsInCount(), 1, "generic route accepts the address-length cap");
     }
 
+    function test_settlementDataCaps_splitByDirection() public view {
+        assertEq(bridge.MAX_SETTLEMENT_DATA_IN_LENGTH(), 128, "inbound settlementData cap");
+        assertEq(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH(), 90_000, "outbound settlementData cap");
+    }
+
     function test_fundsIn_revertsOnSettlementDataTooLong() public {
-        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH();
         bytes memory tooLong = _bytesOfLength(max + 1);
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
@@ -597,7 +602,7 @@ contract BridgeTest is BridgeTestBase {
         // maximal-length blob still decodes as a non-zero RGB OpId (the first
         // 32 bytes read as uint256), so the deposit clears the guard and
         // records normally under the bridge-derived operationId.
-        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH();
         bytes memory atMax = _bytesOfLength(max);
 
         vm.prank(user);
@@ -605,11 +610,44 @@ contract BridgeTest is BridgeTestBase {
         assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "deposit at the settlement-data cap is accepted");
     }
 
+    function test_fundsIn_inboundCapIsNotTheOutboundCap() public {
+        // A payload one byte over the inbound cap is far below the outbound
+        // cap, and must still be rejected on the deposit path.
+        uint256 len = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH() + 1;
+        assertLt(len, bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH());
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, len, bridge.MAX_SETTLEMENT_DATA_IN_LENGTH())
+        );
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _bytesOfLength(len));
+    }
+
+    function test_fundsOut_acceptsSettlementDataAboveInboundCap() public {
+        // A two-record release payload (128 + 64 * 2 = 256 bytes) is above the
+        // inbound cap; the release path must be bounded by the outbound cap only.
+        vm.prank(user);
+        bytes32 opA = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
+        vm.prank(user);
+        bytes32 opB = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
+        _ensureRgbSafetyCapacity(2 * AMOUNT);
+
+        bytes32[] memory ids = new bytes32[](2);
+        ids[0] = opA;
+        ids[1] = opB;
+        bytes memory settlementData = _settlement(ids);
+        assertGt(settlementData.length, bridge.MAX_SETTLEMENT_DATA_IN_LENGTH());
+
+        vm.prank(multisig);
+        _fundsOut(recipient, 2 * AMOUNT, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), settlementData);
+        assertEq(usdt0.balanceOf(recipient), 2 * AMOUNT, "release above the inbound cap succeeds");
+    }
+
     function test_fundsOut_revertsOnSettlementDataTooLong() public {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
         bytes memory tooLong = _bytesOfLength(max + 1);
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
@@ -625,7 +663,7 @@ contract BridgeTest is BridgeTestBase {
         // blob does not decode as a valid (bytes32[], uint256[]) settlement
         // encoding, so it reverts later (or on the unrelated burnId check) — the
         // guard is isolated by asserting the revert is NOT SettlementDataTooLong.
-        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
         bytes memory atMax = _bytesOfLength(max);
 
         IBridge.FundsOutParams memory params = IBridge.FundsOutParams(
@@ -1210,7 +1248,7 @@ contract BridgeTest is BridgeTestBase {
     ///      let one settlement derive different ids over time. Swapping the proof
     ///      therefore keeps the same id — integrity of the proof is carried by the
     ///      enclave's EIP-712 signature, not by the replay key.
-    function test_fundsOut_burnIdIsIndependentOfProof() public {
+    function test_fundsOut_burnIdIsIndependentOfProof() public view {
         bytes memory settlementData = _settlement(_ids(keccak256("op")));
         bytes memory proofA = _proof();
         bytes memory proofB = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, keccak256("changed-proof"));

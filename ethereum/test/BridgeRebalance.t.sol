@@ -330,6 +330,15 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         p.burnId = _deriveRebalanceBurnId(p);
     }
 
+    /// @dev `len` bytes of 0x61: non-zero, so a 32-byte prefix decodes as a
+    ///      non-zero word.
+    function _filledBytes(uint256 len) internal pure returns (bytes memory b) {
+        b = new bytes(len);
+        for (uint256 i = 0; i < len; i++) {
+            b[i] = 0x61;
+        }
+    }
+
     function _rebalance(IBridge.RebalanceParams memory p) internal {
         vm.prank(multisig);
         bridge.rebalanceLiquidity(p);
@@ -755,6 +764,56 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         bridge.rebalanceLiquidity(p);
     }
 
+    function test_rebalance_revert_settlementDataOutTooLong() public {
+        IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
+        p.settlementDataOut = _filledBytes(max + 1);
+        vm.prank(multisig);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
+        bridge.rebalanceLiquidity(p);
+    }
+
+    function test_rebalance_settlementDataOutAtMaxLengthPassesLengthGuard() public {
+        // The arbitrary blob does not decode as (bytes32[], uint256[]), so the
+        // call reverts later; the guard is isolated by asserting the revert is
+        // NOT SettlementDataTooLong.
+        IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        p.settlementDataOut = _filledBytes(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH());
+        p.burnId = _deriveRebalanceBurnId(p);
+        vm.prank(multisig);
+        try bridge.rebalanceLiquidity(p) {}
+        catch (bytes memory reason) {
+            assertTrue(
+                bytes4(reason) != IBridge.SettlementDataTooLong.selector,
+                "max-length settlementDataOut must clear the length guard"
+            );
+        }
+    }
+
+    function test_rebalance_revert_settlementDataInTooLong() public {
+        // The credit leg shares the outbound cap, not the deposit one.
+        IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
+        p.settlementDataIn = _filledBytes(max + 1);
+        vm.prank(multisig);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
+        bridge.rebalanceLiquidity(p);
+    }
+
+    function test_rebalance_acceptsSettlementDataInAtMaxLength() public {
+        // A max-length blob still decodes as a non-zero RGB OpId (its first
+        // 32 bytes), so the credit leg records normally. The length is far
+        // above the deposit cap: the rebalance credit leg is not bound by it.
+        IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        p.settlementDataIn = _filledBytes(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH());
+        assertGt(p.settlementDataIn.length, bridge.MAX_SETTLEMENT_DATA_IN_LENGTH());
+        bytes32 expectedOperationId = _deriveRebalanceOpId(p);
+
+        _rebalance(p);
+
+        assertEq(rgbModule.fundsInRecords(expectedOperationId), AMOUNT, "credit at the outbound cap is recorded");
+    }
+
     function test_rebalance_rgbCreditAcceptsEmptyDestinationAddress() public {
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         p.destinationAddress = "";
@@ -1019,7 +1078,7 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     /// @notice The credit-leg blob is deliberately outside the key: it says where
     ///         value goes, not which burn produced it. Two rebalances of the same
     ///         burn therefore collide even with different destination OpIds.
-    function test_rebalanceBurnIdIgnoresCreditLegData() public {
+    function test_rebalanceBurnIdIgnoresCreditLegData() public view {
         IBridge.RebalanceParams memory a = _rgbToArchParams(AMOUNT, rgbSeedOpId);
         IBridge.RebalanceParams memory b = _rgbToArchParams(AMOUNT, rgbSeedOpId);
         b.settlementDataIn = abi.encode(uint256(0xFEED));
