@@ -65,18 +65,18 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///         inclusion proof stays well under this).
     uint256 public constant MAX_PROOF_LENGTH = 1024;
 
-    /// @notice Upper bound on the `settlementData` byte length on both the
-    ///         `fundsIn` and `fundsOut` paths. `settlementData` is forwarded to
-    ///         the route settlement module, which may decode and iterate it
-    ///         (e.g. `RgbSettlementModule.beforeFundsOut` walks the
-    ///         `(operationIds, amounts)` arrays it carries), so an unbounded blob
-    ///         would let that loop inflate until it exceeds the block gas limit
-    ///         and bricks the call. `settlementData` encodes as ~`128 + 64 * n`
-    ///         bytes for `n` records, so 4096 bytes admits ~62 records — ample
-    ///         headroom while keeping any settlement loop bounded. Enforced on
-    ///         `fundsIn` too as defence-in-depth: current inbound modules ignore
-    ///         `settlementData`, but a future module could iterate it.
-    uint256 public constant MAX_SETTLEMENT_DATA_LENGTH = 4096;
+    /// @notice Upper bound on the `fundsIn` `settlementData` byte length,
+    ///         forwarded to the route module's `onFundsIn`. Deposit payloads
+    ///         are small fixed-size values (RGB: `abi.encode(uint256 rgbOpId))`.
+    uint256 public constant MAX_SETTLEMENT_DATA_IN_LENGTH = 128;
+
+    /// @notice Upper bound on the byte length of the owner-submitted settlement
+    ///         payloads: the `fundsOut` `settlementData` and both rebalance
+    ///         payloads (`settlementDataOut` and `settlementDataIn`). Modules
+    ///         may iterate these payloads, so the cap bounds the loop. A
+    ///         payload encodes as ~`128 + 64 * n` bytes for `n` records, so
+    ///         90 000 bytes admits ~1404 records.
+    uint256 public constant MAX_SETTLEMENT_DATA_OUT_LENGTH = 90_000;
 
     /// @notice Basis-point denominator for the immutable rolling safety limits.
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -780,8 +780,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             revert AddressTooLong(sourceAddressLength, MAX_ADDRESS_LENGTH);
         }
         if (params.proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(params.proof.length, MAX_PROOF_LENGTH);
-        if (params.settlementData.length > MAX_SETTLEMENT_DATA_LENGTH) {
-            revert SettlementDataTooLong(params.settlementData.length, MAX_SETTLEMENT_DATA_LENGTH);
+        if (params.settlementData.length > MAX_SETTLEMENT_DATA_OUT_LENGTH) {
+            revert SettlementDataTooLong(params.settlementData.length, MAX_SETTLEMENT_DATA_OUT_LENGTH);
         }
         if (params.amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 
@@ -805,11 +805,11 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             revert AddressTooLong(destinationAddressLength, MAX_ADDRESS_LENGTH);
         }
         if (params.proof.length > MAX_PROOF_LENGTH) revert ProofTooLong(params.proof.length, MAX_PROOF_LENGTH);
-        if (params.settlementDataOut.length > MAX_SETTLEMENT_DATA_LENGTH) {
-            revert SettlementDataTooLong(params.settlementDataOut.length, MAX_SETTLEMENT_DATA_LENGTH);
+        if (params.settlementDataOut.length > MAX_SETTLEMENT_DATA_OUT_LENGTH) {
+            revert SettlementDataTooLong(params.settlementDataOut.length, MAX_SETTLEMENT_DATA_OUT_LENGTH);
         }
-        if (params.settlementDataIn.length > MAX_SETTLEMENT_DATA_LENGTH) {
-            revert SettlementDataTooLong(params.settlementDataIn.length, MAX_SETTLEMENT_DATA_LENGTH);
+        if (params.settlementDataIn.length > MAX_SETTLEMENT_DATA_OUT_LENGTH) {
+            revert SettlementDataTooLong(params.settlementDataIn.length, MAX_SETTLEMENT_DATA_OUT_LENGTH);
         }
     }
 
@@ -890,8 +890,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (bytes(destinationAddress).length > MAX_ADDRESS_LENGTH) {
             revert AddressTooLong(bytes(destinationAddress).length, MAX_ADDRESS_LENGTH);
         }
-        if (settlementData.length > MAX_SETTLEMENT_DATA_LENGTH) {
-            revert SettlementDataTooLong(settlementData.length, MAX_SETTLEMENT_DATA_LENGTH);
+        if (settlementData.length > MAX_SETTLEMENT_DATA_IN_LENGTH) {
+            revert SettlementDataTooLong(settlementData.length, MAX_SETTLEMENT_DATA_IN_LENGTH);
         }
         if (sourceChainId == 0) revert InvalidSourceChainId();
         if (destinationChainId == 0) revert InvalidDestinationChainId();
