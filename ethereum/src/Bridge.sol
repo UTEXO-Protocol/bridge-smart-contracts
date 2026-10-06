@@ -150,15 +150,15 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///         rebalance of the same burn carry different destinations, so
     ///         keeping it would let one burn settle once on each path.
     bytes32 public constant BURN_TYPEHASH = keccak256(
-        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 sourceBurnTxId)"
     );
 
     /// @notice Domain-separated type hash for the non-RGB credit-leg
     ///         `operationId` of a `rebalanceLiquidity` call. Distinct from
     ///         `FUNDS_IN_OPERATION_TYPEHASH` so a rebalance id can never collide
     ///         with a deposit id. Folds in the canonical `burnId` (the shared
-    ///         settlement replay key, including `settlementDataOut` and
-    ///         `sourceBurnTxId` but excluding the moving finality `proof`), so
+    ///         settlement replay key, including `sourceBurnTxId` but excluding
+    ///         settlement data and the moving finality `proof`), so
     ///         two rebalances backed by different source burns still derive
     ///         distinct `operationId`s. Without this, a credit leg whose
     ///         `settlementDataIn` is empty (e.g. RGB→Arch) would collide.
@@ -661,7 +661,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
 
         // Shared replay guard: `fundsOut` and `rebalanceLiquidity` derive the
         // same id from the canonical debit fields under `BURN_TYPEHASH`. The
-        // moving finality proof and credit-leg fields are intentionally absent;
+        // settlement data, moving finality proof and credit-leg fields are absent;
         // `sourceBurnTxId` identifies the source burn. Enclaves are responsible
         // for deriving every included field canonically from the fully validated
         // consignment and for never attesting a second intent for the same burn.
@@ -1191,21 +1191,16 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @dev Canonical `burnId` = domain-separated hash of the settlement intent.
     ///      Identical formula for both paths — see `BURN_TYPEHASH`.
     function _deriveBurnId(FundsOutParams calldata params) private view returns (uint256) {
-        return _deriveBurnIdFromFields(
-            params.amount, params.sourceChainId, params.sourceAddress, params.settlementData, params.sourceBurnTxId
-        );
+        return _deriveBurnIdFromFields(params.amount, params.sourceChainId, params.sourceAddress, params.sourceBurnTxId);
     }
 
-    /// @dev Rebalance uses the SAME formula; `settlementDataOut` is the
-    ///      debit-leg blob, the exact counterpart of `fundsOut`'s
-    ///      `settlementData`.
+    /// @dev Rebalance uses the SAME formula. Both settlement blobs are excluded:
+    ///      selecting other backing records cannot create a new replay key.
     function _deriveRebalanceBurnId(RebalanceParams calldata params) private view returns (uint256) {
-        return _deriveBurnIdFromFields(
-            params.amount, params.sourceChainId, params.sourceAddress, params.settlementDataOut, params.sourceBurnTxId
-        );
+        return _deriveBurnIdFromFields(params.amount, params.sourceChainId, params.sourceAddress, params.sourceBurnTxId);
     }
 
-    /// @dev Dynamic fields are hashed over their RAW bytes (never their ABI
+    /// @dev The source address is hashed over its RAW bytes (never its ABI
     ///      encoding), matching EIP-712 treatment of dynamic types. An empty
     ///      value therefore hashes to
     ///      `0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470`,
@@ -1214,7 +1209,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         uint256 amount,
         uint256 sourceChainId,
         string calldata sourceAddress,
-        bytes calldata settlementData,
         bytes32 sourceBurnTxId
     ) private view returns (uint256) {
         return uint256(
@@ -1227,7 +1221,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
                     amount,
                     sourceChainId,
                     _hashCalldataString(sourceAddress),
-                    _hashCalldataBytes(settlementData),
                     sourceBurnTxId
                 )
             )

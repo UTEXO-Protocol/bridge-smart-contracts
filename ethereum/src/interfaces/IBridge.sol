@@ -294,7 +294,7 @@ interface IBridge {
     /// @param burnId             Bridge-derived replay guard. Must equal the
     ///                           Bridge's canonical settlement hash shared by
     ///                           `fundsOut` and `rebalanceLiquidity`. It includes
-    ///                           `settlementData` and `sourceBurnTxId`, but not
+    ///                           `sourceBurnTxId`, but not `settlementData`,
     ///                           the moving finality `proof`, the recipient or
     ///                           `destinationChainId`.
     /// @param sourceChainId      Source chain id.
