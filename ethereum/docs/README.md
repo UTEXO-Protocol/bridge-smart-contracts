@@ -42,7 +42,7 @@ Owner-controlled custom proxy built on OpenZeppelin `ERC1967Proxy` and `ERC1967U
 - Proxy-control selectors (`implementation` and `upgradeToAndCall`) are reserved and must not be added to Bridge implementations. The proxy itself is explicitly rejected as its own implementation.
 - The upgrade selector is blocked in all generic governance lanes. Federation must use the dedicated typed, timelocked operation, whose signed payload binds the exact proxy address. Future implementations must preserve the OpenZeppelin Ownable namespace and owner field. Upgrade authority is independent of `owner()`: a missing, reverting, malformed, or misleading getter does not prevent the stored owner from restoring a reviewed implementation. Ownership changes also transfer upgrade authority; there is no independent recovery admin.
 
-- `fundsIn(amount, destinationChainId, destinationAddress, settlementData)` — open, **`payable`**. Direct entry point for EVM users; the source chain is implicit (`block.chainid`). Requires `amount >= minFundsInAmount`. Quotes commission from `CommissionManager` using route key `(block.chainid, destinationChainId, TOKEN)`; if the route uses NATIVE currency, `msg.value` must be between the fresh quote and 5% above it. Exactly the fresh quote is collected and any surplus is refunded to the caller. Pulls the full `amount` in tokens from the sender, forwards any token/native commission to `CommissionManager`, and dispatches to the route's `SettlementModule.onFundsIn(...)` via `RouteRegistry`. The Bridge permits an empty `destinationAddress`; route modules define its semantics. The canonical RGB settlement module requires it to be empty, while non-empty values on other routes remain bounded by `MAX_ADDRESS_LENGTH`. The `settlementData` blob is opaque to the bridge — its layout is dictated by the destination route's settlement module. Emits two events:
+- `fundsIn(amount, destinationChainId, destinationAddress, settlementData)` — open, **`payable`**. Direct entry point for EVM users; the source chain is implicit (`block.chainid`). Requires `amount >= minFundsInAmount`. Quotes commission from `CommissionManager` using route key `(block.chainid, destinationChainId, TOKEN)`; if the route uses NATIVE currency, `msg.value` must be between the fresh quote and 5% above it. Exactly the fresh quote is collected and any surplus is refunded to the caller. Pulls the full `amount` in tokens from the sender, forwards any token/native commission to `CommissionManager`, and dispatches to the route's `SettlementModule.onFundsIn(...)` via `RouteRegistry`. The Bridge permits an empty `destinationAddress`; route modules define its semantics. The canonical RGB settlement module requires it to be empty, while non-empty values on other routes remain bounded by `MAX_ADDRESS_LENGTH`. The configured settlement module reports `usesRgbMintDepositId()`. For RGB, Bridge decodes `abi.encode(uint256 rgbOpId)` and derives the backing id after the actual net amount is known; other routes keep their existing opaque payload and sender/nonce id. Emits two events:
   - `FundsIn` — RGB-only compatibility event using `netAmount`; `sender` is indexed while `rgbOpId` and the `uint64`-bounded amount are carried in event data. Deposits whose RGB amount exceeds `type(uint64).max` revert instead of truncating.
   - `BridgeFundsIn` (from `IBridge`) — full, consumed by the UTEXO backend; includes the exact opaque `settlementData` supplied to the route.
 - `fundsIn(amount, sourceChainId, sourceSender, destinationChainId, destinationAddress, settlementData)` — `onlyLZAdapter` overload used by `LZAdapter` after a cross-chain `OFT.send` compose lands. The adapter has already authenticated the originating sender on the source chain via LayerZero's `OFTComposeMsgCodec.composeFrom`, so it forwards the non-spoofable `sourceChainId` and `sourceSender` to the bridge. For NATIVE commission routes, the source-agreed `msg.value` must remain within the immutable ±5% band around the fresh destination quote. Cross-domain refunds are deliberately unsupported, so the complete accepted value is collected as commission.
@@ -62,12 +62,9 @@ Owner **must** be `MultisigProxy`. `fundsOut` is reachable only through the purp
 keccak256(abi.encode(
     BURN_TYPEHASH, bridge, block.chainid, token,
     amount, sourceChainId,
-    keccak256(bytes(sourceAddress)),
-    keccak256(settlementData), sourceBurnTxId
+    keccak256(bytes(sourceAddress)), sourceBurnTxId
 ))
 ```
-
-For rebalance, `settlementData` is the debit-side `settlementDataOut`. The moving finality `proof`, physical recipient, `destinationChainId`, and rebalance credit-leg fields are deliberately excluded, so the same canonical source burn derives the same id on either path. RGB requires an empty `sourceAddress`; `sourceBurnTxId` is the RGB burn-transition OpId. Enclaves validate the consignment and reconstruct every included field canonically. The Bridge rejects a zero source id, verifies the supplied `burnId`, and rejects an id already recorded as consumed. This complements `MultisigProxy`'s per-source-chain `teeNonce`, which prevents replaying one signature bundle.
 
 #### Outflow controls and reference liquidity
 
@@ -97,7 +94,7 @@ Adding a new finality source (e.g. an Arch light client) is just a new verifier 
 
 Per-route plugin that owns route-specific bookkeeping. Interface: `onFundsIn(ctx)` + `beforeFundsOut(ctx)`, both invoked by `RouteRegistry` on behalf of the Bridge.
 
-- **`RgbSettlementModule`** — canonical RGB mint/burn ledger. On `fundsIn`, requires the canonical empty `destinationAddress`, stores the Bridge-derived `operationId => netAmount`, tags it with the destination RGB network, and returns the supplied RGB OpId so Bridge emits both `FundsIn` and `BridgeFundsIn`. On `fundsOut`, `settlementData = abi.encode(bytes32[] operationIds, uint256[] amounts)` must reference existing exact-amount records tagged with the debit network. Records are permanent proof-of-mint entries; replay and solvency are enforced independently by `consumedBurnIds` and isolated liquidity.
+- **`RgbSettlementModule`** — canonical RGB mint/burn ledger. On `fundsIn`, requires the canonical empty `destinationAddress`, stores the Bridge-derived `operationId => netAmount`, tags it with the destination RGB network, rejects a second record for the same RGB network/OpId/net tuple, and returns the supplied RGB OpId so Bridge emits both `FundsIn` and `BridgeFundsIn`. On `fundsOut`, `settlementData = abi.encode(bytes32[] operationIds, uint256[] amounts)` must reference existing exact-amount records tagged with the debit network. Records are permanent proof-of-mint entries; replay and solvency are enforced independently by `consumedBurnIds` and isolated liquidity.
 - **`RgbOutboundSettlementModule`** — canonical-ledger reader for routes whose RGB debit is followed by a destination that must not create a new record. For RGB mint/burn-to-Arch rebalances it performs the network-scoped debit check, then returns `0` and writes no RGB record on the non-RGB credit.
 - **`NullSettlementModule`** — stateless no-op. Used by routes whose settlement is handled entirely by an external delivery layer (e.g. LayerZero compose) or by routes whose verifier already binds the release to a specific deposit. Stateless ⇒ no auth.
 
@@ -108,7 +105,7 @@ Production RGB mint/burn route-module topology:
 | `42161 -> 96` | `RgbSettlementModule` | writes canonical record; emits `FundsIn` + `BridgeFundsIn` |
 | `96 -> 42161` | `RgbSettlementModule` | verifies a network-96 canonical record |
 
-RGB uses mint/burn routes only. Rebalances to non-RGB destinations use `RgbOutboundSettlementModule`; rebalances into RGB use `RgbSettlementModule` to create the destination mint record.
+RGB uses mint/burn routes only. Rebalances to non-RGB destinations use `RgbOutboundSettlementModule`; rebalances into RGB use `RgbSettlementModule` to create the destination mint record. Both ordinary deposits and rebalance credit legs into RGB use `Bridge.rgbMintDepositId(...)`. All credit routes to one RGB network must share its canonical ledger; the duplicate guard is module-local. A reverse route to the local EVM retains legacy credit identity even when it uses the RGB ledger for withdrawal checks. The enclave derives these ids from validated consignments and pinned bridge configuration; receipt hints must not select their identity. Updated Bridge requires compatible registry/modules exposing the identity-mode getter.
 
 ### CommissionManager (`src/CommissionManager.sol`)
 
@@ -185,7 +182,7 @@ The RGB contract references this registry by address at issuance, so neither the
 ### FundsIn (user deposits)
 
 1. The user (or frontend) ensures `amount >= Bridge.minFundsInAmount()` and quotes commission from `CommissionManager.calculateFundsInCommission(sourceChainId, destinationChainId, token, amount)`. EVM users pass `block.chainid` as `sourceChainId`.
-2. The user approves `amount` to `Bridge` and calls `Bridge.fundsIn{ value: nativeCommission }(amount, destinationChainId, destinationAddress, settlementData)`. No signature required — any user can lock tokens. The canonical RGB route requires `destinationAddress == ""`; this empty value remains part of the `operationId` as `keccak256(bytes(""))`. Bridge derives and returns the canonical `operationId`; for the RGB mint/burn route, `settlementData` carries `abi.encode(uint256 rgbOpId)`. Cross-chain (LayerZero compose) deposits land through the adapter-only overload with authenticated `sourceChainId` and `sourceSender`.
+2. The user approves `amount` to `Bridge` and calls `Bridge.fundsIn{ value: nativeCommission }(amount, destinationChainId, destinationAddress, settlementData)`. No signature required — any user can lock tokens. The canonical RGB route requires `destinationAddress == ""`; RGB `operationId` binds the bridge address, EVM chain id, token, destination RGB network, decoded mint OpId and actual net amount. Sender, nonce, deposit source chain and destination address are absent from this formula. Bridge derives and returns the canonical `operationId`; for the RGB mint/burn route, `settlementData` carries `abi.encode(uint256 rgbOpId)`. Cross-chain (LayerZero compose) deposits land through the adapter-only overload with authenticated `sourceChainId` and `sourceSender`.
 3. Bridge pulls `amount` in tokens, forwards `tokenCommission` and `nativeCommission` (if any) to `CommissionManager`, dispatches to the route's `SettlementModule.onFundsIn` via `RouteRegistry` (which may e.g. record the net deposit), and emits `FundsIn` + `BridgeFundsIn`. The canonical `BridgeFundsIn` payload includes the exact `settlementData` supplied by the caller.
 
 ### FundsOut (bridge withdrawals)
@@ -280,7 +277,7 @@ set -a && source .env.interact && set +a   # before interact scripts
 
 **Key interact variables** (`.env.interact`):
 - `BRIDGE_ADDRESS`, `PROXY_ADDRESS`, `MINIMAL_BRIDGE_ADDRESS` — deployed contracts
-- `RGB_OP_ID` — RGB correlation id carried by the funds-in settlement payload; Bridge derives the canonical `operationId`
+- `RGB_OP_ID` — RGB mint OpId carried by the funds-in settlement payload; Bridge combines it with the RGB network and actual net amount to derive the canonical `operationId`
 - `SOURCE_BURN_TX_ID` — unique source burn transaction id; the RGB burn-transition OpId on RGB routes
 - `SOURCE_CHAIN_ID` / `DESTINATION_CHAIN_ID` — `uint256` chain ids used when building calldata
 - `SOURCE_BLOCK_HEIGHT`, `SOURCE_COMMITMENT_HASH`, `LATEST_BLOCK_HEIGHT`, `LATEST_COMMITMENT_HASH` — RGB proof inputs
