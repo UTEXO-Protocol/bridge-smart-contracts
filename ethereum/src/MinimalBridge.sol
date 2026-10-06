@@ -21,9 +21,9 @@ contract MinimalBridge is BridgeBase {
 
     /// @notice Emitted on every fundsIn.
     /// @param sender      Address that deposited the tokens.
-    /// @param operationId Backend-assigned operation identifier.
+    /// @param operationId Backend-assigned operation identifier (the RGB OpId).
     /// @param amount      Amount of tokens locked.
-    event FundsIn(address indexed sender, uint256 operationId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed operationId, uint64 amount);
 
     /// @notice Emitted when tokens are released from the bridge.
     /// @param recipient       Recipient on this chain.
