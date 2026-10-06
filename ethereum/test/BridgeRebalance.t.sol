@@ -201,8 +201,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     }
 
     /// @dev Mirror of `Bridge._deriveRebalanceBurnId`. Shares `BURN_TYPEHASH`
-    ///      with `fundsOut`: the debit-leg blob and the source burn id are what
-    ///      make the key distinct, the credit-leg fields are not part of it.
+    ///      with `fundsOut`: the source burn id distinguishes burns; both
+    ///      settlement blobs and the credit-leg fields are outside the key.
     function _deriveRebalanceBurnId(IBridge.RebalanceParams memory p) internal view returns (uint256) {
         return uint256(
             keccak256(
@@ -214,7 +214,6 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
                     p.amount,
                     p.sourceChainId,
                     keccak256(bytes(p.sourceAddress)),
-                    keccak256(p.settlementDataOut),
                     p.sourceBurnTxId
                 )
             )
@@ -224,6 +223,21 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     /// @dev Mirror of `Bridge._deriveRebalanceOperationId` (no nonce; folds in
     ///      the canonical burnId so distinct intents get distinct ids).
     function _deriveRebalanceOpId(IBridge.RebalanceParams memory p) internal view returns (bytes32) {
+        if (p.destinationChainId == RGB_CHAIN_ID || p.destinationChainId == SECONDARY_RGB_CHAIN_ID) {
+            return keccak256(
+                abi.encode(
+                    keccak256(
+                        "UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)"
+                    ),
+                    address(bridge),
+                    block.chainid,
+                    address(usdt0),
+                    p.destinationChainId,
+                    abi.decode(p.settlementDataIn, (uint256)),
+                    p.amount
+                )
+            );
+        }
         bytes32 sourceSender = keccak256(bytes(p.sourceAddress));
         return keccak256(
             abi.encode(
@@ -367,6 +381,76 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
     // ========================================================================
     // Success paths
     // ========================================================================
+
+    function test_rebalance_duplicateRgbMintAfterDepositRestoresDebitAndReplayState() public {
+        uint256 mintOpId = RGB_OP_ID + 500;
+        usdt0.mint(user, AMOUNT);
+        vm.prank(user);
+        bytes32 depositId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(mintOpId));
+        IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, mintOpId);
+        assertEq(_deriveRebalanceOpId(p), depositId, "deposit and credit leg share the identity");
+        uint256 sourceBefore = bridge.lockedLiquidity(ARCH_CHAIN_ID);
+        uint256 destinationBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 totalBefore = bridge.totalLockedLiquidity();
+        uint256 allowanceBefore = bridge.availableOutflow(ARCH_CHAIN_ID);
+        uint256 safetyBefore = bridge.availableChainSafetyOutflow(ARCH_CHAIN_ID);
+
+        vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
+        _rebalance(p);
+
+        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), sourceBefore);
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), destinationBefore);
+        assertEq(bridge.totalLockedLiquidity(), totalBefore);
+        assertEq(bridge.availableOutflow(ARCH_CHAIN_ID), allowanceBefore);
+        assertEq(bridge.availableChainSafetyOutflow(ARCH_CHAIN_ID), safetyBefore);
+        assertEq(rgbModule.fundsInRecords(depositId), AMOUNT);
+        assertFalse(bridge.consumedBurnIds(p.burnId), "failed credit does not consume burn");
+    }
+
+    function test_fundsIn_duplicateRgbMintAfterRebalanceReverts() public {
+        uint256 mintOpId = RGB_OP_ID + 501;
+        IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, mintOpId);
+        _rebalance(p);
+        usdt0.mint(user, AMOUNT);
+        uint256 balanceBefore = usdt0.balanceOf(user);
+        uint256 totalBefore = bridge.totalLockedLiquidity();
+        uint256 nonceBefore = bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))));
+        vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(mintOpId));
+        assertEq(usdt0.balanceOf(user), balanceBefore);
+        assertEq(bridge.totalLockedLiquidity(), totalBefore);
+        assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))), nonceBefore);
+        assertEq(rgbModule.fundsInRecords(_deriveRebalanceOpId(p)), AMOUNT);
+    }
+
+    function test_rebalance_distinctBurnCannotBackTheSameRgbMintTwice() public {
+        // Keep room for both debit attempts under the source bucket limit.
+        IBridge.RebalanceParams memory first = _archToRgbParams(AMOUNT / 4, RGB_OP_ID + 502);
+        _rebalance(first);
+        IBridge.RebalanceParams memory second = first;
+        second.sourceBurnTxId = keccak256("different-debit-burn-same-credit-mint");
+        second.burnId = _deriveRebalanceBurnId(second);
+        vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
+        _rebalance(second);
+        assertFalse(bridge.consumedBurnIds(second.burnId));
+    }
+
+    function test_rebalance_reverseRgbToLocalEvmRouteKeepsLegacyCreditId() public {
+        uint256 backingMint = RGB_OP_ID + 600;
+        usdt0.mint(user, AMOUNT * 10);
+        vm.prank(user);
+        bytes32 backing =
+            bridge.fundsIn(AMOUNT * 10, PRODUCTION_RGB_MINT_BURN_CHAIN_ID, RGB_DST_ADDR, abi.encode(backingMint));
+        IBridge.RebalanceParams memory p = _productionRgbToArchParams(AMOUNT, backing);
+        p.destinationChainId = SOURCE_CHAIN_ID;
+        p.destinationAddress = "";
+        p.settlementDataIn = abi.encode(RGB_OP_ID + 601);
+        bytes32 legacyId = _deriveRebalanceOpId(p);
+        assertTrue(legacyId != bridge.rgbMintDepositId(SOURCE_CHAIN_ID, RGB_OP_ID + 601, AMOUNT));
+        _rebalance(p);
+        assertEq(rgbModule.fundsInRecords(legacyId), AMOUNT, "reverse-route credit keeps its old identity");
+    }
 
     function test_rebalance_archToRgb_movesBucketsAndWritesRecord() public {
         uint256 srcBefore = bridge.lockedLiquidity(ARCH_CHAIN_ID);
@@ -596,8 +680,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
 
     function test_rebalance_distinctMints_differInDestinationOpId() public {
         // Legitimately distinct credit-side rebalances differ in the destination
-        // RGB OpId (settlementDataIn), which alone makes their canonical ids
-        // distinct — no nonce needed. Both execute.
+        // RGB OpId (settlementDataIn), which makes their credit ids distinct.
+        // The fixture also assigns distinct source burn ids. Both execute.
         IBridge.RebalanceParams memory first = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         bytes32 firstOpId = _deriveRebalanceOpId(first);
         _rebalance(first);
@@ -661,8 +745,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
 
         IBridge.RebalanceParams memory first = _rgbToArchParams(AMOUNT, rgbSeedOpId);
         IBridge.RebalanceParams memory second = _rgbToArchParams(AMOUNT, secondSeedOpId);
-        // Differ only on the debit side: distinct referenced records → distinct proof? No,
-        // same proof; the settlementDataOut differs → distinct burnId.
+        // These helpers name distinct sourceBurnTxIds. The burn identifier,
+        // rather than the referenced backing records, separates the keys.
         assertTrue(first.burnId != second.burnId, "distinct burnId per referenced burn");
         assertTrue(
             _deriveRebalanceOpId(first) != _deriveRebalanceOpId(second),
@@ -1009,7 +1093,7 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
                 destinationChainId: p.destinationChainId,
                 sourceAddress: p.sourceAddress,
                 proof: p.proof,
-                settlementData: p.settlementDataOut,
+                settlementData: bytes.concat(p.settlementDataOut, hex"00"),
                 sourceBurnTxId: p.sourceBurnTxId
             })
         );
@@ -1024,6 +1108,7 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
 
         _rebalance(p);
         assertTrue(bridge.consumedBurnIds(p.burnId), "rebalance consumed the id");
+        release.settlementData = bytes.concat(release.settlementData, hex"00");
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, p.burnId));
         vm.prank(multisig);
@@ -1038,6 +1123,8 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         vm.prank(multisig);
         bridge.fundsOut(release);
         assertTrue(bridge.consumedBurnIds(release.burnId), "fundsOut consumed the id");
+        p.settlementDataOut = bytes.concat(p.settlementDataOut, hex"00");
+        assertEq(_deriveRebalanceBurnId(p), release.burnId);
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, p.burnId));
         _rebalance(p);
@@ -1073,6 +1160,26 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
             sourceBurnTxId: p.sourceBurnTxId
         });
         assertTrue(release.destinationChainId != p.destinationChainId, "paths credit different destinations");
+    }
+
+    function test_rebalance_changedBackingRecordsCannotReplaySameBurn() public {
+        usdt0.mint(user, AMOUNT);
+        vm.prank(user);
+        bytes32 otherRecord = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 51));
+        IBridge.RebalanceParams memory first = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        IBridge.RebalanceParams memory second = _rgbToArchParams(AMOUNT, otherRecord);
+        second.sourceBurnTxId = first.sourceBurnTxId;
+        second.burnId = _deriveRebalanceBurnId(second);
+        assertEq(second.burnId, first.burnId, "backing records do not change burn identity");
+
+        _rebalance(first);
+        uint256 sourceLiquidity = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 destinationLiquidity = bridge.lockedLiquidity(ARCH_CHAIN_ID);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, first.burnId));
+        _rebalance(second);
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), sourceLiquidity);
+        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), destinationLiquidity);
+        assertEq(rgbModule.fundsInRecords(otherRecord), AMOUNT);
     }
 
     /// @notice The credit-leg blob is deliberately outside the key: it says where

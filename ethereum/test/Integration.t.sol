@@ -99,7 +99,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
     // Non-zero RGB OpId threaded through the RGB-route settlementData on fundsIn.
     uint256 constant RGB_OP_ID = 0xABCDEF;
     bytes32 constant BURN_TYPEHASH = keccak256(
-        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 sourceBurnTxId)"
     );
     bytes32 constant SRC_BURN_TX_ID = keccak256("integration-burn-tx-default");
 
@@ -144,7 +144,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         uint256 destinationChainId,
         string memory sourceAddress,
         bytes memory proof,
-        bytes memory settlementData
+        bytes memory /* settlementData */
     ) internal view returns (uint256) {
         recipient_; // no longer part of the key
         destinationChainId; // no longer part of the key
@@ -159,7 +159,6 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
                     amount,
                     sourceChainId,
                     keccak256(bytes(sourceAddress)),
-                    keccak256(settlementData),
                     SRC_BURN_TX_ID
                 )
             )
@@ -964,6 +963,7 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         assertEq(token.balanceOf(address(cm)), fee, "commission to CM");
         assertEq(cm.tokenCommissionPool(address(token)), fee, "CM recorded inbound fee");
         assertEq(rgbModule.fundsInRecords(opId), netIn, "mint record stores net");
+        assertEq(opId, bridge.rgbMintDepositId(RGB_CHAIN_ID, RGB_OP_ID, netIn), "consignment-derived backing id");
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), netIn, "destination liquidity credited");
         assertEq(bridge.totalLockedLiquidity(), netIn, "total liquidity credited");
         assertEq(
@@ -973,14 +973,13 @@ contract IntegrationTest is Test, BridgeProxyTestUtils {
         assertEq(token.balanceOf(address(bridge)) + token.balanceOf(address(cm)), USER_DEPOSIT, "deposit conserved");
     }
 
-    /// @notice Two identical deposits produce distinct operationIds (per-sender
-    ///         nonce), so neither collides in the mint ledger.
+    /// @notice Different RGB mint OpIds remain distinct deposits.
     function test_fundsIn_mint_distinctDepositsGetDistinctOperationIds() public {
         _configTokenCommissionRoutes();
         vm.prank(user);
         bytes32 op1 = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID));
         vm.prank(user);
-        bytes32 op2 = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID));
+        bytes32 op2 = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID + 1));
 
         assertTrue(op1 != op2, "operationIds distinct");
         assertEq(rgbModule.fundsInRecords(op1), _netIn(), "first recorded");

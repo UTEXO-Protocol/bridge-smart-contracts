@@ -207,7 +207,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
     uint256 constant RGB_OP_ID = 0xABCDEF;
     uint256 constant BURN_ID = 9_001;
     bytes32 constant BURN_TYPEHASH = keccak256(
-        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 sourceBurnTxId)"
     );
     uint256 constant LZ_NATIVE_FEE = 0.01 ether;
     uint32 constant DST_EID = 30110;
@@ -368,7 +368,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         uint256 destinationChainId,
         string memory sourceAddress,
         bytes memory proof,
-        bytes memory settlementData
+        bytes memory /* settlementData */
     ) internal view returns (uint256) {
         bridgeRecipient; // no longer part of the key
         destinationChainId; // no longer part of the key
@@ -383,7 +383,6 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
                     amount,
                     sourceChainId,
                     keccak256(bytes(sourceAddress)),
-                    keccak256(settlementData),
                     SRC_BURN_TX_ID
                 )
             )
@@ -1121,6 +1120,58 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
         assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce + 1);
     }
 
+    function test_fundsOutCall_settlementDataRemainsSigned() public {
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 deadline = block.timestamp + 1 hours;
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs =
+            MultisigHelper.signAll(vm, MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline), pks);
+        params.settlementData = bytes.concat(params.settlementData, hex"01");
+        vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce);
+        assertFalse(bridge.consumedBurnIds(params.burnId));
+        assertEq(token.balanceOf(recipient), 0);
+    }
+
+    function test_lzFundsOutCall_settlementDataRemainsSigned() public {
+        MockOutboundLZAdapter adapter =
+            new MockOutboundLZAdapter(address(token), makeAddr("mockOft"), address(proxy), LZ_NATIVE_FEE);
+        _setLzAdapter(address(adapter));
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, _fundsInIds());
+        uint256 deadline = block.timestamp + 1 hours;
+        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
+        params.settlementData = bytes.concat(params.settlementData, hex"01");
+        vm.deal(address(this), LZ_NATIVE_FEE);
+        vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce);
+        assertFalse(bridge.consumedBurnIds(params.burnId));
+        assertEq(adapter.sendOutCalls(), 0);
+    }
+
+    function test_lzFundsOutCall_changedSettlementCannotReplaySameBurn() public {
+        address oft = makeAddr("mockOft");
+        MockOutboundLZAdapter adapter = new MockOutboundLZAdapter(address(token), oft, address(proxy), LZ_NATIVE_FEE);
+        _setLzAdapter(address(adapter));
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, BURN_ID, _fundsInIds());
+        uint256 deadline = block.timestamp + 1 hours;
+        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
+        vm.deal(address(this), LZ_NATIVE_FEE * 2);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
+        uint256 balance = token.balanceOf(oft);
+
+        params.settlementData = bytes.concat(params.settlementData, hex"00");
+        // Fresh valid signatures authorize the changed payload and current nonce.
+        (nonce, bitmap, sigs) = _signLzEnclave(params, deadline);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, params.burnId));
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce, "failed release restores nonce");
+        assertEq(adapter.sendOutCalls(), 1, "no second send");
+        assertEq(token.balanceOf(oft), balance, "no second payout");
+    }
+
     function test_fundsOutCall_revertsOnExpired() public {
         IBridge.FundsOutParams memory params = _fundsOutParams();
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
@@ -1260,11 +1311,27 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
                     p.amount,
                     p.sourceChainId,
                     keccak256(bytes(p.sourceAddress)),
-                    keccak256(p.settlementDataOut),
                     p.sourceBurnTxId
                 )
             )
         );
+    }
+
+    function test_rebalanceCall_bothSettlementBlobsRemainSigned() public {
+        for (uint256 field; field < 2; ++field) {
+            IBridge.RebalanceParams memory params = _rebalanceParams();
+            uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+            uint256 deadline = block.timestamp + 1 hours;
+            (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+            bytes[] memory sigs =
+                MultisigHelper.signAll(vm, MultisigHelper.digestTeeRebalance(domainSep, params, nonce, deadline), pks);
+            if (field == 0) params.settlementDataOut = bytes.concat(params.settlementDataOut, hex"01");
+            else params.settlementDataIn = bytes.concat(params.settlementDataIn, hex"01");
+            vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
+            proxy.rebalanceCall(params, nonce, deadline, bitmap, sigs);
+            assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce);
+            assertFalse(bridge.consumedBurnIds(params.burnId));
+        }
     }
 
     function test_rebalanceCall_executesViaBridge() public {
@@ -4363,7 +4430,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
     /// @dev A federation candidate set derived from sequential private keys so
     ///      the caller retains the pks to sign the *next* rotation.
-    function _fedFromPks(uint256 base, uint256 n) internal returns (address[] memory addrs, uint256[] memory pks) {
+    function _fedFromPks(uint256 base, uint256 n) internal pure returns (address[] memory addrs, uint256[] memory pks) {
         addrs = new address[](n);
         pks = new uint256[](n);
         for (uint256 i = 0; i < n; i++) {
@@ -4374,7 +4441,7 @@ contract MultisigProxyTest is Test, BridgeProxyTestUtils {
 
     /// @dev An enclave candidate set derived from sequential private keys, so a
     ///      test can register the set AND later sign a real release with it.
-    function _encFromPks(uint256 base, uint256 n) internal returns (address[] memory addrs, uint256[] memory pks) {
+    function _encFromPks(uint256 base, uint256 n) internal pure returns (address[] memory addrs, uint256[] memory pks) {
         addrs = new address[](n);
         pks = new uint256[](n);
         for (uint256 i = 0; i < n; i++) {
