@@ -20,22 +20,22 @@ pragma solidity 0.8.35;
 /// @param sender             EVM caller Bridge saw — the EOA on the public
 ///                           overload, or the LZ adapter on the adapter-only
 ///                           overload. This is who tokens are pulled from; it
-///                           is NOT the identity bound into `operationId`.
+///                           is not necessarily the source-chain user.
 /// @param sourceSender       Original source-chain sender, left-padded to
 ///                           `bytes32`. Equals `sender` for direct EVM
 ///                           deposits; for LZ deposits it is the authenticated
 ///                           user forwarded by the adapter. This is the
-///                           identity bound into `operationId`.
+///                           identity bound into non-RGB `operationId`.
 /// @param grossAmount        Gross amount the user supplied (pre-commission).
 /// @param netAmount          Amount actually bridged after token commission
 ///                           has been taken.
 /// @param operationId        Canonical bridge-side operation id, derived
 ///                           on-chain by Bridge (see `Bridge._deriveOperationId`).
-///                           Unpredictable by third parties, so it cannot be
-///                           pre-empted; read it from the emitted event.
+///                           RGB uses the mint OpId, net amount and network;
+///                           other routes use the sender/nonce deposit context.
 /// @param senderNonce        Per-`(sourceChainId, sourceSender)` nonce folded
-///                           into `operationId` so repeated identical deposits
-///                           produce distinct ids.
+///                           into non-RGB `operationId`. Still recorded in RGB
+///                           deposit events but does not distinguish RGB ids.
 /// @param sourceChainId      `block.chainid` for direct EVM deposits, or the
 ///                           non-spoofable chain id forwarded by the adapter.
 /// @param destChainId        Target chain id (backend-assigned for non-EVM

@@ -18,10 +18,16 @@ import {FundsInContext, FundsOutContext} from "./RouteTypes.sol";
 ///      forbidden by `RouteRegistry` — the trust-model decision must be
 ///      explicit and visible on-chain.
 ///
-///      The `settlementData` blob is opaque to Bridge / `RouteRegistry`;
-///      each module owns its own decoding rules. For the RGB-route module
-///      this would typically be `abi.encode(uint256[] fundsInIds)`.
+///      Each module owns its settlementData layout. For RGB inbound routes
+///      Bridge also decodes abi.encode(uint256 rgbOpId) to derive the backing
+///      id; release data encodes parallel operationId and amount arrays.
 interface ISettlementModule {
+    /// @notice Whether inbound records use the consignment-derived RGB mint id.
+    /// @dev Bridge queries the configured module before deriving the id. Only
+    ///      modules that write RGB mint records return true; other routes keep
+    ///      their existing deposit or rebalance identity.
+    function usesRgbMintDepositId() external view returns (bool);
+
     /// @notice Hook invoked by `RouteRegistry.onFundsIn` after Bridge has
     ///         pulled the tokens and forwarded commission. The module records
     ///         (or otherwise reacts to) the new inbound deposit.

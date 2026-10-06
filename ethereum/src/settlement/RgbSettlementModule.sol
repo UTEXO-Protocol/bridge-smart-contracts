@@ -57,9 +57,8 @@ import {FundsInContext, FundsOutContext} from "../interfaces/RouteTypes.sol";
 ///      `settlementData` layout:
 ///        - `onFundsIn`:  `abi.encode(uint256 rgbOpId)` — the RGB OpId, decoded
 ///                        and returned for Bridge's `FundsIn` event. The record
-///                        is keyed by the bridge-derived `ctx.operationId`, not
-///                        by this value. `ctx.destAddress` must be empty because
-///                        RGB has no destination-address concept.
+///                        is keyed by the consignment-derived `ctx.operationId`,
+///                        which binds this OpId, net amount and RGB network.
 ///        - `beforeFundsOut`: `abi.encode(bytes32[] operationIds, uint256[] amounts)`
 ///                        (equal-length parallel arrays; non-empty for physical
 ///                        releases).
@@ -163,14 +162,19 @@ contract RgbSettlementModule is ISettlementModule {
     // =========================================================================
 
     /// @inheritdoc ISettlementModule
+    function usesRgbMintDepositId() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @inheritdoc ISettlementModule
     /// @dev Records the post-commission `netAmount` under the canonical
-    ///      `ctx.operationId` (the bridge-derived, unpredictable key). Reverts
+    ///      `ctx.operationId` (Bridge.rgbMintDepositId for this mint). Reverts
     ///      `DuplicateOperationId` if a non-zero record already exists under
     ///      that key. `settlementData` carries the RGB OpId as `abi.encode(uint256
     ///      rgbOpId)`; it is decoded and returned so Bridge can surface it in the
-    ///      RGB-only `FundsIn` event. The RGB OpId is NOT the dedup key — it is a
-    ///      pass-through correlation id (a mempool copy of it cannot pre-empt a
-    ///      deposit, since dedup is on `ctx.operationId`).
+    ///      RGB-only `FundsIn` event. Identity binds the network, OpId and actual
+    ///      net amount: deposits and rebalances cannot create a second backing
+    ///      record for the same mint tuple, regardless of sender or nonce.
     ///      RGB has no destination-address concept, so `ctx.destAddress` must
     ///      use its single canonical representation: the empty string.
     function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)

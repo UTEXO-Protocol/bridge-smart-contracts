@@ -28,6 +28,7 @@ interface IBridge {
     error InvalidSourceChainId();
     error ZeroAmount();
     error ZeroNetAmount();
+    error InvalidRgbOpId();
     error CommissionConservationBroken();
     error AmountBelowMinimum(uint256 amount, uint256 minimum);
     error InsufficientReceived(uint256 received, uint256 tokenCommission);
@@ -125,20 +126,22 @@ interface IBridge {
     ///         (bytes32); this event exists for the RGB integration only.
     /// @param sender  EVM caller Bridge saw (user, or the LZ adapter).
     /// @param rgbOpId RGB operation id, decoded by the route module from its
-    ///                `settlementData`. Not an on-chain dedup key.
+    ///                `settlementData`. Included in the RGB mint backing id
+    ///                together with the network and actual net amount.
     /// @param amount  Net amount bridged (post-commission), bounded to the RGB `u64` range.
     event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
 
     /// @param operationId        Canonical bridge-side operation id, derived
-    ///                           on-chain by Bridge and unpredictable by third
-    ///                           parties. This is the backend's canonical key.
+    ///                           on-chain by Bridge. RGB uses the mint identity;
+    ///                           other routes use sender/nonce deposit context.
+    ///                           This is the backend's canonical key.
     /// @param sourceSender       Original source-chain sender (left-padded to
-    ///                           `bytes32`); the identity bound into `operationId`.
+    ///                           `bytes32`); bound into non-RGB `operationId`.
     /// @param sender             EVM caller Bridge saw (the EOA on the public
     ///                           overload, or the LZ adapter on the adapter-only
     ///                           overload).
     /// @param senderNonce        Per-`(sourceChainId, sourceSender)` nonce folded
-    ///                           into `operationId`.
+    ///                           into non-RGB `operationId`.
     /// @param amount             Gross amount the user supplied (pre-commission).
     /// @param netAmount          Amount actually bridged after token commission is taken.
     /// @param tokenCommission    Fee charged in the bridged token (deducted from `amount`).
@@ -202,7 +205,8 @@ interface IBridge {
     /// @param destinationChainId Chain bucket credited.
     /// @param amount             Amount migrated between the buckets (no commission).
     /// @param sourceAddress      Source-chain identity behind the debit (e.g. the
-    ///                           RGB burner); its hash is folded into `operationId`.
+    ///                           RGB burner); its hash is folded into non-RGB
+    ///                           credit-leg `operationId`.
     /// @param destinationAddress Destination-chain address backing the credit.
     ///                           May be empty when the destination route has no
     ///                           address concept (including RGB).
@@ -238,7 +242,8 @@ interface IBridge {
     ///      (TOKEN currency), `msg.value` must be 0.
     /// @dev `settlementData` is an opaque per-route blob forwarded into the
     ///      route's `ISettlementModule.onFundsIn`. Routes whose module does not
-    ///      consume any extra data (e.g. RGB) accept an empty bytes string.
+    ///      consume any extra data accept an empty bytes string. RGB requires
+    ///      abi.encode(uint256 rgbOpId).
     /// @dev The `operationId` is derived on-chain (not caller-supplied) and
     ///      returned; read the canonical value from the emitted event.
     /// @return operationId The canonical bridge-side operation id.
@@ -249,6 +254,11 @@ interface IBridge {
         bytes calldata settlementData
     ) external payable returns (bytes32 operationId);
 
+    /// @notice Canonical RGB mint backing id, reproducible from a validated
+    ///         consignment and pinned Bridge, chain and token configuration.
+    /// @dev Shared by deposits and RGB-destination rebalance credit legs.
+    function rgbMintDepositId(uint256 rgbNetwork, uint256 rgbOpId, uint256 netAmount) external view returns (bytes32);
+
     /// @notice Adapter-only overload. Used by `UtexoLZAdapter.lzCompose` to
     ///         forward a cross-chain deposit while preserving the original
     ///         source-chain id and sender (carried in `composeMsg` from the
@@ -257,7 +267,7 @@ interface IBridge {
     ///      `lzAdapter`. Until federation sets a non-zero adapter, the
     ///      overload is effectively closed. `sourceSender` is authenticated by
     ///      the source-chain entrypoint and adapter, not by an arbitrary
-    ///      caller — it is bound into the derived `operationId`.
+    ///      caller. Non-RGB ids bind it; RGB ids bind the mint identity instead.
     /// @dev Native commission here is the source-agreed value the adapter
     ///      forwards, and its payer lives on the source chain. Because no refund
     ///      can reach them, `msg.value` is accepted anywhere within
@@ -328,7 +338,7 @@ interface IBridge {
     /// @param destinationChainId Chain whose bucket is credited (mint side).
     /// @param sourceAddress      Source-chain identity behind the debit;
     ///                           `keccak256(sourceAddress)` is folded into the
-    ///                           credit-leg `operationId`.
+    ///                           non-RGB credit-leg `operationId`.
     /// @param destinationAddress Destination-chain address backing the credit;
     ///                           may be empty when the destination route has no
     ///                           address concept (including RGB).

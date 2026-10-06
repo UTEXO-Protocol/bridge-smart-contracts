@@ -106,6 +106,13 @@ interface IRouteRegistry {
     // Bridge-facing dispatchers
     // =========================================================================
 
+    /// @notice Returns the inbound identity mode of the configured route module.
+    /// @dev Local EVM destinations always retain legacy identity, including
+    ///      reverse routes that use an RGB ledger for withdrawal validation.
+    ///      Callable only by Bridge. Unset or disabled routes revert, just as
+    ///      they do at onFundsIn; no route-kind state is stored separately.
+    function usesRgbMintDepositId(uint256 sourceChainId, uint256 destChainId) external view returns (bool);
+
     /// @notice Forwards the inbound context to the settlement module of the
     ///         route `(ctx.sourceChainId, ctx.destChainId)`. Reverts if the
     ///         route is not enabled. Callable only by `bridge`.
