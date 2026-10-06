@@ -822,7 +822,7 @@ contract BridgeTest is BridgeTestBase {
         // Drop the emitter filter so Forge's expectEmit scans past the token's
         // Transfer event (emitter = usdt0) and matches BridgeFundsIn by topic0.
         // FundsIn (RGB route) carries the rgbOpId; sender = the adapter.
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(mockAdapter, RGB_OP_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -894,7 +894,7 @@ contract BridgeTest is BridgeTestBase {
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
         bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -932,7 +932,7 @@ contract BridgeTest is BridgeTestBase {
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
         bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(

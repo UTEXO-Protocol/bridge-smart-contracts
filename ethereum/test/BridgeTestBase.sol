@@ -103,7 +103,7 @@ contract RouteRotatingCommissionManager {
 ///         pipeline can allocate stack slots for.
 abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     // Events re-declared locally for vm.expectEmit
-    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
     event BridgeFundsIn(
         bytes32 indexed operationId,
         bytes32 indexed sourceSender,

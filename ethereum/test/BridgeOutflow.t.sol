@@ -1169,7 +1169,7 @@ contract BridgeOutflowTest is BridgeTestBase {
         assertEq(nativePoolBefore, 0, "pre native pool");
         assertEq(recordBefore, 0, "pre record");
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, RGB_OP_ID, uint64(netAmount));
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -1240,7 +1240,7 @@ contract BridgeOutflowTest is BridgeTestBase {
         assertEq(nativePoolBefore, 0, "pre native pool");
         assertEq(recordBefore, 0, "pre record");
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, RGB_OP_ID, uint64(netAmount));
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -1680,7 +1680,7 @@ contract BridgeOutflowTest is BridgeTestBase {
         assertEq(cm.nativeCommissionPool(), nativePoolBefore, "native pool unchanged");
         assertEq(rgbModule.fundsInRecords(expectedOpId), recordBefore, "record not created");
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit BridgeFundsIn(
@@ -1765,7 +1765,7 @@ contract BridgeOutflowTest is BridgeTestBase {
             SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData()
         );
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, uint64(netAmount));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit BridgeFundsIn(
@@ -1843,7 +1843,7 @@ contract BridgeOutflowTest is BridgeTestBase {
 
         bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, netAmount);
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, uint64(netAmount));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit BridgeFundsIn(
@@ -2105,7 +2105,7 @@ contract BridgeOutflowTest is BridgeTestBase {
 
     /// @dev The RGB route emits FundsIn carrying the rgbOpId and net amount.
     function test_fundsIn_rgbRouteEmitsFundsInWithRgbOpId() public {
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, uint64(AMOUNT)); // no commission → net == gross == AMOUNT
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
@@ -2115,7 +2115,7 @@ contract BridgeOutflowTest is BridgeTestBase {
         uint256 amount = type(uint64).max;
         usdt0.mint(user, amount);
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, type(uint64).max);
 
         vm.prank(user);
@@ -2152,7 +2152,7 @@ contract BridgeOutflowTest is BridgeTestBase {
         uint256 expectedNet = grossAmount - cm.calculateStableFee(grossAmount, percent, 100);
         assertLe(expectedNet, type(uint64).max, "test setup: net fits RGB u64");
 
-        vm.expectEmit(true, false, false, true, address(bridge));
+        vm.expectEmit(true, true, false, true, address(bridge));
         emit FundsIn(user, RGB_OP_ID, uint64(expectedNet));
 
         vm.prank(user);
@@ -2162,7 +2162,7 @@ contract BridgeOutflowTest is BridgeTestBase {
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), expectedNet);
     }
 
-    function test_fundsIn_rgbOpIdIsNonIndexedEventData() public {
+    function test_fundsIn_rgbOpIdIsIndexedTopic() public {
         bytes32 fundsInTopic = keccak256("FundsIn(address,uint256,uint64)");
         vm.recordLogs();
         vm.prank(user);
@@ -2171,11 +2171,11 @@ contract BridgeOutflowTest is BridgeTestBase {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].emitter == address(bridge) && logs[i].topics[0] == fundsInTopic) {
-                assertEq(logs[i].topics.length, 2, "only signature and sender are indexed");
+                assertEq(logs[i].topics.length, 3, "signature, sender and rgb op id are indexed");
                 assertEq(address(uint160(uint256(logs[i].topics[1]))), user, "sender topic");
-                (uint256 rgbOpId, uint64 amount) = abi.decode(logs[i].data, (uint256, uint64));
-                assertEq(rgbOpId, RGB_OP_ID, "rgb op id is event data");
-                assertEq(amount, AMOUNT, "amount is event data");
+                assertEq(uint256(logs[i].topics[2]), RGB_OP_ID, "rgb op id topic");
+                assertEq(logs[i].data.length, 32, "only amount is event data");
+                assertEq(abi.decode(logs[i].data, (uint64)), AMOUNT, "amount is event data");
                 return;
             }
         }
@@ -2215,7 +2215,7 @@ contract BridgeOutflowTest is BridgeTestBase {
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
 
         // BridgeFundsIn must carry gross `amount == AMOUNT` and `netAmount == received`.
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, RGB_OP_ID, uint64(received));
         vm.expectEmit(false, true, true, true);
         emit BridgeFundsIn(
