@@ -37,7 +37,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///                    (burn-backed: BtcRelay proof + record check; credit leg
 ///                     writes nothing and emits no FundsIn)
 contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
-    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
     event BridgeRebalance(
         bytes32 indexed operationId,
         uint256 indexed burnId,
@@ -462,7 +462,7 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
 
         // Credit-RGB rebalance emits the standard FundsIn (the RGB side needs
         // no rebalance awareness) plus the canonical BridgeRebalance.
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(multisig, mintOpId, uint64(AMOUNT));
         vm.expectEmit(true, true, false, true);
         emit BridgeRebalance(
@@ -551,7 +551,7 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
         // Both sides are RGB: the debit leg verifies the mint/burn record and the
         // credit leg writes a NEW destination record + emits FundsIn — all on the one
         // shared module, no composite module or privileged writer.
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(multisig, destinationOpId, uint64(AMOUNT));
         _rebalance(p);
 
@@ -571,7 +571,7 @@ contract BridgeRebalanceTest is Test, BridgeProxyTestUtils {
 
         // Both sides use mint/burn: the source burn is verified and the credit
         // creates a new record tagged with the secondary RGB network.
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(multisig, inflateOpId, uint64(AMOUNT));
         _rebalance(p);
 

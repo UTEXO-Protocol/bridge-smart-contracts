@@ -10,7 +10,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract MinimalBridgeTest is Test {
     // Events re-declared locally for vm.expectEmit
-    event FundsIn(address indexed sender, uint256 operationId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed operationId, uint64 amount);
     event FundsOut(address indexed recipient, uint256 amount, uint256 indexed operationId, string sourceAddress);
 
     MinimalBridge bridge;
@@ -73,14 +73,14 @@ contract MinimalBridgeTest is Test {
     }
 
     function test_fundsIn_emitsFundsIn() public {
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, OPERATION_ID, uint64(AMOUNT));
 
         vm.prank(user);
         bridge.fundsIn(AMOUNT, OPERATION_ID);
     }
 
-    function test_fundsIn_operationIdIsNonIndexedEventData() public {
+    function test_fundsIn_operationIdIsIndexedTopic() public {
         bytes32 fundsInTopic = keccak256("FundsIn(address,uint256,uint64)");
         vm.recordLogs();
         vm.prank(user);
@@ -89,11 +89,11 @@ contract MinimalBridgeTest is Test {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].emitter == address(bridge) && logs[i].topics[0] == fundsInTopic) {
-                assertEq(logs[i].topics.length, 2, "only signature and sender are indexed");
+                assertEq(logs[i].topics.length, 3, "signature, sender and operation id are indexed");
                 assertEq(address(uint160(uint256(logs[i].topics[1]))), user, "sender topic");
-                (uint256 operationId, uint64 amount) = abi.decode(logs[i].data, (uint256, uint64));
-                assertEq(operationId, OPERATION_ID, "operation id is event data");
-                assertEq(amount, AMOUNT, "amount is event data");
+                assertEq(uint256(logs[i].topics[2]), OPERATION_ID, "operation id topic");
+                assertEq(logs[i].data.length, 32, "only amount is event data");
+                assertEq(abi.decode(logs[i].data, (uint64)), AMOUNT, "amount is event data");
                 return;
             }
         }
@@ -104,7 +104,7 @@ contract MinimalBridgeTest is Test {
         uint256 amount = type(uint64).max;
         token.mint(user, amount);
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, OPERATION_ID, type(uint64).max);
 
         vm.prank(user);

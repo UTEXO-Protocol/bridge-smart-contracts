@@ -129,7 +129,7 @@ interface IBridge {
     ///                `settlementData`. Included in the RGB mint backing id
     ///                together with the network and actual net amount.
     /// @param amount  Net amount bridged (post-commission), bounded to the RGB `u64` range.
-    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
 
     /// @param operationId        Canonical bridge-side operation id, derived
     ///                           on-chain by Bridge. RGB uses the mint identity;
