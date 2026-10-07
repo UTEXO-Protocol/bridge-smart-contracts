@@ -47,6 +47,53 @@ contract ZeroNetCommissionManager {
     }
 }
 
+/// @dev Models an authorised route rotation executed during fee forwarding.
+contract RouteRotatingCommissionManager {
+    address private immutable _bridge;
+    RouteRegistry private immutable _registry;
+    address private immutable _verifier;
+    address private immutable _module;
+    uint256 private immutable _sourceChainId;
+    uint256 private immutable _destinationChainId;
+
+    constructor(
+        address bridge_,
+        RouteRegistry registry_,
+        address verifier_,
+        address module_,
+        uint256 src,
+        uint256 dst
+    ) {
+        _bridge = bridge_;
+        _registry = registry_;
+        _verifier = verifier_;
+        _module = module_;
+        _sourceChainId = src;
+        _destinationChainId = dst;
+    }
+
+    function acceptRegistryOwnership() external {
+        _registry.acceptOwnership();
+    }
+
+    function bridgeAddress() external view returns (address) {
+        return _bridge;
+    }
+
+    function calculateFundsInCommission(uint256, uint256, address, uint256 amount)
+        external
+        pure
+        returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)
+    {
+        return (amount / 10, 0, amount - amount / 10);
+    }
+
+    function receiveTokenCommission(address, uint256) external {
+        require(msg.sender == _bridge, "only bridge");
+        _registry.setRoute(_sourceChainId, _destinationChainId, true, _verifier, _module);
+    }
+}
+
 /// @title BridgeTestBase
 /// @notice Shared fixture for the Bridge suites: deployment, actors, route
 ///         wiring, and the calldata / burnId helpers every case builds on.
@@ -56,7 +103,7 @@ contract ZeroNetCommissionManager {
 ///         pipeline can allocate stack slots for.
 abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     // Events re-declared locally for vm.expectEmit
-    event FundsIn(address indexed sender, uint256 rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
     event BridgeFundsIn(
         bytes32 indexed operationId,
         bytes32 indexed sourceSender,
@@ -116,7 +163,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     /// @notice Non-zero RGB OpId threaded through the RGB-route settlementData.
     uint256 constant RGB_OP_ID = 0xABCDEF;
     bytes32 constant BURN_TYPEHASH = keccak256(
-        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 sourceBurnTxId)"
     );
     /// @notice Default source-chain burn identifier used by the helpers. Tests
     ///         that need two distinct burns pass an explicit id instead.
@@ -224,8 +271,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         arr[0] = id;
     }
 
-    /// @dev Mirror of `Bridge._deriveOperationId` so tests can precompute the
-    ///      expected canonical id when they need it for an `expectEmit` topic.
+    /// @dev Independent legacy deposit formula for non-RGB route assertions.
     ///      Prefer capturing the return value of `fundsIn`; this exists for the
     ///      cases where the id is needed BEFORE the call (event assertions).
     function _deriveOpId(
@@ -254,6 +300,23 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         );
     }
 
+    /// @dev The published RGB formula, independent of Bridge's helper.
+    function _deriveRgbOpId(uint256 rgbNetwork, uint256 rgbOpId, uint256 netAmount) internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                keccak256(
+                    "UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)"
+                ),
+                address(bridge),
+                block.chainid,
+                address(usdt0),
+                rgbNetwork,
+                rgbOpId,
+                netAmount
+            )
+        );
+    }
+
     function _proof() internal pure returns (bytes memory) {
         return abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
     }
@@ -277,12 +340,14 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     /// @dev Mirror of `Bridge._deriveBurnIdFromFields`. `recipient`, `proof` and
     ///      `destinationChainId` are deliberately absent: the key is shared with
     ///      `rebalanceLiquidity`, which has no recipient and credits a different
-    ///      destination, and `proof` carries the moving relay head.
+    ///      destination. Settlement data is excluded, and `proof` carries
+    ///      the moving relay head.
     function _deriveBurnIdWithTx(
         uint256 amount,
         uint256 sourceChainId,
         string memory sourceAddress,
-        bytes memory settlementData,
+        bytes memory,
+        /* settlementData */
         bytes32 sourceBurnTxId
     ) internal view returns (uint256) {
         return uint256(
@@ -295,7 +360,6 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                     amount,
                     sourceChainId,
                     keccak256(bytes(sourceAddress)),
-                    keccak256(settlementData),
                     sourceBurnTxId
                 )
             )
@@ -654,9 +718,15 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
             expectedRevert = abi.encodeWithSelector(ICommissionManager.InvalidPrice.selector);
         }
 
-        bytes32 expectedOpId = _deriveOpId(
-            SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, amount, RGB_CHAIN_ID, DST_ADDR, _rgbData()
-        );
+        uint256 expectedNet = amount;
+        if (failureMode == 2) {
+            (,, expectedNet) = cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
+        }
+        bytes32 expectedOpId = failureMode == 1
+            ? _deriveOpId(
+                SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, amount, RGB_CHAIN_ID, DST_ADDR, _rgbData()
+            )
+            : _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, expectedNet);
         LedgerSnapshot memory before = _snapshotLedger(expectedOpId);
 
         vm.expectRevert(expectedRevert);
@@ -835,7 +905,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         uint256 destinationChainId,
         string memory sourceAddress,
         bytes memory,
-        bytes memory settlementData
+        bytes memory /* settlementData */
     ) internal view returns (uint256) {
         recipient_; // no longer part of the key
         destinationChainId; // no longer part of the key
@@ -849,7 +919,6 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                     amount,
                     sourceChainId,
                     keccak256(bytes(sourceAddress)),
-                    keccak256(settlementData),
                     SRC_BURN_TX_ID
                 )
             )

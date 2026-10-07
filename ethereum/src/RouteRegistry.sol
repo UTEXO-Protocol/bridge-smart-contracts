@@ -128,6 +128,20 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // =========================================================================
 
     /// @inheritdoc IRouteRegistry
+    function usesRgbMintDepositId(uint256 sourceChainId, uint256 destChainId)
+        external
+        view
+        override
+        onlyBridge
+        returns (bool)
+    {
+        RouteConfig memory route = _routes[_routeKey(sourceChainId, destChainId)];
+        if (!route.enabled) revert RouteNotEnabled(sourceChainId, destChainId);
+        if (destChainId == block.chainid) return false;
+        return ISettlementModule(route.settlementModule).usesRgbMintDepositId();
+    }
+
+    /// @inheritdoc IRouteRegistry
     function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
         external
         override

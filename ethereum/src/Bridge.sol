@@ -121,13 +121,20 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///         make allowance return faster.
     uint256 public constant BUCKET_REFILL_WINDOW = 24 hours;
 
-    /// @notice Domain-separated type hash for the on-chain `operationId`
+    /// @notice Domain-separated type hash for non-RGB deposit `operationId`
     ///         derivation. Binds the id to this contract, the deposit context
     ///         and a formula version, so ids cannot collide across deployments
     ///         or a future formula revision. Not an EIP-712 signing digest —
     ///         it is an internal, unsigned domain separator for the id hash.
     bytes32 public constant FUNDS_IN_OPERATION_TYPEHASH = keccak256(
         "UtexoFundsInOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,uint256 senderNonce,address token,uint256 grossAmount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataHash,uint256 chainId)"
+    );
+
+    /// @notice RGB backing identity derived only from a mint and pinned config.
+    /// @dev Both deposits and rebalances into RGB use this formula,
+    ///      so the mint has one backing record.
+    bytes32 public constant RGB_MINT_DEPOSIT_TYPEHASH = keccak256(
+        "UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)"
     );
 
     /// @notice Domain-separated type hash for the settlement replay key shared
@@ -143,15 +150,15 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///         rebalance of the same burn carry different destinations, so
     ///         keeping it would let one burn settle once on each path.
     bytes32 public constant BURN_TYPEHASH = keccak256(
-        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
+        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 sourceBurnTxId)"
     );
 
-    /// @notice Domain-separated type hash for the credit-leg `operationId` of a
-    ///         `rebalanceLiquidity` call. Distinct from
+    /// @notice Domain-separated type hash for the non-RGB credit-leg
+    ///         `operationId` of a `rebalanceLiquidity` call. Distinct from
     ///         `FUNDS_IN_OPERATION_TYPEHASH` so a rebalance id can never collide
     ///         with a deposit id. Folds in the canonical `burnId` (the shared
-    ///         settlement replay key, including `settlementDataOut` and
-    ///         `sourceBurnTxId` but excluding the moving finality `proof`), so
+    ///         settlement replay key, including `sourceBurnTxId` but excluding
+    ///         settlement data and the moving finality `proof`), so
     ///         two rebalances backed by different source burns still derive
     ///         distinct `operationId`s. Without this, a credit leg whose
     ///         `settlementDataIn` is empty (e.g. RGB→Arch) would collide.
@@ -180,7 +187,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
     /// @notice Per-`(sourceChainId, sourceSender)` monotonic nonce. Folded into
-    ///         `operationId` so two otherwise-identical deposits from the same
+    ///         non-RGB `operationId` so otherwise-identical deposits from the same
     ///         sender still produce distinct ids. Incremented once per successful
     ///         `fundsIn`; a downstream revert rolls the increment back.
     mapping(uint256 sourceChainId => mapping(bytes32 sourceSender => uint256 nonce)) public sourceSenderNonces;
@@ -484,7 +491,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         bytes calldata settlementData
     ) external payable override whenNotPaused nonReentrant onlyLZAdapter returns (bytes32 operationId) {
         // LZ deposit: tokens are pulled from the adapter (`_msgSender()`), but
-        // the identity bound into `operationId` is the authenticated
+        // the identity bound into non-RGB `operationId` is the authenticated
         // `sourceSender` forwarded from the source-chain entrypoint.
         //
         // `refundNativeSurplus = false`: `msg.value` is the source-agreed
@@ -648,13 +655,13 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         _validateRebalanceParams(params);
 
         // Credit-leg identity: the hash of the source-chain address string. Only
-        // used to derive the credit `operationId` and label the event; unlike
+        // used to derive a non-RGB credit `operationId` and label the event; unlike
         // `_fundsIn`, no nonce stream is consumed here (see the replay guard).
         bytes32 sourceSender = _hashCalldataString(params.sourceAddress);
 
         // Shared replay guard: `fundsOut` and `rebalanceLiquidity` derive the
         // same id from the canonical debit fields under `BURN_TYPEHASH`. The
-        // moving finality proof and credit-leg fields are intentionally absent;
+        // settlement data, moving finality proof and credit-leg fields are absent;
         // `sourceBurnTxId` identifies the source burn. Enclaves are responsible
         // for deriving every included field canonically from the fully validated
         // consignment and for never attesting a second intent for the same burn.
@@ -706,7 +713,10 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         // Credit leg: canonical id + settlement write. For RGB destinations the
         // module records `fundsInRecords[operationId] = amount` and returns the
         // RGB OpId — indistinguishable from a real deposit to the RGB side.
-        bytes32 operationId = _deriveRebalanceOperationId(params, sourceSender, expectedBurnId);
+        bytes32 operationId = IRouteRegistry(routeRegistry)
+            .usesRgbMintDepositId(params.sourceChainId, params.destinationChainId)
+            ? rgbMintDepositId(params.destinationChainId, _decodeRgbOpId(params.settlementDataIn), params.amount)
+            : _deriveRebalanceOperationId(params, sourceSender, expectedBurnId);
         uint256 rgbOpId = IRouteRegistry(routeRegistry)
             .onFundsIn(
                 FundsInContext({
@@ -946,28 +956,21 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             }
         }
 
-        // Build the canonical context. The per-`(sourceChainId, sourceSender)`
-        // nonce is consumed here — before any external call, so a downstream
-        // revert rolls it back — and folded, with the deposit context, into the
-        // on-chain-derived operationId. Because the id binds the authenticated
-        // `sourceSender` and an incrementing nonce, a third party cannot predict
-        // or pre-empt it. Held in memory to keep the stack shallow.
+        // Consume the per-sender nonce before external calls; a downstream
+        // revert rolls it back. It remains part of the event and non-RGB id,
+        // while RGB identity depends only on the mint and actual net amount.
         FundsInContext memory ctx = FundsInContext({
             token: TOKEN,
             sender: from,
             sourceSender: sourceSender,
             grossAmount: amount,
             netAmount: 0, // set below from the ACTUAL received amount
-            operationId: bytes32(0), // filled in on the next line
+            operationId: bytes32(0), // derived after actual netAmount is known
             senderNonce: sourceSenderNonces[sourceChainId][sourceSender]++,
             sourceChainId: sourceChainId,
             destChainId: destinationChainId,
             destAddress: destinationAddress
         });
-        // operationId binds grossAmount (not netAmount), so it is stable
-        // regardless of any token transfer fee.
-        ctx.operationId = _deriveOperationId(ctx, settlementData);
-
         // Pull the gross amount and measure what ACTUALLY arrived. A
         // fee-on-transfer token can deliver less than `amount`; crediting the
         // nominal amount would overstate custody and could brick release of the
@@ -992,6 +995,10 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         // already fixed above, so the hook does not depend on the tokens still
         // being held here.
         if (tokenCommission != 0) _forwardTokenCommission(tokenCommission);
+
+        // Resolve identity after commission callbacks, immediately before the
+        // record write.
+        ctx.operationId = _deriveOperationId(ctx, settlementData);
 
         // Delegate per-route inbound bookkeeping. The module returns an optional
         // correlation id (the RGB OpId for the RGB route; 0 otherwise) to surface
@@ -1136,19 +1143,34 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         return Math.mulDiv(refLiquidity, maxBps, BPS_DENOMINATOR);
     }
 
-    /// @dev Canonical `operationId` = domain-separated hash of the deposit
-    ///      context. Binds the id to sender/gross-amount/route/destination so it
-    ///      is both unpredictable (via the authenticated `sourceSender` + nonce)
-    ///      and provably tied to this deposit. Uses `grossAmount` (the user's
-    ///      submitted amount, known before execution) rather than the
-    ///      commission-derived `netAmount`, so a backend can best-effort
-    ///      pre-compute the id; the canonical value is still the one in the
-    ///      `BridgeFundsIn` event. `ctx.operationId` is ignored (zero when called).
+    /// @inheritdoc IBridge
+    function rgbMintDepositId(uint256 rgbNetwork, uint256 rgbOpId, uint256 netAmount)
+        public
+        view
+        override
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, address(this), block.chainid, TOKEN, rgbNetwork, rgbOpId, netAmount)
+        );
+    }
+
+    function _decodeRgbOpId(bytes calldata settlementData) private pure returns (uint256 rgbOpId) {
+        rgbOpId = abi.decode(settlementData, (uint256));
+        if (rgbOpId == 0) revert InvalidRgbOpId();
+    }
+
+    /// @dev RGB ids bind the mint and actual net amount; all other routes retain
+    ///      the sender/nonce/gross-amount formula. The route module chooses the
+    ///      mode before the record is written. ctx.operationId is ignored.
     function _deriveOperationId(FundsInContext memory ctx, bytes calldata settlementData)
         private
         view
         returns (bytes32)
     {
+        if (IRouteRegistry(routeRegistry).usesRgbMintDepositId(ctx.sourceChainId, ctx.destChainId)) {
+            return rgbMintDepositId(ctx.destChainId, _decodeRgbOpId(settlementData), ctx.netAmount);
+        }
         return keccak256(
             abi.encode(
                 FUNDS_IN_OPERATION_TYPEHASH,
@@ -1169,21 +1191,16 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @dev Canonical `burnId` = domain-separated hash of the settlement intent.
     ///      Identical formula for both paths — see `BURN_TYPEHASH`.
     function _deriveBurnId(FundsOutParams calldata params) private view returns (uint256) {
-        return _deriveBurnIdFromFields(
-            params.amount, params.sourceChainId, params.sourceAddress, params.settlementData, params.sourceBurnTxId
-        );
+        return _deriveBurnIdFromFields(params.amount, params.sourceChainId, params.sourceAddress, params.sourceBurnTxId);
     }
 
-    /// @dev Rebalance uses the SAME formula; `settlementDataOut` is the
-    ///      debit-leg blob, the exact counterpart of `fundsOut`'s
-    ///      `settlementData`.
+    /// @dev Rebalance uses the SAME formula. Both settlement blobs are excluded:
+    ///      selecting other backing records cannot create a new replay key.
     function _deriveRebalanceBurnId(RebalanceParams calldata params) private view returns (uint256) {
-        return _deriveBurnIdFromFields(
-            params.amount, params.sourceChainId, params.sourceAddress, params.settlementDataOut, params.sourceBurnTxId
-        );
+        return _deriveBurnIdFromFields(params.amount, params.sourceChainId, params.sourceAddress, params.sourceBurnTxId);
     }
 
-    /// @dev Dynamic fields are hashed over their RAW bytes (never their ABI
+    /// @dev The source address is hashed over its RAW bytes (never its ABI
     ///      encoding), matching EIP-712 treatment of dynamic types. An empty
     ///      value therefore hashes to
     ///      `0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470`,
@@ -1192,7 +1209,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         uint256 amount,
         uint256 sourceChainId,
         string calldata sourceAddress,
-        bytes calldata settlementData,
         bytes32 sourceBurnTxId
     ) private view returns (uint256) {
         return uint256(
@@ -1205,7 +1221,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
                     amount,
                     sourceChainId,
                     _hashCalldataString(sourceAddress),
-                    _hashCalldataBytes(settlementData),
                     sourceBurnTxId
                 )
             )

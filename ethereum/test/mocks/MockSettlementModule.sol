@@ -18,6 +18,7 @@ contract MockSettlementModule is ISettlementModule {
 
     bool public shouldRevertOnFundsIn;
     bool public shouldRevertOnBeforeFundsOut;
+    bool public override usesRgbMintDepositId;
 
     uint256 public onFundsInCount;
     uint256 public beforeFundsOutCount;
@@ -54,6 +55,10 @@ contract MockSettlementModule is ISettlementModule {
 
     function setExternalIdToReturn(uint256 v) external {
         externalIdToReturn = v;
+    }
+
+    function setUsesRgbMintDepositId(bool v) external {
+        usesRgbMintDepositId = v;
     }
 
     /// @inheritdoc ISettlementModule
