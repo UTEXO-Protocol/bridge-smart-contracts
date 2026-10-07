@@ -583,8 +583,13 @@ contract BridgeTest is BridgeTestBase {
         assertEq(permissiveModule.onFundsInCount(), 1, "generic route accepts the address-length cap");
     }
 
+    function test_settlementDataCaps_splitByDirection() public view {
+        assertEq(bridge.MAX_SETTLEMENT_DATA_IN_LENGTH(), 128, "inbound settlementData cap");
+        assertEq(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH(), 90_000, "outbound settlementData cap");
+    }
+
     function test_fundsIn_revertsOnSettlementDataTooLong() public {
-        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH();
         bytes memory tooLong = _bytesOfLength(max + 1);
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
@@ -597,7 +602,7 @@ contract BridgeTest is BridgeTestBase {
         // maximal-length blob still decodes as a non-zero RGB OpId (the first
         // 32 bytes read as uint256), so the deposit clears the guard and
         // records normally under the bridge-derived operationId.
-        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH();
         bytes memory atMax = _bytesOfLength(max);
 
         vm.prank(user);
@@ -605,11 +610,44 @@ contract BridgeTest is BridgeTestBase {
         assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "deposit at the settlement-data cap is accepted");
     }
 
+    function test_fundsIn_inboundCapIsNotTheOutboundCap() public {
+        // A payload one byte over the inbound cap is far below the outbound
+        // cap, and must still be rejected on the deposit path.
+        uint256 len = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH() + 1;
+        assertLt(len, bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH());
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, len, bridge.MAX_SETTLEMENT_DATA_IN_LENGTH())
+        );
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _bytesOfLength(len));
+    }
+
+    function test_fundsOut_acceptsSettlementDataAboveInboundCap() public {
+        // A two-record release payload (128 + 64 * 2 = 256 bytes) is above the
+        // inbound cap; the release path must be bounded by the outbound cap only.
+        vm.prank(user);
+        bytes32 opA = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
+        vm.prank(user);
+        bytes32 opB = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
+        _ensureRgbSafetyCapacity(2 * AMOUNT);
+
+        bytes32[] memory ids = new bytes32[](2);
+        ids[0] = opA;
+        ids[1] = opB;
+        bytes memory settlementData = _settlement(ids);
+        assertGt(settlementData.length, bridge.MAX_SETTLEMENT_DATA_IN_LENGTH());
+
+        vm.prank(multisig);
+        _fundsOut(recipient, 2 * AMOUNT, BURN_ID, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), settlementData);
+        assertEq(usdt0.balanceOf(recipient), 2 * AMOUNT, "release above the inbound cap succeeds");
+    }
+
     function test_fundsOut_revertsOnSettlementDataTooLong() public {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
         bytes memory tooLong = _bytesOfLength(max + 1);
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
@@ -625,7 +663,7 @@ contract BridgeTest is BridgeTestBase {
         // blob does not decode as a valid (bytes32[], uint256[]) settlement
         // encoding, so it reverts later (or on the unrelated burnId check) — the
         // guard is isolated by asserting the revert is NOT SettlementDataTooLong.
-        uint256 max = bridge.MAX_SETTLEMENT_DATA_LENGTH();
+        uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
         bytes memory atMax = _bytesOfLength(max);
 
         IBridge.FundsOutParams memory params = IBridge.FundsOutParams(
@@ -779,12 +817,12 @@ contract BridgeTest is BridgeTestBase {
         routeRegistry.setRoute(customSrc, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
 
         // The nonce for this (sourceChainId, sourceSender) starts at 0.
-        bytes32 expectedOpId = _deriveOpId(customSrc, sourceSender, 0, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
 
         // Drop the emitter filter so Forge's expectEmit scans past the token's
         // Transfer event (emitter = usdt0) and matches BridgeFundsIn by topic0.
         // FundsIn (RGB route) carries the rgbOpId; sender = the adapter.
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(mockAdapter, RGB_OP_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -807,6 +845,28 @@ contract BridgeTest is BridgeTestBase {
 
         assertEq(opId, expectedOpId, "returned id matches derivation");
         assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "record stored on module");
+    }
+
+    function test_fundsInFromAdapter_sameRgbMintAcrossSourceRoutesReverts() public {
+        vm.prank(user);
+        bytes32 original = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        address adapter = makeAddr("shadowAdapter");
+        vm.prank(multisig);
+        bridge.setLZAdapter(adapter);
+        uint256 customSource = 137;
+        vm.prank(deployer);
+        routeRegistry.setRoute(customSource, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+        usdt0.mint(adapter, AMOUNT);
+        vm.prank(adapter);
+        usdt0.approve(address(bridge), AMOUNT);
+        bytes32 sourceSender = bytes32(uint256(uint160(makeAddr("otherSourceSender"))));
+        vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
+        vm.prank(adapter);
+        bridge.fundsIn(AMOUNT, customSource, sourceSender, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        assertEq(rgbModule.fundsInRecords(original), AMOUNT);
+        assertEq(usdt0.balanceOf(adapter), AMOUNT);
+        assertEq(bridge.totalLockedLiquidity(), AMOUNT);
+        assertEq(bridge.sourceSenderNonces(customSource, sourceSender), 0);
     }
 
     // ========================================================================
@@ -832,9 +892,9 @@ contract BridgeTest is BridgeTestBase {
 
     function test_fundsIn_emitsBothEvents() public {
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
-        bytes32 expectedOpId = _deriveOpId(SOURCE_CHAIN_ID, sourceSender, 0, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -870,9 +930,9 @@ contract BridgeTest is BridgeTestBase {
 
     function test_fundsIn_rgbAcceptsEmptyDestinationAddressAndEmitsNonce() public {
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
-        bytes32 expectedOpId = _deriveOpId(SOURCE_CHAIN_ID, sourceSender, 0, AMOUNT, RGB_CHAIN_ID, "", _rgbData());
+        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true);
         emit BridgeFundsIn(
@@ -882,7 +942,7 @@ contract BridgeTest is BridgeTestBase {
         vm.prank(user);
         bytes32 operationId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, "", _rgbData());
 
-        assertEq(operationId, expectedOpId, "empty address is part of the canonical operation id");
+        assertEq(operationId, expectedOpId, "canonical RGB mint id");
         assertEq(rgbModule.fundsInRecords(operationId), AMOUNT, "RGB settlement record created");
     }
 
@@ -905,21 +965,20 @@ contract BridgeTest is BridgeTestBase {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
-    // The operationId is derived on-chain with a per-sender nonce, so two
-    // identical deposits from the same sender get DISTINCT ids and
-    // both succeed — the caller can no longer force a DuplicateOperationId by
-    // replaying params. The duplicate guard is exercised directly at the module
-    // level (RgbSettlementModule.t.sol) instead.
-    function test_fundsIn_repeatedDepositsDoNotCollide() public {
+    function test_fundsIn_repeatedRgbMintReverts() public {
         vm.prank(user);
         bytes32 opId1 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
+        uint256 balanceBefore = usdt0.balanceOf(user);
+        vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
         vm.prank(user);
-        bytes32 opId2 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        assertTrue(opId1 != opId2, "nonce makes identical deposits distinct");
-        assertEq(rgbModule.fundsInRecords(opId1), AMOUNT, "first record");
-        assertEq(rgbModule.fundsInRecords(opId2), AMOUNT, "second record");
+        assertEq(opId1, _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT));
+        assertEq(rgbModule.fundsInRecords(opId1), AMOUNT, "original record unchanged");
+        assertEq(usdt0.balanceOf(user), balanceBefore, "duplicate token pull rolled back");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT, "only one liquidity credit");
+        assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))), 1);
     }
 
     // ========================================================================
@@ -1210,7 +1269,7 @@ contract BridgeTest is BridgeTestBase {
     ///      let one settlement derive different ids over time. Swapping the proof
     ///      therefore keeps the same id — integrity of the proof is carried by the
     ///      enclave's EIP-712 signature, not by the replay key.
-    function test_fundsOut_burnIdIsIndependentOfProof() public {
+    function test_fundsOut_burnIdIsIndependentOfProof() public view {
         bytes memory settlementData = _settlement(_ids(keccak256("op")));
         bytes memory proofA = _proof();
         bytes memory proofB = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, keccak256("changed-proof"));
@@ -1276,27 +1335,69 @@ contract BridgeTest is BridgeTestBase {
         assertFalse(bridge.consumedBurnIds(signedBurnId), "signed burn id unchanged");
     }
 
-    function test_fundsOut_revertsWhenSettlementDataChangesAfterBurnIdDerivation() public {
+    function test_fundsOut_rejectsLegacyBurnIdFormula() public {
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes memory settlementData = _settlement(_ids(opId));
+        uint256 legacyBurnId = uint256(
+            keccak256(
+                abi.encode(
+                    keccak256(
+                        "UtexoBurnId(address bridge,uint256 chainId,address token,uint256 amount,uint256 sourceChainId,bytes32 sourceAddressHash,bytes32 settlementDataHash,bytes32 sourceBurnTxId)"
+                    ),
+                    address(bridge),
+                    block.chainid,
+                    address(usdt0),
+                    AMOUNT,
+                    RGB_CHAIN_ID,
+                    keccak256(bytes(SRC_ADDR)),
+                    keccak256(settlementData),
+                    SRC_BURN_TX_ID
+                )
+            )
+        );
+        uint256 expectedBurnId = _deriveBurnIdWithTx(AMOUNT, RGB_CHAIN_ID, SRC_ADDR, settlementData, SRC_BURN_TX_ID);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidBurnId.selector, legacyBurnId, expectedBurnId));
+        vm.prank(multisig);
+        _fundsOutWithBurnId(
+            recipient, AMOUNT, legacyBurnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), settlementData
+        );
+        assertFalse(bridge.consumedBurnIds(legacyBurnId));
+        assertFalse(bridge.consumedBurnIds(expectedBurnId));
+        assertEq(usdt0.balanceOf(recipient), 0);
+    }
+
+    function test_fundsOut_changedBackingRecordsCannotReplaySameBurn() public {
         vm.prank(user);
         bytes32 opId1 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
         vm.prank(user);
         bytes32 opId2 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
+        _ensureRgbSafetyCapacity(AMOUNT);
 
         bytes memory proof = _proof();
-        bytes memory signedSettlementData = _settlement(_ids(opId1));
-        bytes memory changedSettlementData = _settlement(_ids(opId2));
-        uint256 signedBurnId =
-            _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, signedSettlementData);
-        uint256 expectedBurnId =
-            _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, changedSettlementData);
-
-        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidBurnId.selector, signedBurnId, expectedBurnId));
-        vm.prank(multisig);
-        _fundsOutWithBurnId(
-            recipient, AMOUNT, signedBurnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, changedSettlementData
+        bytes memory originalData = _settlement(_ids(opId1));
+        bytes memory changedData = _settlement(_ids(opId2));
+        uint256 burnId = _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, originalData);
+        assertEq(
+            _deriveBurnId(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, changedData),
+            burnId,
+            "backing records do not change burn identity"
         );
 
-        assertFalse(bridge.consumedBurnIds(signedBurnId), "signed burn id unchanged");
+        vm.prank(multisig);
+        _fundsOutWithBurnId(recipient, AMOUNT, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, originalData);
+        uint256 recipientBalance = usdt0.balanceOf(recipient);
+        uint256 liquidity = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 poolBalance = usdt0.balanceOf(address(bridge));
+
+        vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, burnId));
+        vm.prank(multisig);
+        _fundsOutWithBurnId(recipient, AMOUNT, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, changedData);
+
+        assertTrue(bridge.consumedBurnIds(burnId));
+        assertEq(usdt0.balanceOf(recipient), recipientBalance, "no second payout");
+        assertEq(usdt0.balanceOf(address(bridge)), poolBalance, "pool unchanged");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidity, "liquidity unchanged");
         assertEq(rgbModule.fundsInRecords(opId1), AMOUNT, "first record unchanged");
         assertEq(rgbModule.fundsInRecords(opId2), AMOUNT, "second record unchanged");
     }

@@ -111,9 +111,85 @@ contract BridgeProxyTest is Test {
         implementation.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 22, 11, owner);
     }
 
+    function test_rgbMintDepositId_matchesPublishedVectorThroughProxy() public {
+        address vectorBridge = 0x1111111111111111111111111111111111111111;
+        address vectorToken = 0x2222222222222222222222222222222222222222;
+        vm.chainId(42161);
+        vm.etch(vectorBridge, address(proxy).code);
+        vm.store(
+            vectorBridge,
+            0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc,
+            bytes32(uint256(uint160(address(implementation))))
+        );
+        Bridge(vectorBridge).initialize(vectorToken, routeRegistry, commissionManager, address(0), 1, 1, owner);
+        assertEq(
+            Bridge(vectorBridge).RGB_MINT_DEPOSIT_TYPEHASH(),
+            bytes32(0x1a137b1271ebe5dab41e95404f65ad059a653667420a6527377e0d45e75d3e36)
+        );
+        assertEq(
+            Bridge(vectorBridge).rgbMintDepositId(96, 0xabcdef, 1_000_000),
+            bytes32(0x6f0c19c7e7e8764fbd2afa1fc8211144acc9b45766be22d6b9bba1b20ed6cbd9)
+        );
+    }
+
     function test_proxyCannotBeInitializedTwice() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
         bridge.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 22, 11, owner);
+    }
+
+    function test_burnId_matchesPublishedVectorOnBothPathsThroughProxy() public {
+        address vectorBridge = 0x1111111111111111111111111111111111111111;
+        address vectorToken = 0x2222222222222222222222222222222222222222;
+        uint256 expectedBurnId = 0x5f7d9d965dd22d924a86f6d23852911167ff751aa0d6a7227ad84d93fc20041d;
+        vm.chainId(42161);
+        vm.etch(vectorBridge, address(proxy).code);
+        vm.store(
+            vectorBridge,
+            0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc,
+            bytes32(uint256(uint160(address(implementation))))
+        );
+        vm.etch(vectorToken, address(token).code);
+        MockERC20(vectorToken).mint(vectorBridge, 1_000_000);
+        Bridge pinned = Bridge(vectorBridge);
+        pinned.initialize(vectorToken, routeRegistry, commissionManager, address(0), 1, 1, owner);
+        assertEq(pinned.BURN_TYPEHASH(), bytes32(0x09f8684e07c29653e96d992d7bca89a5ff94761a0d3c0d5e67c35dda03184e41));
+
+        // InvalidBurnId exposes the actual private derivation before route calls.
+        // Different settlement payloads must all produce the published value.
+        for (uint256 i; i < 3; ++i) {
+            bytes memory settlement = i == 0 ? bytes("") : abi.encode(i, bytes32(uint256(0x1234)));
+            vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidBurnId.selector, 0, expectedBurnId));
+            vm.prank(owner);
+            pinned.fundsOut(
+                IBridge.FundsOutParams({
+                    recipient: owner,
+                    amount: 1_000_000,
+                    burnId: 0,
+                    sourceChainId: 96,
+                    destinationChainId: 42161,
+                    sourceAddress: "",
+                    proof: "",
+                    settlementData: settlement,
+                    sourceBurnTxId: bytes32(uint256(0xabcdef))
+                })
+            );
+            vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidBurnId.selector, 0, expectedBurnId));
+            vm.prank(owner);
+            pinned.rebalanceLiquidity(
+                IBridge.RebalanceParams({
+                    amount: 1_000_000,
+                    burnId: 0,
+                    sourceChainId: 96,
+                    destinationChainId: 97,
+                    sourceAddress: "",
+                    destinationAddress: "",
+                    proof: "",
+                    settlementDataOut: settlement,
+                    settlementDataIn: abi.encode(i + 1),
+                    sourceBurnTxId: bytes32(uint256(0xabcdef))
+                })
+            );
+        }
     }
 
     function test_compatibilityMarker_constructorAcceptsImplementationWithWordFallback() public {

@@ -108,6 +108,11 @@ contract RgbOutboundSettlementModule is ISettlementModule {
     // =========================================================================
 
     /// @inheritdoc ISettlementModule
+    function usesRgbMintDepositId() external pure override returns (bool) {
+        return false;
+    }
+
+    /// @inheritdoc ISettlementModule
     /// @dev Credit side needs no RGB bookkeeping: no record, no correlation id,
     ///      hence no `FundsIn` event from Bridge for this leg.
     function onFundsIn(FundsInContext calldata, bytes calldata)

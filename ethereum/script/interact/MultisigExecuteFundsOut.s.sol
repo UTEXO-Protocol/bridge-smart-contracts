@@ -87,7 +87,6 @@ contract MultisigExecuteFundsOut is Script {
                     p.amount,
                     p.sourceChainId,
                     keccak256(bytes(p.sourceAddress)),
-                    keccak256(p.settlementData),
                     p.sourceBurnTxId
                 )
             )

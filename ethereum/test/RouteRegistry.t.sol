@@ -197,6 +197,41 @@ contract RouteRegistryTest is Test {
     // onFundsIn
     // ========================================================================
 
+    function test_usesRgbMintDepositId_readsConfiguredModule() public {
+        _registerHappyRoute();
+        vm.prank(bridge);
+        assertFalse(registry.usesRgbMintDepositId(SOURCE_CHAIN_ID, DEST_CHAIN_ID));
+        module.setUsesRgbMintDepositId(true);
+        vm.prank(bridge);
+        assertTrue(registry.usesRgbMintDepositId(SOURCE_CHAIN_ID, DEST_CHAIN_ID));
+    }
+
+    function test_usesRgbMintDepositId_localEvmDestinationKeepsLegacyMode() public {
+        module.setUsesRgbMintDepositId(true);
+        vm.prank(owner);
+        registry.setRoute(SOURCE_CHAIN_ID, block.chainid, true, address(verifier), address(module));
+        vm.prank(bridge);
+        assertFalse(registry.usesRgbMintDepositId(SOURCE_CHAIN_ID, block.chainid));
+    }
+
+    function test_usesRgbMintDepositId_revertsIfNotBridge() public {
+        _registerHappyRoute();
+        vm.expectRevert(IRouteRegistry.NotBridge.selector);
+        vm.prank(attacker);
+        registry.usesRgbMintDepositId(SOURCE_CHAIN_ID, DEST_CHAIN_ID);
+    }
+
+    function test_usesRgbMintDepositId_revertsOnUnsetAndDisabledRoutes() public {
+        vm.expectRevert(abi.encodeWithSelector(IRouteRegistry.RouteNotEnabled.selector, SOURCE_CHAIN_ID, DEST_CHAIN_ID));
+        vm.prank(bridge);
+        registry.usesRgbMintDepositId(SOURCE_CHAIN_ID, DEST_CHAIN_ID);
+        vm.prank(owner);
+        registry.setRoute(SOURCE_CHAIN_ID, DEST_CHAIN_ID, false, address(verifier), address(module));
+        vm.expectRevert(abi.encodeWithSelector(IRouteRegistry.RouteNotEnabled.selector, SOURCE_CHAIN_ID, DEST_CHAIN_ID));
+        vm.prank(bridge);
+        registry.usesRgbMintDepositId(SOURCE_CHAIN_ID, DEST_CHAIN_ID);
+    }
+
     function test_onFundsIn_dispatchesToModule() public {
         _registerHappyRoute();
 
