@@ -325,12 +325,12 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     ///      `fundsOut` payloads after.
     ///      The typehash is an internal formula/domain separator.
     function _deriveBurnId(
-        address recipient_,
+        address, /* recipient_ */
         uint256 amount,
         uint256 sourceChainId,
         uint256 destinationChainId,
         string memory sourceAddress,
-        bytes memory proof,
+        bytes memory, /* proof */
         bytes memory settlementData
     ) internal view returns (uint256) {
         destinationChainId; // no longer part of the key

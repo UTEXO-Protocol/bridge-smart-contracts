@@ -148,7 +148,9 @@ contract BtcRelay is IBtcRelay, IBtcRelayView {
 
         //Update globals
         _relayState.write(
-            blockHeight, uint224(newChainWork & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
+            blockHeight,
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint224(newChainWork & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
         );
     }
 
@@ -170,6 +172,7 @@ contract BtcRelay is IBtcRelay, IBtcRelayView {
             forkStartBlockheight = storedHeaderBlockHeight + 1;
             //Save the block start height and also the commitment of the fork root block (latest
             // block that is still committed in the main chain)
+            // forge-lint: disable-next-line(unsafe-typecast)
             fork.startHeight = uint32(forkStartBlockheight);
             fork.chain[storedHeaderBlockHeight] = commitHash;
         } else {
@@ -222,7 +225,9 @@ contract BtcRelay is IBtcRelay, IBtcRelayView {
 
             //Update globals
             _relayState.write(
-                forkTipBlockHeight, uint224(newChainWork & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
+                forkTipBlockHeight,
+                // forge-lint: disable-next-line(unsafe-typecast)
+                uint224(newChainWork & 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
             );
         }
     }
