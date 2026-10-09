@@ -17,7 +17,7 @@ import {IRgbRejectList} from "./interfaces/IRgbRejectList.sol";
 ///         so append-only is a property of the contract rather than an
 ///         operational convention — the incremental client sync relies on it.
 ///         A decision is changed by appending a newer entry for the same
-///         operation id; the latest entry wins.
+///         opout; the latest entry wins.
 ///
 ///         Two roles. The owner — meant to be a cold key — only appoints and
 ///         rotates the appender; the appender — the hot key of the publishing
@@ -78,7 +78,7 @@ contract RgbRejectList is IRgbRejectList, Ownable2Step {
             if (entry.opId == bytes32(0)) revert InvalidOpId();
 
             _entries.push(entry);
-            emit EntryAdded(index + i, entry.opId, entry.reject);
+            emit EntryAdded(index + i, entry.opId, entry.assignmentType, entry.no, entry.reject);
         }
     }
 

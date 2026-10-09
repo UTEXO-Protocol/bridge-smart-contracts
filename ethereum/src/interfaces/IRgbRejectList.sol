@@ -5,47 +5,42 @@ pragma solidity 0.8.35;
 /// @notice On-chain source of the RGB reject list consumed by RGB client-side
 ///         validation.
 ///
-/// @dev    Read model. Validators do NOT query this contract once per operation
-///         id. Validation walks the contract history and needs a lookup for
-///         every operation, with early exits (stop on a reject, skip the rest
-///         of a branch on an allow) that make each lookup depend on the
-///         previous one.
+/// @dev    Granularity. An entry targets one operation output (opout): operation
+///         id, assignment type and output index. One output can be rejected
+///         without the others.
 ///
-///         Latest entry wins. The list is a log of decisions: an operation id
-///         may appear any number of times, and its current decision is the
-///         one in its LAST entry — e.g. a rejected operation is allowed again
-///         by appending an allow entry for it. Clients apply entries in index
-///         order, so later entries override earlier ones. The log is the only
-///         state: there is no on-chain per-operation lookup.
+///         Latest entry wins. The list is an append-only log of decisions. An
+///         opout may appear many times; its current decision is its LAST entry
+///         (a rejected opout is re-allowed by appending an allow entry).
 ///
-///         Append-only. Entries can be added and never changed or removed, so a
-///         client caches entries up to the last index it has seen and on the
-///         next sync fetches only `[cachedLength, length())`. Reading `length()`
-///         and the pages at one fixed block keeps a sync consistent even if
-///         entries are appended while it runs.
+///         Sync. Entries are never changed or removed, so a client caches up to
+///         the last index seen and fetches only `[cachedLength, length())`.
+///         Read `length()` and the pages at one fixed block for a consistent
+///         view. Page size is a client choice, bounded by the RPC node's
+///         `eth_call` gas cap and timeout.
 ///
-///         Page size. `entries` is bounded by the `eth_call` gas cap and
-///         timeout of the RPC node serving it, not by this contract, so the
-///         page size is a client-side choice.
-///
-///         Roles. The owner is the cold administrative key: it only appoints
-///         and rotates the appender. The appender is the hot key of the tool
-///         that publishes entries, and the only account that can append.
-///         Compromising the appender therefore cannot take over the registry:
-///         the owner revokes it, and the new appender reverses its decisions by
-///         appending corrective entries. The rogue entries stay in the log.
+///         Roles. The owner is the cold key: it only appoints and rotates the
+///         appender. The appender is the hot key that publishes entries and the
+///         only account that can append. If it is compromised, the owner revokes
+///         it and the new appender reverses the damage with corrective entries;
+///         the rogue entries stay in the log.
 interface IRgbRejectList {
     // =========================================================================
     // Types
     // =========================================================================
 
-    /// @notice One reject-list entry.
-    /// @param opId   RGB operation id the decision applies to.
-    /// @param reject `true` rejects the operation — any allocation whose history
-    ///               passes through it is invalid. `false` allows it — the
-    ///               validator may skip the rest of that history branch.
+    /// @notice One reject-list entry, targeting one operation output (opout).
+    /// @param opId           RGB operation id of the output.
+    /// @param assignmentType RGB assignment type of the output.
+    /// @param no             Output index within that assignment type.
+    /// @param reject         `true` rejects the opout — any allocation whose
+    ///                       history passes through it is invalid. `false`
+    ///                       allows it — the validator may skip the rest of
+    ///                       that history branch.
     struct Entry {
         bytes32 opId;
+        uint16 assignmentType;
+        uint16 no;
         bool reject;
     }
 
@@ -71,10 +66,12 @@ interface IRgbRejectList {
     // =========================================================================
 
     /// @notice Emitted for every appended entry. For indexing and monitoring;
-    /// @param index  Position of the entry in the list.
-    /// @param opId   RGB operation id.
-    /// @param reject `true` = reject, `false` = allow.
-    event EntryAdded(uint256 indexed index, bytes32 indexed opId, bool reject);
+    /// @param index          Position of the entry in the list.
+    /// @param opId           RGB operation id of the output.
+    /// @param assignmentType RGB assignment type of the output.
+    /// @param no             Output index within that assignment type.
+    /// @param reject         `true` = reject, `false` = allow.
+    event EntryAdded(uint256 indexed index, bytes32 indexed opId, uint16 assignmentType, uint16 no, bool reject);
 
     /// @notice Emitted when the owner appoints a new appender.
     /// @param previousAppender Appender being replaced.
@@ -86,7 +83,7 @@ interface IRgbRejectList {
     // =========================================================================
 
     /// @notice Append a batch of entries, in order. Appender-only. An entry for
-    ///         an operation id that is already listed supersedes its earlier
+    ///         an opout that is already listed supersedes its earlier
     ///         decision, including within the same batch. Reverts as a whole if
     ///         any entry is invalid, so a batch is either recorded entirely or
     ///         not at all.
