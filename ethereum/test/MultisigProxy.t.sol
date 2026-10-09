@@ -4849,7 +4849,7 @@ contract MultisigTargetBindingTest is Test {
         proxy.executeProposal(id, abi.encode(address(adapter)));
     }
 
-    function _sign(bytes32 digest) private view returns (bytes[] memory) {
+    function _sign(bytes32 digest) private pure returns (bytes[] memory) {
         uint256[] memory keys = new uint256[](2);
         keys[0] = 21;
         keys[1] = 22;

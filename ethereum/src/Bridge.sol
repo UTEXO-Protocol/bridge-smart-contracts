@@ -774,6 +774,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///      EVM-native `uint256` token amount to RGB's `u64` amount range.
     function _emitRgbFundsIn(address sender, uint256 rgbOpId, uint256 amount) private {
         if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
+        // forge-lint: disable-next-line(unsafe-typecast)
         emit FundsIn(sender, rgbOpId, uint64(amount));
     }
 

@@ -7,6 +7,11 @@ evm_version = "shanghai"
 optimizer = true
 optimizer_runs = 200
 via_ir = true
+# Compiler warnings from vendored dependencies are not actionable.
+ignored_warnings_from = ["lib"]
+# Foundry defaults (license 1878, transient storage 2394, initcode size 3860, code size 5574) plus
+# 3628: BridgeProxy inherits a payable fallback from ERC1967Proxy and intentionally has no receive().
+ignored_error_codes = [1878, 2394, 3860, 5574, 3628]
 extra_output = ["storageLayout"]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
@@ -14,3 +19,11 @@ remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
     "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
 ]
+
+[lint]
+# Tests are not linted: they trip unsafe-typecast / erc20-unchecked-transfer on
+# purpose-built fixtures.
+ignore = ["test/**/*.sol"]
+# block-timestamp: only used for deadline / heartbeat / grace-period checks that
+# tolerate seconds of drift. incorrect-shift: false positive on `bitmap & (1 << i)`.
+exclude_lints = ["block-timestamp", "incorrect-shift"]
