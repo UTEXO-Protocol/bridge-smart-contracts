@@ -8,7 +8,7 @@ import {RgbRejectList} from "../src/RgbRejectList.sol";
 import {IRgbRejectList} from "../src/interfaces/IRgbRejectList.sol";
 
 contract RgbRejectListTest is Test {
-    event EntryAdded(uint256 indexed index, bytes32 indexed opId, bool reject);
+    event EntryAdded(uint256 indexed index, bytes32 indexed opId, uint16 assignmentType, uint16 no, bool reject);
     event AppenderUpdated(address indexed previousAppender, address indexed newAppender);
 
     RgbRejectList list;
@@ -29,8 +29,26 @@ contract RgbRejectListTest is Test {
         return keccak256(abi.encode("rgb-op", i));
     }
 
+    /// @dev Assignment type and output index vary with `i` so every field of
+    ///      the opout is exercised.
     function _entry(uint256 i) internal pure returns (IRgbRejectList.Entry memory) {
-        return IRgbRejectList.Entry({opId: _opId(i), reject: i % 2 == 0});
+        return IRgbRejectList.Entry({opId: _opId(i), assignmentType: _ty(i), no: _no(i), reject: i % 2 == 0});
+    }
+
+    function _ty(uint256 i) internal pure returns (uint16) {
+        return uint16(i % 3);
+    }
+
+    function _no(uint256 i) internal pure returns (uint16) {
+        return uint16(i % 5);
+    }
+
+    function _opout(bytes32 opId, uint16 ty, uint16 no, bool reject)
+        internal
+        pure
+        returns (IRgbRejectList.Entry memory)
+    {
+        return IRgbRejectList.Entry({opId: opId, assignmentType: ty, no: no, reject: reject});
     }
 
     /// @dev Entries for ids `[from, from + n)`.
@@ -41,11 +59,15 @@ contract RgbRejectListTest is Test {
         }
     }
 
-    function _appendOne(bytes32 opId, bool reject) internal {
+    function _appendOne(bytes32 opId, uint16 ty, uint16 no, bool reject) internal {
         IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](1);
-        b[0] = IRgbRejectList.Entry({opId: opId, reject: reject});
+        b[0] = _opout(opId, ty, no, reject);
         vm.prank(appender);
         list.append(b);
+    }
+
+    function _appendOne(bytes32 opId, bool reject) internal {
+        _appendOne(opId, 0, 0, reject);
     }
 
     function _append(uint256 from, uint256 n) internal {
@@ -54,25 +76,36 @@ contract RgbRejectListTest is Test {
     }
 
     /// @dev The rule rgb-lib applies: walk the log in index order; the last
-    ///      entry for `opId` decides. `listed` is false if `opId` never appears.
-    function _replay(bytes32 opId) internal view returns (bool listed, bool reject) {
+    ///      entry for the opout `(opId, ty, no)` decides. `listed` is false if
+    ///      the opout never appears.
+    function _replay(bytes32 opId, uint16 ty, uint16 no) internal view returns (bool listed, bool reject) {
         IRgbRejectList.Entry[] memory log = list.entries(0, list.length());
         for (uint256 i = 0; i < log.length; i++) {
-            if (log[i].opId == opId) {
+            if (log[i].opId == opId && log[i].assignmentType == ty && log[i].no == no) {
                 listed = true;
                 reject = log[i].reject;
             }
         }
     }
 
-    function _assertDecision(bytes32 opId, bool reject, string memory err) internal view {
-        (bool listed, bool decided) = _replay(opId);
+    function _replay(bytes32 opId) internal view returns (bool listed, bool reject) {
+        return _replay(opId, 0, 0);
+    }
+
+    function _assertDecision(bytes32 opId, uint16 ty, uint16 no, bool reject, string memory err) internal view {
+        (bool listed, bool decided) = _replay(opId, ty, no);
         assertTrue(listed, err);
         assertEq(decided, reject, err);
     }
 
+    function _assertDecision(bytes32 opId, bool reject, string memory err) internal view {
+        _assertDecision(opId, 0, 0, reject, err);
+    }
+
     function _assertEntry(IRgbRejectList.Entry memory got, uint256 i) internal pure {
         assertEq(got.opId, _opId(i), "opId");
+        assertEq(got.assignmentType, _ty(i), "assignment type");
+        assertEq(got.no, _no(i), "output index");
         assertEq(got.reject, i % 2 == 0, "reject flag");
     }
 
@@ -127,9 +160,9 @@ contract RgbRejectListTest is Test {
         _append(0, 2);
 
         vm.expectEmit(true, true, false, true, address(list));
-        emit EntryAdded(2, _opId(2), true);
+        emit EntryAdded(2, _opId(2), _ty(2), _no(2), true);
         vm.expectEmit(true, true, false, true, address(list));
-        emit EntryAdded(3, _opId(3), false);
+        emit EntryAdded(3, _opId(3), _ty(3), _no(3), false);
         _append(2, 2);
     }
 
@@ -161,7 +194,7 @@ contract RgbRejectListTest is Test {
 
     function test_append_revertsOnZeroOpId() public {
         IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](1);
-        b[0] = IRgbRejectList.Entry({opId: bytes32(0), reject: true});
+        b[0] = _opout(bytes32(0), 0, 0, true);
 
         vm.expectRevert(IRgbRejectList.InvalidOpId.selector);
         vm.prank(appender);
@@ -198,8 +231,8 @@ contract RgbRejectListTest is Test {
     /// @notice Within one batch the later entry also wins.
     function test_append_laterEntryInSameBatchWins() public {
         IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](2);
-        b[0] = IRgbRejectList.Entry({opId: _opId(9), reject: true});
-        b[1] = IRgbRejectList.Entry({opId: _opId(9), reject: false});
+        b[0] = _opout(_opId(9), 0, 0, true);
+        b[1] = _opout(_opId(9), 0, 0, false);
 
         vm.prank(appender);
         list.append(b);
@@ -218,21 +251,57 @@ contract RgbRejectListTest is Test {
         assertEq(list.length(), 2);
     }
 
+    /// @notice Entries target one output, not the whole operation: rejecting
+    ///         one opout leaves the other outputs of the same operation
+    ///         unlisted.
+    function test_append_rejectsOnlyTheListedOpout() public {
+        bytes32 opId = _opId(0);
+        _appendOne(opId, 1, 2, true);
+
+        _assertDecision(opId, 1, 2, true, "listed opout rejected");
+        (bool listed,) = _replay(opId, 1, 3);
+        assertFalse(listed, "other output index of the same type unlisted");
+        (listed,) = _replay(opId, 2, 2);
+        assertFalse(listed, "same output index of another type unlisted");
+    }
+
+    /// @notice Latest-wins applies per opout: an entry for one output of an
+    ///         operation does not override the decision for another.
+    function test_append_laterEntryOverridesOnlyTheSameOpout() public {
+        bytes32 opId = _opId(0);
+        _appendOne(opId, 1, 0, true);
+        _appendOne(opId, 1, 1, true);
+        _appendOne(opId, 1, 1, false);
+
+        _assertDecision(opId, 1, 0, true, "first output still rejected");
+        _assertDecision(opId, 1, 1, false, "second output allowed again");
+    }
+
+    /// @notice The full `uint16` range is stored for both opout fields.
+    function test_append_storesMaxAssignmentTypeAndIndex() public {
+        _appendOne(_opId(0), type(uint16).max, type(uint16).max, true);
+
+        IRgbRejectList.Entry memory got = list.entries(0, 1)[0];
+        assertEq(got.assignmentType, type(uint16).max, "assignment type");
+        assertEq(got.no, type(uint16).max, "output index");
+        assertTrue(got.reject, "reject flag");
+    }
+
     /// @notice A batch is recorded entirely or not at all: entries before the
     ///         offending one are rolled back too.
     function test_append_isAtomic() public {
         _append(0, 1); // id 0 is a reject
         IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](3);
         b[0] = _entry(1);
-        b[1] = IRgbRejectList.Entry({opId: _opId(0), reject: false}); // would re-allow id 0
-        b[2] = IRgbRejectList.Entry({opId: bytes32(0), reject: true}); // invalid
+        b[1] = _opout(_opId(0), _ty(0), _no(0), false); // would re-allow id 0
+        b[2] = _opout(bytes32(0), 0, 0, true); // invalid
 
         vm.expectRevert(IRgbRejectList.InvalidOpId.selector);
         vm.prank(appender);
         list.append(b);
 
         assertEq(list.length(), 1, "nothing from the failed batch recorded");
-        (bool listed,) = _replay(_opId(1));
+        (bool listed,) = _replay(_opId(1), _ty(1), _no(1));
         assertFalse(listed, "first entry rolled back");
         _assertDecision(_opId(0), true, "override rolled back");
     }
@@ -248,6 +317,8 @@ contract RgbRejectListTest is Test {
         IRgbRejectList.Entry[] memory afterwards = list.entries(0, 4);
         for (uint256 i = 0; i < 4; i++) {
             assertEq(afterwards[i].opId, before[i].opId, "opId unchanged");
+            assertEq(afterwards[i].assignmentType, before[i].assignmentType, "assignment type unchanged");
+            assertEq(afterwards[i].no, before[i].no, "output index unchanged");
             assertEq(afterwards[i].reject, before[i].reject, "flag unchanged");
         }
     }
@@ -315,14 +386,14 @@ contract RgbRejectListTest is Test {
     }
 
     /// @notice The log keeps every submission in order, overrides included —
-    ///         nothing collapses repeated operation ids, so a client replaying
-    ///         it reaches the latest decision for each one. Operation ids are
-    ///         drawn from a small space so repeats occur.
+    ///         nothing collapses repeated opouts, so a client replaying it
+    ///         reaches the latest decision for each one. Opouts are drawn from
+    ///         a small space so repeats occur.
     function testFuzz_append_keepsEverySubmissionInOrder(uint8[64] memory ids, bool[64] memory flags, uint8 n) public {
         n = uint8(bound(n, 1, 64));
         IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](n);
         for (uint256 i = 0; i < n; i++) {
-            b[i] = IRgbRejectList.Entry({opId: _opId(ids[i] % 8), reject: flags[i]});
+            b[i] = _opout(_opId(ids[i] % 4), uint16((ids[i] >> 2) % 2), uint16((ids[i] >> 3) % 2), flags[i]);
         }
         vm.prank(appender);
         list.append(b);
@@ -331,6 +402,8 @@ contract RgbRejectListTest is Test {
         assertEq(log.length, n, "one log entry per submission");
         for (uint256 i = 0; i < n; i++) {
             assertEq(log[i].opId, b[i].opId, "opId in submission order");
+            assertEq(log[i].assignmentType, b[i].assignmentType, "assignment type in submission order");
+            assertEq(log[i].no, b[i].no, "output index in submission order");
             assertEq(log[i].reject, b[i].reject, "flag in submission order");
         }
     }
