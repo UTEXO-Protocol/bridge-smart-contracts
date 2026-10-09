@@ -163,7 +163,7 @@ after it. The update changes the Bridge and proxy pointers atomically.
 
 Standalone on-chain source of the RGB reject list read by RGB client-side validation. No bridge contract references it; it replaces the centrally hosted list as the place the list is downloaded from.
 
-Each entry is `(opId, reject)`: an RGB operation id and whether it is rejected or allowed. Validators do **not** query the contract per operation id — validation needs a lookup for every operation in the history, and a network round trip per lookup would be far too slow. Instead a client downloads the whole list once, caches it, and performs every lookup locally, exactly as with the hosted file.
+Each entry is `(opId, assignmentType, no, reject)`: an RGB operation output (opout) — the operation id, the assignment type and the output index within it — and whether it is rejected or allowed. Entries target a single output, so one output of an operation can be rejected without the others. Validators do **not** query the contract per opout — validation needs a lookup for every opout in the history, and a network round trip per lookup would be far too slow. Instead a client downloads the whole list once, caches it, and performs every lookup locally, exactly as with the hosted file.
 
 - `append(Entry[] batch)` — appender-only. Appends entries in order. Reverts as a whole on an empty batch or a zero `opId`.
 - `length()` / `entries(start, end)` — the read interface. `entries` returns `[start, end)` clamped to the list length, so clients can request fixed-size pages.
@@ -171,7 +171,7 @@ Each entry is `(opId, reject)`: an RGB operation id and whether it is rejected o
 
 Two roles keep the hot key away from administration. The **owner** is a cold key that only appoints and rotates the appender; the **appender** is the hot key of the tool that publishes entries, and the only account that can append. A leaked appender key cannot take over the registry — the owner rotates it — and its decisions can be reverted by appending corrective entries from the new appender.
 
-The list is a log of decisions and **the latest entry for an operation id wins**: a rejected operation is allowed again by appending an allow entry for it. Clients apply entries in index order, so later entries override earlier ones. The log is the only state — there is no on-chain per-operation lookup.
+The list is a log of decisions and **the latest entry for an opout wins**: a rejected opout is allowed again by appending an allow entry for it. Entries for different opouts of the same operation are independent. Clients apply entries in index order, so later entries override earlier ones.
 
 The log is **append-only by construction** — there is no edit or remove function — so a client caches entries up to the last index it has seen and on the next sync fetches only `[cachedLength, length())`. Reading `length()` and the pages at one fixed block keeps a sync consistent. Page size is bounded by the `eth_call` gas cap and timeout of the RPC node in use, so it is a client-side choice: start from a default and shrink it when the node rejects a call.
 
