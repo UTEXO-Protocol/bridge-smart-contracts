@@ -69,7 +69,7 @@ Private keys are held inside Enclaves and cannot be extracted. Key persistence i
 
 | Direction | FundsIn (source side) | FundsOut (destination side) |
 | :---- | :---- | :---- |
-| EVM → RGB | Anyone can call FundsIn and lock funds in the EVM contract | M-of-N PSBT signing inside TEE enclaves |
+| EVM → RGB | Anyone can call FundsIn and lock funds in the EVM contract | Single-signature signing inside a TEE enclave |
 | RGB → EVM |  | M-of-N ECDSA verified on the EVM contract via `MultisigProxy` |
 
 ### Commission
