@@ -5,18 +5,23 @@ pragma solidity 0.8.35;
 /// @notice On-chain source of the RGB reject list consumed by RGB client-side
 ///         validation.
 ///
-/// @dev    Read model. Validators do NOT query this contract once per operation
-///         id. Validation walks the contract history and needs a lookup for
-///         every operation, with early exits (stop on a reject, skip the rest
+/// @dev    Granularity. An entry targets one operation output (opout): an
+///         operation id plus the assignment type and output index within it,
+///         so one output of an operation can be rejected without the others.
+///
+///         Read model. Validators do NOT query this contract once per
+///         opout. Validation walks the contract history and needs a lookup for
+///         every opout in it, with early exits (stop on a reject, skip the rest
 ///         of a branch on an allow) that make each lookup depend on the
 ///         previous one.
 ///
-///         Latest entry wins. The list is a log of decisions: an operation id
-///         may appear any number of times, and its current decision is the
-///         one in its LAST entry — e.g. a rejected operation is allowed again
-///         by appending an allow entry for it. Clients apply entries in index
+///         Latest entry wins. The list is a log of decisions: an opout may
+///         appear any number of times, and its current decision is the one in
+///         its LAST entry — e.g. a rejected opout is allowed again by
+///         appending an allow entry for it. Entries for different opouts of
+///         the same operation are independent. Clients apply entries in index
 ///         order, so later entries override earlier ones. The log is the only
-///         state: there is no on-chain per-operation lookup.
+///         state: there is no on-chain per-opout lookup.
 ///
 ///         Append-only. Entries can be added and never changed or removed, so a
 ///         client caches entries up to the last index it has seen and on the
@@ -39,13 +44,18 @@ interface IRgbRejectList {
     // Types
     // =========================================================================
 
-    /// @notice One reject-list entry.
-    /// @param opId   RGB operation id the decision applies to.
-    /// @param reject `true` rejects the operation — any allocation whose history
-    ///               passes through it is invalid. `false` allows it — the
-    ///               validator may skip the rest of that history branch.
+    /// @notice One reject-list entry, targeting one operation output (opout).
+    /// @param opId           RGB operation id of the output.
+    /// @param assignmentType RGB assignment type of the output.
+    /// @param no             Output index within that assignment type.
+    /// @param reject         `true` rejects the opout — any allocation whose
+    ///                       history passes through it is invalid. `false`
+    ///                       allows it — the validator may skip the rest of
+    ///                       that history branch.
     struct Entry {
         bytes32 opId;
+        uint16 assignmentType;
+        uint16 no;
         bool reject;
     }
 
@@ -71,10 +81,12 @@ interface IRgbRejectList {
     // =========================================================================
 
     /// @notice Emitted for every appended entry. For indexing and monitoring;
-    /// @param index  Position of the entry in the list.
-    /// @param opId   RGB operation id.
-    /// @param reject `true` = reject, `false` = allow.
-    event EntryAdded(uint256 indexed index, bytes32 indexed opId, bool reject);
+    /// @param index          Position of the entry in the list.
+    /// @param opId           RGB operation id of the output.
+    /// @param assignmentType RGB assignment type of the output.
+    /// @param no             Output index within that assignment type.
+    /// @param reject         `true` = reject, `false` = allow.
+    event EntryAdded(uint256 indexed index, bytes32 indexed opId, uint16 assignmentType, uint16 no, bool reject);
 
     /// @notice Emitted when the owner appoints a new appender.
     /// @param previousAppender Appender being replaced.
@@ -86,7 +98,7 @@ interface IRgbRejectList {
     // =========================================================================
 
     /// @notice Append a batch of entries, in order. Appender-only. An entry for
-    ///         an operation id that is already listed supersedes its earlier
+    ///         an opout that is already listed supersedes its earlier
     ///         decision, including within the same batch. Reverts as a whole if
     ///         any entry is invalid, so a batch is either recorded entirely or
     ///         not at all.
