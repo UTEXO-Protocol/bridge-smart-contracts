@@ -47,6 +47,7 @@ contract MinimalBridge is BridgeBase {
     /// @param amount      Amount of tokens to lock.
     /// @param operationId Backend-assigned operation identifier included in the event.
     function fundsIn(uint256 amount, uint256 operationId) external whenNotPaused {
+        if (amount == 0) revert ZeroAmount();
         if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
 
         IERC20(TOKEN).safeTransferFrom(msg.sender, address(this), amount);
@@ -69,6 +70,7 @@ contract MinimalBridge is BridgeBase {
         whenOutflowNotPaused
     {
         if (recipient == address(0)) revert InvalidRecipientAddress();
+        if (amount == 0) revert ZeroAmount();
         if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
 
         IERC20(TOKEN).safeTransfer(recipient, amount);
