@@ -58,6 +58,20 @@ contract MinimalBridgeTest is Test {
         new MinimalBridge(address(0));
     }
 
+    function test_fundsIn_revertsOnZeroAmount() public {
+        vm.prank(user);
+        vm.expectRevert(BridgeBase.ZeroAmount.selector);
+        bridge.fundsIn(0, OPERATION_ID);
+    }
+
+    function test_fundsOut_revertsOnZeroAmount() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, OPERATION_ID);
+        vm.prank(owner);
+        vm.expectRevert(BridgeBase.ZeroAmount.selector);
+        bridge.fundsOut(recipient, 0, OPERATION_ID, SRC_ADDR);
+    }
+
     // ========================================================================
     // fundsIn
     // ========================================================================
