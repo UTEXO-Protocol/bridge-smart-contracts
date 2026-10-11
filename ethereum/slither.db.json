@@ -1,0 +1,130 @@
+[
+  {
+    "id": "0b23b9de7723afad5c5a8433a65ae8f98cfaa3b5dbdd5cfee764109e5c18ed4b",
+    "check": "uninitialized-local",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "BtcRelayTestnet.submitShortForkBlockheaders(bytes).commitHash (src/btc_relay/BtcRelayTestnet.sol#131) is a local variable never initialized\n",
+    "review_reason": "The minimum calldata length guarantees at least one loop iteration. The reported variable is assigned in that iteration before its post-loop use."
+  },
+  {
+    "id": "281a7cd928761006ca5fd95e52ba1e7793e7fa142a3f093e469fd4737fd2339a",
+    "check": "uninitialized-local",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "Bridge._fundsIn(address,bytes32,uint256,uint256,uint256,string,bytes,bool).nativeToCollect (src/Bridge.sol#936) is a local variable never initialized\n",
+    "review_reason": "Intentional default zero for token-commission deposits; every native-commission branch assigns the collected amount."
+  },
+  {
+    "id": "3b7292adb0c2a95ca6498d214d87cc2d8d29f9d9d335d15ae5a49ce4ddb926d6",
+    "check": "uninitialized-local",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "BtcRelay.submitForkBlockheaders(uint256,bytes).blockHash (src/btc_relay/BtcRelay.sol#185) is a local variable never initialized\n",
+    "review_reason": "The minimum calldata length guarantees at least one loop iteration. The reported variable is assigned in that iteration before its post-loop use."
+  },
+  {
+    "id": "48fcf14e00878809df2ea8048602d60bc644dc1f2011027ed6474d2daf2face6",
+    "check": "uninitialized-local",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "BtcRelay.submitShortForkBlockheaders(bytes).blockHash (src/btc_relay/BtcRelay.sol#128) is a local variable never initialized\n",
+    "review_reason": "The minimum calldata length guarantees at least one loop iteration. The reported variable is assigned in that iteration before its post-loop use."
+  },
+  {
+    "id": "918f9a1bf6680a5469b2aa751a44373a4bc559c405403a559feb5fe6d81ba78e",
+    "check": "uninitialized-local",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "BtcRelay.submitShortForkBlockheaders(bytes).commitHash (src/btc_relay/BtcRelay.sol#127) is a local variable never initialized\n",
+    "review_reason": "The minimum calldata length guarantees at least one loop iteration. The reported variable is assigned in that iteration before its post-loop use."
+  },
+  {
+    "id": "aa748e6cc18ed9fbb138d91383516c1d5818ab893be499ba62ba2027ddb0e600",
+    "check": "uninitialized-local",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "BtcRelayTestnet.submitShortForkBlockheaders(bytes).blockHash (src/btc_relay/BtcRelayTestnet.sol#132) is a local variable never initialized\n",
+    "review_reason": "The minimum calldata length guarantees at least one loop iteration. The reported variable is assigned in that iteration before its post-loop use."
+  },
+  {
+    "id": "bbbc1b255e1dac88a41fe57becd054914377788bdcfc63058dcf0965178060c2",
+    "check": "uninitialized-local",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "BtcRelay.submitForkBlockheaders(uint256,bytes).forkTipBlockHeight (src/btc_relay/BtcRelay.sol#186) is a local variable never initialized\n",
+    "review_reason": "The minimum calldata length guarantees at least one loop iteration. The reported variable is assigned in that iteration before its post-loop use."
+  },
+  {
+    "id": "e280dafeea758218d58993f0cf647fa1df12def9a6a376ad004b343824ac585f",
+    "check": "uninitialized-local",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "BtcRelayTestnet.submitForkBlockheaders(uint256,bytes).forkTipBlockHeight (src/btc_relay/BtcRelayTestnet.sol#190) is a local variable never initialized\n",
+    "review_reason": "The minimum calldata length guarantees at least one loop iteration. The reported variable is assigned in that iteration before its post-loop use."
+  },
+  {
+    "id": "e77792345b63ce2757578b4a2518e458b5d9f87a6e891c22edb31b7b273bbd4d",
+    "check": "uninitialized-local",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "BtcRelayTestnet.submitForkBlockheaders(uint256,bytes).blockHash (src/btc_relay/BtcRelayTestnet.sol#189) is a local variable never initialized\n",
+    "review_reason": "The minimum calldata length guarantees at least one loop iteration. The reported variable is assigned in that iteration before its post-loop use."
+  },
+  {
+    "id": "f180641788afc3454778e932ba77aac115886049af2be4d94207d3fe11e9326e",
+    "check": "uninitialized-local",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "MultisigProxy.executeProposal(bytes32,bytes).currentTarget (src/MultisigProxy.sol#1159) is a local variable never initialized\n",
+    "review_reason": "Intentional zero sentinel for local or explicit-target governance operations; bound operations resolve and validate their target before dispatch."
+  },
+  {
+    "id": "108ac9c66e2d05f1600607718ced3e0edccd6c4f9b337909daba148d4e62b73f",
+    "check": "unused-return",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "CommissionManager.convertTokenFeeToNative(uint256,uint256) (src/CommissionManager.sol#377-408) ignores return value by (None,answer,None,updatedAt,None) = feed.latestRoundData() (src/CommissionManager.sol#395)\n",
+    "review_reason": "The price check intentionally consumes answer and updatedAt; it checks positive price, heartbeat freshness, configured price bounds and sequencer status. answeredInRound is deprecated by Chainlink."
+  },
+  {
+    "id": "b66817e0e71732430ca88c3e729cce25e7c358c077409923270dc397d2682234",
+    "check": "unused-return",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "Bridge.fundsOut(IBridge.FundsOutParams) (src/Bridge.sol#518-632) ignores return value by (tokenCommission,None,netAmount) = commissionManager.calculateFundsOutCommission(fundsOutParams.sourceChainId,fundsOutParams.destinationChainId,TOKEN,fundsOutParams.amount) (src/Bridge.sol#573-575)\n",
+    "review_reason": "Outbound releases collect token commission only. The bridge checks tokenCommission plus netAmount equals the gross release; no native payout is made."
+  },
+  {
+    "id": "ebe7855509cde7b8254aa02ae7e60bd49f18333b7f36557dbb8bb1bfe2500edf",
+    "check": "unused-return",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "CommissionManager._requireSequencerUp() (src/CommissionManager.sol#416-421) ignores return value by (None,answer,startedAt,None,None) = AggregatorV3Interface(sequencerUptimeFeed).latestRoundData() (src/CommissionManager.sol#417)\n",
+    "review_reason": "The sequencer check intentionally consumes answer and startedAt; it checks initialization, future timestamps, up status and the recovery grace period."
+  },
+  {
+    "id": "edb2302b31eaa7933bf7c85d23dd95f0b188a5772a254e03dece8c62ca2fa87b",
+    "check": "unused-return",
+    "impact": "Medium",
+    "confidence": "Medium",
+    "description": "Bridge._fundsIn(address,bytes32,uint256,uint256,uint256,string,bytes,bool) (src/Bridge.sol#888-1055) ignores return value by (tokenCommission,nativeCommission,None) = commissionManager.calculateFundsInCommission(sourceChainId,destinationChainId,TOKEN,amount) (src/Bridge.sol#915-916)\n",
+    "review_reason": "The nominal net amount is intentionally discarded; the bridge derives its credited net from the measured token receipt minus token commission."
+  },
+  {
+    "id": "f8225a7fb29ccbd8756306f0a138a09be887e030eb8647f7180c9c34e6cbcba1",
+    "check": "missing-zero-check",
+    "impact": "Low",
+    "confidence": "Medium",
+    "description": "Bridge.initialize(address,address,address,address,uint256,uint256,address).lzAdapter_ (src/Bridge.sol#279) lacks a zero-check on :\n\t\t- lzAdapter = lzAdapter_ (src/Bridge.sol#296)\n",
+    "review_reason": "Zero is the supported initial state with LayerZero ingress disabled; onlyLZAdapter rejects all callers while unset."
+  },
+  {
+    "id": "f982634293d7da59c53140c262758f254a69b6918d1c50693ac8c3617e70ad22",
+    "check": "missing-zero-check",
+    "impact": "Low",
+    "confidence": "Medium",
+    "description": "CommissionManager.setSequencerUptimeFeed(address).feed (src/CommissionManager.sol#549) lacks a zero-check on :\n\t\t- sequencerUptimeFeed = feed (src/CommissionManager.sol#550)\n",
+    "review_reason": "Zero is intentionally allowed for oracle teardown or staged configuration. Nonzero native-fee quotes fail closed when the sequencer feed is unset."
+  }
+]

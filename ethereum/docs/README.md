@@ -241,6 +241,10 @@ forge coverage                           # coverage report
 forge clean                              # delete out/ + cache/
 ```
 
+Slither runs as a separate CI job, fails on High findings and publishes a report
+with Medium and lower findings remaining advisory. See [SLITHER.md](SLITHER.md)
+for local setup, reviewed exclusions and branch-protection setup.
+
 ## Environment
 
 Two separate templates — one per phase. Copy each to a real file and fill it in only when you actually need that flow:

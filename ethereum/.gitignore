@@ -14,9 +14,14 @@ docs/
 !docs/
 docs/*
 !docs/README.md
+!docs/SLITHER.md
 !docs/Storage Layout.md
 
 # Dotenv files — ignore all variants but keep templates committed
 .env
 .env.*
 !.env.*.example
+
+# Slither local environment and generated reports
+.venv-slither/
+/slither-report.json

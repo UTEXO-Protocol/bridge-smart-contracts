@@ -47,3 +47,42 @@ jobs:
       - name: Run Forge tests
         working-directory: ethereum
         run: forge test -vvv
+
+  slither:
+    name: Slither
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Slither
+        run: python -m pip install -r ethereum/requirements-slither.txt
+
+      # High findings fail the job; Medium and lower remain advisory.
+      # Compilation and analyzer failures still fail this job.
+      - name: Run Slither
+        working-directory: ethereum
+        run: slither . --fail-high --json slither-report.json
+
+      - name: Upload Slither report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slither-report
+          path: ethereum/slither-report.json
+          if-no-files-found: warn
