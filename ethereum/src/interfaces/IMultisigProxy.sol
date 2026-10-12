@@ -527,6 +527,8 @@ interface IMultisigProxy {
     function cancelProposal(bytes32 proposalId, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
     /// @notice Execute a proposal after the timelock has elapsed. Permissionless.
+    /// @dev Target callbacks cannot execute this or another proposal while an
+    ///      execution is active. Sequential calls are allowed after it returns.
     /// @param proposalId The proposal to execute.
     /// @param opData     The same operation data that was provided at propose time.
     function executeProposal(bytes32 proposalId, bytes calldata opData) external;

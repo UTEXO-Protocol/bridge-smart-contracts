@@ -21,6 +21,13 @@ import {FundsInContext, FundsOutContext} from "./RouteTypes.sol";
 ///      Each module owns its settlementData layout. For RGB inbound routes
 ///      Bridge also decodes abi.encode(uint256 rgbOpId) to derive the backing
 ///      id; release data encodes parallel operationId and amount arrays.
+///
+///      Bridge getters expose intermediate accounting during hooks: deposits
+///      have received their net tokens but have not credited liquidity yet;
+///      rebalances have debited the source but have not credited the destination.
+///      Modules MUST use the authenticated context for the current operation,
+///      rather than treating these getters as a completed-operation snapshot.
+///      Bridge transfer entrypoints reject reentry; view getters remain callable.
 interface ISettlementModule {
     /// @notice Whether inbound records use the consignment-derived RGB mint id.
     /// @dev Bridge queries the configured module before deriving the id. Only
