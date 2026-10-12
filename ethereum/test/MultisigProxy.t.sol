@@ -2,6 +2,7 @@
 pragma solidity 0.8.35;
 
 import {Test, Vm} from "forge-std/Test.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {MultisigProxy} from "../src/MultisigProxy.sol";
@@ -86,6 +87,50 @@ contract MockOutboundLZAdapter {
         (bool ok,) = oft.call{value: msg.value}("");
         require(ok, "oft fee");
         emit SendOut(keccak256(abi.encode("mock-send-out", dstEid, recipient, amount)), dstEid, recipient, amount);
+    }
+}
+
+/// @dev Models a future Bridge implementation that calls back during rotation.
+contract ProposalCallbackBridge {
+    MultisigProxy public proxy;
+    address public commissionManager;
+    uint256 public calls;
+    bytes public callbackError;
+    bytes32 private _nestedId;
+    bytes private _nestedData;
+    bool private _callbackEnabled;
+    bool private _bubbleFailure;
+
+    constructor(address manager) {
+        commissionManager = manager;
+    }
+
+    function configure(MultisigProxy proxy_, bytes32 nestedId, bytes calldata nestedData, bool enabled, bool bubble)
+        external
+    {
+        proxy = proxy_;
+        _nestedId = nestedId;
+        _nestedData = nestedData;
+        _callbackEnabled = enabled;
+        _bubbleFailure = bubble;
+    }
+
+    function setCommissionManager(address manager) external {
+        require(msg.sender == address(proxy), "only proxy");
+        commissionManager = manager;
+        calls++;
+        if (_callbackEnabled) {
+            // Disable recursive callbacks in the deliberately unguarded baseline.
+            _callbackEnabled = false;
+            if (_bubbleFailure) {
+                proxy.executeProposal(_nestedId, _nestedData);
+            } else {
+                try proxy.executeProposal(_nestedId, _nestedData) {}
+                catch (bytes memory reason) {
+                    callbackError = reason;
+                }
+            }
+        }
     }
 }
 
@@ -5446,5 +5491,115 @@ contract MultisigTargetBindingTest is Test {
             assertEq(result, abi.encodeWithSelector(IMultisigProxy.ZeroTarget.selector));
             assertEq(proxy.proposalNonce(), nonce);
         }
+    }
+
+    // ---- Proposal execution reentrancy -------------------------------------
+
+    ProposalCallbackBridge private cbTarget;
+    MultisigProxy private cbProxy;
+    address private cbInitialManager = address(0xCA);
+    address private cbFirstManager = address(0xCB);
+    address private cbSecondManager = address(0xCC);
+    bytes32 private cbFirstId;
+    bytes32 private cbSecondId;
+    uint256 private constant CB_DELAY = 1 hours;
+
+    function _deployCallbackProxy() private {
+        cbTarget = new ProposalCallbackBridge(cbInitialManager);
+        address[] memory enclaves = new address[](2);
+        enclaves[0] = vm.addr(11);
+        enclaves[1] = vm.addr(12);
+        address[] memory federation = new address[](2);
+        federation[0] = vm.addr(21);
+        federation[1] = vm.addr(22);
+        cbProxy = new MultisigProxy(
+            address(cbTarget), cbInitialManager, address(0x123), enclaves, 2, 1, federation, 2, CB_DELAY, CB_DELAY
+        );
+        cbFirstId = _cbProposeRotation(cbFirstManager);
+        cbSecondId = _cbProposeRotation(cbSecondManager);
+        vm.warp(block.timestamp + CB_DELAY);
+    }
+
+    function _cbProposeRotation(address manager) private returns (bytes32) {
+        uint256 nonce = cbProxy.proposalNonce();
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(
+            cbProxy.DOMAIN_SEPARATOR(), address(cbTarget), manager, nonce, deadline
+        );
+        uint256[] memory keys = new uint256[](2);
+        keys[0] = 21;
+        keys[1] = 22;
+        return
+            cbProxy.proposeUpdateCommissionManager(
+                manager, nonce, deadline, 3, MultisigHelper.signAll(vm, digest, keys)
+            );
+    }
+
+    function _cbAssertStatus(bytes32 id, IMultisigProxy.ProposalStatus status) private view {
+        assertEq(uint256(cbProxy.getProposal(id).status), uint256(status));
+    }
+
+    function test_nestedMaturedProposalRejectedAndSequentialExecutionSucceeds() public {
+        _deployCallbackProxy();
+        cbTarget.configure(cbProxy, cbSecondId, abi.encode(cbSecondManager), true, false);
+        vm.recordLogs();
+        cbProxy.executeProposal(cbFirstId, abi.encode(cbFirstManager));
+        assertEq(
+            cbTarget.callbackError(), abi.encodeWithSelector(ReentrancyGuard.ReentrancyGuardReentrantCall.selector)
+        );
+        _cbAssertStatus(cbFirstId, IMultisigProxy.ProposalStatus.Executed);
+        _cbAssertStatus(cbSecondId, IMultisigProxy.ProposalStatus.Pending);
+        assertEq(cbProxy.commissionManager(), cbFirstManager);
+        assertEq(cbTarget.commissionManager(), cbFirstManager);
+        assertEq(cbTarget.calls(), 1);
+
+        // The lock ends with the call, not with the transaction.
+        cbProxy.executeProposal(cbSecondId, abi.encode(cbSecondManager));
+        _cbAssertStatus(cbSecondId, IMultisigProxy.ProposalStatus.Executed);
+        assertEq(cbProxy.commissionManager(), cbSecondManager);
+        assertEq(cbTarget.commissionManager(), cbSecondManager);
+        assertEq(cbTarget.calls(), 2);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 executedTopic = keccak256("ProposalExecuted(bytes32,uint8)");
+        uint256 executions;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter == address(cbProxy) && logs[i].topics[0] == executedTopic) {
+                assertEq(logs[i].topics[1], executions == 0 ? cbFirstId : cbSecondId);
+                executions++;
+            }
+        }
+        assertEq(executions, 2);
+    }
+
+    function test_bubbledNestedFailureRollsBackAndLockCanBeRetried() public {
+        _deployCallbackProxy();
+        cbTarget.configure(cbProxy, cbSecondId, abi.encode(cbSecondManager), true, true);
+        vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        cbProxy.executeProposal(cbFirstId, abi.encode(cbFirstManager));
+        _cbAssertStatus(cbFirstId, IMultisigProxy.ProposalStatus.Pending);
+        _cbAssertStatus(cbSecondId, IMultisigProxy.ProposalStatus.Pending);
+        assertEq(cbProxy.commissionManager(), cbInitialManager);
+        assertEq(cbTarget.commissionManager(), cbInitialManager);
+        assertEq(cbTarget.calls(), 0);
+
+        cbTarget.configure(cbProxy, cbSecondId, abi.encode(cbSecondManager), false, false);
+        cbProxy.executeProposal(cbFirstId, abi.encode(cbFirstManager));
+        cbProxy.executeProposal(cbSecondId, abi.encode(cbSecondManager));
+        _cbAssertStatus(cbFirstId, IMultisigProxy.ProposalStatus.Executed);
+        _cbAssertStatus(cbSecondId, IMultisigProxy.ProposalStatus.Executed);
+        assertEq(cbProxy.commissionManager(), cbSecondManager);
+        assertEq(cbTarget.commissionManager(), cbSecondManager);
+    }
+
+    function test_sameProposalCallbackRejected() public {
+        _deployCallbackProxy();
+        cbTarget.configure(cbProxy, cbFirstId, abi.encode(cbFirstManager), true, false);
+        cbProxy.executeProposal(cbFirstId, abi.encode(cbFirstManager));
+        assertEq(
+            cbTarget.callbackError(), abi.encodeWithSelector(ReentrancyGuard.ReentrancyGuardReentrantCall.selector)
+        );
+        _cbAssertStatus(cbFirstId, IMultisigProxy.ProposalStatus.Executed);
+        assertEq(cbTarget.calls(), 1);
     }
 }
