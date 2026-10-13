@@ -14,11 +14,9 @@ contract MockBtcRelay is IBtcRelayView {
     uint32 private _blockHeight;
     uint224 private _chainwork;
 
-    /// @notice Lowest height this relay knows about, mirroring the real relay's
-    ///         immutable initialisation checkpoint. Headers below it are never
-    ///         stored and must not be treated as part of the main chain.
-    /// @dev Defaults to 0, so a suite that does not exercise the checkpoint
-    ///      keeps the previous mock behaviour.
+    /// @notice Lowest accepted query height, mirroring the relay checkpoint.
+    /// @dev setBlock can register lower heights, but queries reject them. The
+    ///      default is zero; deployed-relay fixtures configure a checkpoint.
     uint256 public checkpointHeight;
 
     /// @notice Set the initialisation checkpoint. Call it in `setUp` with the

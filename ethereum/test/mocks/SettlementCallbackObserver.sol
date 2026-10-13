@@ -6,7 +6,7 @@ import {Bridge} from "../../src/Bridge.sol";
 import {ISettlementModule} from "../../src/interfaces/ISettlementModule.sol";
 import {FundsInContext, FundsOutContext} from "../../src/interfaces/RouteTypes.sol";
 
-/// @dev Observes intermediate accounting and attempts a nested public deposit.
+/// @notice Observes intermediate accounting and attempts a nested public deposit.
 contract SettlementCallbackObserver is ISettlementModule {
     struct Snapshot {
         uint256 sourceLiquidity;
