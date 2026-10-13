@@ -20,6 +20,10 @@ remappings = [
     "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
 ]
 
+[profile.ci.fuzz]
+runs = 256
+seed = "0x1"
+
 [lint]
 # Tests are not linted: they trip unsafe-typecast / erc20-unchecked-transfer on
 # purpose-built fixtures.
