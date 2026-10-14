@@ -328,7 +328,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @dev Owner is `MultisigProxy`; federation gates this on its M-of-N
     ///      timelock flow via `proposeUpdateRouteRegistry`.
     function setRouteRegistry(address newRouteRegistry) external override onlyOwner {
-        if (newRouteRegistry == address(0)) revert InvalidRouteRegistryAddress();
+        if (newRouteRegistry == address(0) || newRouteRegistry.code.length == 0) revert InvalidRouteRegistryAddress();
         address old = routeRegistry;
         routeRegistry = newRouteRegistry;
         emit RouteRegistryUpdated(old, newRouteRegistry);
@@ -643,8 +643,6 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///      Both legs dispatch on the same `(sourceChainId, destinationChainId)`
     ///      route, so a rebalance pair must be explicitly enabled in the
     ///      registry with plugins fitting both directions.
-    ///      State mutations happen before the external registry calls, so a
-    ///      revert in either plugin rolls everything back atomically.
     function rebalanceLiquidity(RebalanceParams calldata params)
         external
         override
@@ -774,6 +772,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///      EVM-native `uint256` token amount to RGB's `u64` amount range.
     function _emitRgbFundsIn(address sender, uint256 rgbOpId, uint256 amount) private {
         if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
+        // forge-lint: disable-next-line(unsafe-typecast)
         emit FundsIn(sender, rgbOpId, uint64(amount));
     }
 

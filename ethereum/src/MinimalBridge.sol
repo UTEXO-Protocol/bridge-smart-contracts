@@ -51,6 +51,7 @@ contract MinimalBridge is BridgeBase {
 
         IERC20(TOKEN).safeTransferFrom(msg.sender, address(this), amount);
 
+        // forge-lint: disable-next-line(unsafe-typecast)
         emit FundsIn(msg.sender, operationId, uint64(amount));
     }
 

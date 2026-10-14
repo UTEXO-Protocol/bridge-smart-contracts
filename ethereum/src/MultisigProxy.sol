@@ -2,6 +2,7 @@
 pragma solidity 0.8.35;
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IMultisigProxy} from "./interfaces/IMultisigProxy.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
@@ -26,7 +27,7 @@ interface IBridgeToken {
     function TOKEN() external view returns (address);
 }
 
-contract MultisigProxy is IMultisigProxy {
+contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     using ECDSA for bytes32;
 
     // =========================================================================
@@ -1144,7 +1145,7 @@ contract MultisigProxy is IMultisigProxy {
     // =========================================================================
 
     /// @inheritdoc IMultisigProxy
-    function executeProposal(bytes32 proposalId, bytes calldata opData) external {
+    function executeProposal(bytes32 proposalId, bytes calldata opData) external nonReentrant {
         Proposal storage p = _proposals[proposalId];
         if (p.status != ProposalStatus.Pending) revert NotPending();
         if (p.federationVersion != federationSignerSetVersion) {

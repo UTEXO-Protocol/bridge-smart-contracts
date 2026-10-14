@@ -397,11 +397,13 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (block.timestamp - updatedAt > ethUsdHeartbeat) revert StalePrice();
         // Mandatory circuit-breaker rejects a floored/capped aggregator answer
         // that the basic `answer > 0` validity check cannot detect.
+        // forge-lint: disable-next-line(unsafe-typecast)
         if (uint256(answer) < ethUsdMinPrice || uint256(answer) > ethUsdMaxPrice) {
             revert PriceOutOfBounds();
         }
 
         uint256 scale = 10 ** (18 - tokenDecimals + uint256(feed.decimals()));
+        // forge-lint: disable-next-line(unsafe-typecast)
         nativeFee = (tokenFee * scale) / uint256(answer);
     }
 
