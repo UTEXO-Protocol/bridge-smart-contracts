@@ -309,4 +309,29 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         assertEq(cm.nativeCommissionPool(), nativeC);
         assertEq(rgbModule.fundsInRecords(opId), AMOUNT);
     }
+
+    function test_nativeCommissionTolerance_isFivePercent() public view {
+        assertEq(bridge.NATIVE_COMMISSION_TOLERANCE_BPS(), 500, "native drift policy remains 5%");
+        assertEq(bridge.BPS_DENOMINATOR(), 10_000, "basis-point policy uses 10000 units");
+    }
+
+    function test_fundsIn_nativeForwardFailureRestoresCustodyNonceAndLiquidity() public {
+        _setFundsInNativeRule(100);
+        uint256 quote = _nativeQuote(AMOUNT);
+        bytes32 expectedId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        vm.deal(user, quote);
+        LedgerSnapshot memory beforeState = _snapshotLedger(expectedId);
+        vm.mockCallRevert(address(cm), quote, bytes(""), bytes("native receive rejected"));
+        vm.expectRevert(IBridge.NativeValueMismatch.selector);
+        vm.prank(user);
+        bridge.fundsIn{value: quote}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _assertLedgerUnchanged(beforeState, expectedId);
+        assertEq(
+            bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))),
+            0,
+            "failed forwarding restores nonce"
+        );
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 0, "failed forwarding creates no chain liquidity");
+        assertEq(bridge.totalLockedLiquidity(), 0, "failed forwarding creates no total liquidity");
+    }
 }

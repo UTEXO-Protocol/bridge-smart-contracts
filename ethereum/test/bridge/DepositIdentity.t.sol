@@ -36,67 +36,6 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         assertEq(usdt0.balanceOf(user), victimBefore - AMOUNT, "victim deposit went through");
     }
 
-    // A plain ERC20 transfer can change Bridge's raw balance,
-    // but it does not enter the Bridge.fundsIn accounting path.
-    function test_liquidity_directTokenTransferDoesNotCreditAccounting() public {
-        address donor = makeAddr("directTransferDonor");
-        uint256 directAmount = 17e18;
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
-
-        usdt0.mint(donor, directAmount);
-
-        uint256 donorBefore = usdt0.balanceOf(donor);
-        uint256 userBefore = usdt0.balanceOf(user);
-        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
-        uint256 cmBefore = usdt0.balanceOf(address(cm));
-        uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
-        uint256 nativePoolBefore = cm.nativeCommissionPool();
-        uint256 recordBefore = rgbModule.fundsInRecords(expectedOpId);
-
-        assertEq(donorBefore, directAmount, "pre donor token");
-        assertEq(bridgeBefore, 0, "pre bridge token");
-        assertEq(recordBefore, 0, "pre record");
-
-        vm.prank(donor);
-        usdt0.transfer(address(bridge), directAmount);
-
-        assertEq(usdt0.balanceOf(donor), donorBefore - directAmount, "donor direct transfer spent");
-        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + directAmount, "bridge raw balance increased");
-        assertEq(usdt0.balanceOf(address(cm)), cmBefore, "cm token unchanged");
-        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, "cm pool unchanged");
-        assertEq(cm.nativeCommissionPool(), nativePoolBefore, "native pool unchanged");
-        assertEq(rgbModule.fundsInRecords(expectedOpId), recordBefore, "record not created");
-
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
-        vm.expectEmit(true, true, true, true, address(bridge));
-        emit IBridge.BridgeFundsIn(
-            expectedOpId,
-            bytes32(uint256(uint160(user))),
-            user,
-            0,
-            AMOUNT,
-            AMOUNT,
-            0,
-            0,
-            SOURCE_CHAIN_ID,
-            RGB_CHAIN_ID,
-            DST_ADDR,
-            _rgbData()
-        );
-
-        vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-
-        assertEq(usdt0.balanceOf(user), userBefore - AMOUNT, "user fundsIn spent");
-        assertEq(
-            usdt0.balanceOf(address(bridge)),
-            bridgeBefore + directAmount + AMOUNT,
-            "bridge includes direct plus fundsIn"
-        );
-        assertEq(rgbModule.fundsInRecords(opId), recordBefore + AMOUNT, "record created only by fundsIn");
-    }
-
     // Bridge remains route-agnostic, but the RGB settlement module requires
     // the canonical empty destination address.
     function test_fundsIn_rgbRejectsNonEmptyDestinationAddress() public {
@@ -378,14 +317,6 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(0));
     }
 
-    /// @dev The RGB route emits FundsIn carrying the rgbOpId and net amount.
-    function test_fundsIn_rgbRouteEmitsFundsInWithRgbOpId() public {
-        vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(AMOUNT)); // no commission → net == gross == AMOUNT
-        vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-    }
-
     function test_fundsIn_rgbRouteAcceptsUint64Maximum() public {
         uint256 amount = type(uint64).max;
         usdt0.mint(user, amount);
@@ -455,27 +386,5 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
             }
         }
         fail("FundsIn event not found");
-    }
-
-    /// @dev Full deposit → fundsOut happy path using the captured bytes32 in the
-    ///      release settlement data.
-    function test_fundsOut_referencesDerivedOperationId() public {
-        vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-        _ensureRgbSafetyCapacity(AMOUNT);
-
-        vm.prank(multisig);
-        _fundsOut(
-            recipient,
-            AMOUNT,
-            RGB_CHAIN_ID,
-            SOURCE_CHAIN_ID,
-            SRC_ADDR,
-            _proof(),
-            _settlement(_ids(opId)),
-            SRC_BURN_TX_ID
-        );
-
-        assertEq(usdt0.balanceOf(recipient), AMOUNT, "release via derived id succeeds");
     }
 }

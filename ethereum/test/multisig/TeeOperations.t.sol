@@ -5,7 +5,7 @@ import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {CommissionConfig, CommissionCurrency, CommissionSide} from "../../src/interfaces/ICommissionManager.sol";
 import {IMultisigProxy} from "../../src/interfaces/IMultisigProxy.sol";
 import {MultisigHelper} from "../helpers/MultisigHelper.sol";
-import {MockOutboundLZAdapter} from "../mocks/MockOutboundLZAdapter.sol";
+
 import {MultisigProxyTestBase} from "./MultisigProxyTestBase.sol";
 
 /// @notice TEE-authorized releases and rebalances validate signatures and nonces.
@@ -133,43 +133,6 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
         assertEq(token.balanceOf(recipient), 0);
     }
 
-    function test_lzFundsOutCall_settlementDataRemainsSigned() public {
-        MockOutboundLZAdapter adapter =
-            new MockOutboundLZAdapter(address(token), makeAddr("mockOft"), address(proxy), LZ_NATIVE_FEE);
-        _setLzAdapter(address(adapter));
-        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
-        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
-        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
-        params.settlementData = bytes.concat(params.settlementData, hex"01");
-        vm.deal(address(this), LZ_NATIVE_FEE);
-        vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
-        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
-        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce);
-        assertFalse(bridge.consumedBurnIds(params.burnId));
-        assertEq(adapter.sendOutCalls(), 0);
-    }
-
-    function test_lzFundsOutCall_changedSettlementCannotReplaySameBurn() public {
-        address oft = makeAddr("mockOft");
-        MockOutboundLZAdapter adapter = new MockOutboundLZAdapter(address(token), oft, address(proxy), LZ_NATIVE_FEE);
-        _setLzAdapter(address(adapter));
-        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
-        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
-        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
-        vm.deal(address(this), LZ_NATIVE_FEE * 2);
-        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
-        uint256 balance = token.balanceOf(oft);
-
-        params.settlementData = bytes.concat(params.settlementData, hex"00");
-        // Fresh valid signatures authorize the changed payload and current nonce.
-        (nonce, bitmap, sigs) = _signLzEnclave(params, deadline);
-        vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, params.burnId));
-        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
-        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce, "failed release restores nonce");
-        assertEq(adapter.sendOutCalls(), 1, "no second send");
-        assertEq(token.balanceOf(oft), balance, "no second payout");
-    }
-
     function test_fundsOutCall_revertsOnExpired() public {
         IBridge.FundsOutParams memory params = _fundsOutParams();
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
@@ -207,26 +170,6 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
 
         proxy.fundsOutCall(params, nonce, deadline, bitmap, sigs);
         assertEq(token.balanceOf(recipient), AMOUNT, "executes at the exact deadline ceiling");
-    }
-
-    function test_lzFundsOutCall_acceptsDeadlineAtMaxBoundary() public {
-        address mockOft = makeAddr("mockOft");
-        MockOutboundLZAdapter adapter =
-            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        _setLzAdapter(address(adapter));
-
-        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
-        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
-        uint256 deadline = vm.getBlockTimestamp() + proxy.MAX_TEE_DEADLINE(); // exact boundary
-
-        bytes32 digest = MultisigHelper.digestTeeLzFundsOut(domainSep, params, nonce, deadline);
-        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        vm.deal(address(this), LZ_NATIVE_FEE);
-        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
-        assertEq(token.balanceOf(mockOft), AMOUNT, "lz release executes at the exact deadline ceiling");
-        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce + 1, "teeNonce incremented");
     }
 
     function test_fundsOutCall_revertsOnWrongNonce() public {
@@ -380,5 +323,77 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
 
         vm.expectRevert(IMultisigProxy.BitmapOutOfRange.selector);
         proxy.fundsOutCall(params, nonce, deadline, 0x8, sigs);
+    }
+
+    /// @notice A consumed nonce cannot authorize another otherwise-valid burn.
+    function test_fundsOutCall_revertsOnConsumedNonceForDifferentBurn() public {
+        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
+        (uint256[] memory keys, uint256 bitmap) = _encSigSet2of3();
+        IBridge.FundsOutParams memory first = _fundsOutParams(recipient, AMOUNT / 4, keccak256("nonce-first-release"));
+        proxy.fundsOutCall(
+            first,
+            0,
+            deadline,
+            bitmap,
+            MultisigHelper.signAll(vm, MultisigHelper.digestTeeFundsOut(domainSep, first, 0, deadline), keys)
+        );
+        IBridge.FundsOutParams memory second = _fundsOutParams(recipient, AMOUNT / 4, keccak256("nonce-second-release"));
+        bytes[] memory signatures =
+            MultisigHelper.signAll(vm, MultisigHelper.digestTeeFundsOut(domainSep, second, 0, deadline), keys);
+        assertFalse(bridge.consumedBurnIds(second.burnId), "second burn is fresh");
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.fundsOutCall(second, 0, deadline, bitmap, signatures);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), 1, "stale nonce rejection preserves the lane");
+        assertEq(token.balanceOf(recipient), AMOUNT / 4, "second burn pays nothing");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT * 10 - AMOUNT / 4, "second burn debits nothing");
+        assertFalse(bridge.consumedBurnIds(second.burnId), "second burn remains fresh");
+
+        bytes[] memory fresh =
+            MultisigHelper.signAll(vm, MultisigHelper.digestTeeFundsOut(domainSep, second, 1, deadline), keys);
+        proxy.fundsOutCall(second, 1, deadline, bitmap, fresh);
+        assertEq(token.balanceOf(recipient), AMOUNT / 2, "fresh nonce accepts the same second payload");
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), 2, "fresh nonce advances the lane");
+    }
+
+    function test_rebalanceCall_revertsOnConsumedNonceForDifferentBurn() public {
+        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
+        (uint256[] memory keys, uint256 bitmap) = _encSigSet2of3();
+        IBridge.RebalanceParams memory first = _rebalanceParams();
+        first.amount = AMOUNT / 4;
+        first.burnId = _deriveRebalanceBurnId(first);
+        proxy.rebalanceCall(
+            first,
+            0,
+            deadline,
+            bitmap,
+            MultisigHelper.signAll(vm, MultisigHelper.digestTeeRebalance(domainSep, first, 0, deadline), keys)
+        );
+        IBridge.RebalanceParams memory second = _rebalanceParams();
+        second.amount = AMOUNT / 4;
+        second.sourceBurnTxId = keccak256("nonce-second-rebalance");
+        second.settlementDataIn = abi.encode(RGB_OP_ID + 8);
+        second.burnId = _deriveRebalanceBurnId(second);
+        bytes[] memory signatures =
+            MultisigHelper.signAll(vm, MultisigHelper.digestTeeRebalance(domainSep, second, 0, deadline), keys);
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.rebalanceCall(second, 0, deadline, bitmap, signatures);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), 1, "stale nonce rejection preserves the lane");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT * 10 - AMOUNT / 4, "source has one debit");
+        assertEq(bridge.lockedLiquidity(SOURCE_CHAIN_ID), AMOUNT / 4, "destination has one credit");
+        assertEq(token.balanceOf(address(bridge)), AMOUNT * 10, "custody unchanged by rebalances");
+        assertFalse(bridge.consumedBurnIds(second.burnId), "second burn remains fresh");
+
+        bytes[] memory fresh =
+            MultisigHelper.signAll(vm, MultisigHelper.digestTeeRebalance(domainSep, second, 1, deadline), keys);
+        proxy.rebalanceCall(second, 1, deadline, bitmap, fresh);
+        assertEq(bridge.lockedLiquidity(SOURCE_CHAIN_ID), AMOUNT / 2, "fresh nonce accepts the same second payload");
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), 2, "fresh nonce advances the lane");
+    }
+
+    function test_rebalanceCall_unknownSourcePrecedesInvalidNonce() public {
+        IBridge.RebalanceParams memory params = _rebalanceParams();
+        params.sourceChainId = 424_242;
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnknownSourceChain.selector, uint256(424_242)));
+        proxy.rebalanceCall(params, 1, vm.getBlockTimestamp() + 1 hours, 0, new bytes[](0));
     }
 }

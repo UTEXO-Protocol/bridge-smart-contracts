@@ -198,4 +198,25 @@ contract BridgeConfigurationTest is BridgeTestBase {
     function test_getChainId_returnsCurrentChain() public view {
         assertEq(bridge.getChainId(), block.chainid);
     }
+
+    function test_setRouteRegistry_revertsOnCodelessAddress() public {
+        address candidate = makeAddr("codeless-registry");
+        vm.expectRevert(IBridge.InvalidRouteRegistryAddress.selector);
+        vm.prank(multisig);
+        bridge.setRouteRegistry(candidate);
+        assertEq(bridge.routeRegistry(), address(routeRegistry), "failed rotation preserves registry");
+    }
+
+    function test_emergencyUnpauseAll_resumesPlannedInflowPauseAndIsIdempotent() public {
+        vm.startPrank(multisig);
+        bridge.pauseInflow();
+        assertFalse(bridge.outflowPaused(), "planned pause leaves outflow open");
+        bridge.emergencyUnpauseAll();
+        assertFalse(bridge.paused(), "emergency unpause resumes inflow");
+        assertFalse(bridge.outflowPaused(), "outflow stays open");
+        vm.recordLogs();
+        bridge.emergencyUnpauseAll();
+        assertEq(vm.getRecordedLogs().length, 0, "repeated unpause emits no transitions");
+        vm.stopPrank();
+    }
 }

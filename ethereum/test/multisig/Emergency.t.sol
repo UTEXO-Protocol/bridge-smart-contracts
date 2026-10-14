@@ -44,7 +44,8 @@ contract MultisigEmergencyTest is MultisigProxyTestBase {
 
         proxy.emergencyPause(nonce, deadline, bitmap, sigs);
 
-        assertTrue(bridge.paused());
+        assertTrue(bridge.paused(), "inflow paused");
+        assertTrue(bridge.outflowPaused(), "outflow paused");
         assertEq(proxy.emergencyNonce(), nonce + 1, "emergency lane advanced");
         assertEq(proxy.proposalNonce(), 0, "proposal lane untouched by emergency");
     }
@@ -87,7 +88,10 @@ contract MultisigEmergencyTest is MultisigProxyTestBase {
         emit IMultisigProxy.EmergencyUnpaused(nonce, bitmap);
 
         proxy.emergencyUnpause(nonce, deadline, bitmap, sigs);
-        assertFalse(bridge.paused());
+        assertFalse(bridge.paused(), "inflow resumed");
+        assertFalse(bridge.outflowPaused(), "outflow resumed");
+        assertEq(proxy.emergencyNonce(), nonce + 1, "emergency lane advanced");
+        assertEq(proxy.proposalNonce(), 0, "proposal lane untouched");
     }
 
     function test_guardianPause_invalidatesPreviouslySignedPauseAndUnpause() public {
@@ -132,7 +136,7 @@ contract MultisigEmergencyTest is MultisigProxyTestBase {
         assertTrue(bridge.outflowPaused());
     }
 
-    function test_guardianPause_revertsPreservesEmergencyNonce() public {
+    function test_guardianEmergencyPause_rejectedCallPreservesEmergencyNonce() public {
         uint256 nonce = proxy.emergencyNonce();
         vm.mockCallRevert(
             address(bridge),

@@ -12,7 +12,7 @@ import {IntegrationTestBase} from "./IntegrationTestBase.sol";
 
 /// @notice Signed releases enforce finality, replay, quorum and pause checks.
 contract IntegrationWithdrawalsTest is IntegrationTestBase {
-    function _signEnclave1(bytes32 digest) private view returns (bytes[] memory sigs) {
+    function _signEnclave1(bytes32 digest) private pure returns (bytes[] memory sigs) {
         uint256[] memory pks = new uint256[](1);
         pks[0] = ENC_PK_1;
         sigs = MultisigHelper.signAll(vm, digest, pks);
@@ -33,11 +33,12 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
 
         ReleaseState memory beforeState = _releaseState(burnId);
+        FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         vm.expectEmit(true, true, false, true, address(bridge));
         emit IBridge.BridgeFundsOut(
             recipient, netIn, netOut, outFee, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, "", params.settlementData
         );
-        _submitFundsOut(params);
+        proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
 
         _assertSuccessfulRelease(params, beforeState, outFee);
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 0, "full chain burst consumed");
@@ -71,12 +72,11 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
 
         // Re-sign identical params with the advanced teeNonce; Bridge derives the
         // same burnId and rejects it as already consumed.
-        uint256 nonce2 = proxy.teeNonce(RGB_CHAIN_ID);
-        uint256 deadline2 = vm.getBlockTimestamp() + 1 hours;
-        bytes32 digest2 = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce2, deadline2);
-        bytes[] memory sigs2 = _signEnclave2of3(digest2);
+        FundsOutAuthorization memory replayAuthorization = _prepareFundsOut(params);
         vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, burnId));
-        proxy.fundsOutCall(params, nonce2, deadline2, 3, sigs2);
+        proxy.fundsOutCall(
+            params, replayAuthorization.nonce, replayAuthorization.deadline, 3, replayAuthorization.signatures
+        );
 
         _assertReleaseUnchanged(burnId, afterFirst);
     }
@@ -111,13 +111,10 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         (IBridge.FundsOutParams memory params, uint256 burnId) =
             _buildFundsOut(opId, netIn, poolPlusOne, "", _validProof());
 
-        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
-        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
-        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
-        bytes[] memory sigs = _signEnclave2of3(digest);
+        FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
         vm.expectRevert(BridgeBaseUpgradeable.AmountExceedBridgePool.selector);
-        proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
+        proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
 
         _assertReleaseUnchanged(burnId, beforeState);
     }
@@ -134,15 +131,12 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         bytes memory shallowProof = abi.encode(LATEST_HEIGHT, LATEST_COMMIT, LATEST_HEIGHT, LATEST_COMMIT);
         (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", shallowProof);
 
-        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
-        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
-        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
-        bytes[] memory sigs = _signEnclave2of3(digest);
+        FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
         vm.expectRevert(
             abi.encodeWithSelector(RGBVerifier.InsufficientSourceConfirmations.selector, uint256(1), uint256(6))
         );
-        proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
+        proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
 
         _assertReleaseUnchanged(burnId, beforeState);
     }
@@ -158,13 +152,10 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         (IBridge.FundsOutParams memory params, uint256 burnId) =
             _buildFundsOut(fakeOpId, netIn, netIn, "", _validProof());
 
-        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
-        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
-        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
-        bytes[] memory sigs = _signEnclave2of3(digest);
+        FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
         vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, fakeOpId));
-        proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
+        proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
 
         _assertReleaseUnchanged(burnId, beforeState);
     }
@@ -180,13 +171,10 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         (IBridge.FundsOutParams memory params, uint256 burnId) =
             _buildFundsOut(opId, netIn + 1, netIn, "", _validProof());
 
-        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
-        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
-        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
-        bytes[] memory sigs = _signEnclave2of3(digest);
+        FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
         vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.AmountMismatch.selector, opId, netIn + 1, netIn));
-        proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
+        proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
 
         _assertReleaseUnchanged(burnId, beforeState);
     }
@@ -203,13 +191,10 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
 
         (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
 
-        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
-        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
-        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
-        bytes[] memory sigs = _signEnclave2of3(digest);
+        FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
         vm.expectRevert(BridgeBaseUpgradeable.OutflowEnforcedPause.selector);
-        proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
+        proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
 
         _assertReleaseUnchanged(burnId, beforeState);
     }
@@ -223,9 +208,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         uint256 netIn = _netIn();
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
         (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
-        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
-        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
-        bytes[] memory sigs = _signEnclave2of3(MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline));
+        FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
         uint256 emergencyNonceBefore = proxy.emergencyNonce();
         uint256 proposalNonceBefore = proxy.proposalNonce();
@@ -237,7 +220,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         _assertReleaseUnchanged(burnId, beforeState);
 
         vm.expectRevert(BridgeBaseUpgradeable.OutflowEnforcedPause.selector);
-        proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
+        proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
         _assertReleaseUnchanged(burnId, beforeState);
 
         vm.prank(user);
@@ -246,15 +229,19 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         _assertReleaseUnchanged(burnId, beforeState);
 
         uint256 unpauseNonce = proxy.emergencyNonce();
-        assertEq(unpauseNonce, emergencyNonceBefore + 1, "guardian consumes emergency nonce");
-        bytes32 unpauseDigest = MultisigHelper.digestEmergencyUnpause(domainSep, unpauseNonce, deadline);
-        proxy.emergencyUnpause(unpauseNonce, deadline, 3, _signFed2of3(unpauseDigest));
+        assertEq(unpauseNonce, emergencyNonceBefore + 1, "guardian consumes emergency authorization.nonce");
+        bytes32 unpauseDigest = MultisigHelper.digestEmergencyUnpause(domainSep, unpauseNonce, authorization.deadline);
+        proxy.emergencyUnpause(unpauseNonce, authorization.deadline, 3, _signFed2of3(unpauseDigest));
         assertFalse(bridge.paused(), "federation resumed inflow");
         assertFalse(bridge.outflowPaused(), "federation resumed outflow");
-        assertEq(proxy.emergencyNonce(), emergencyNonceBefore + 2, "guardian and federation each consume a nonce");
-        assertEq(proxy.proposalNonce(), proposalNonceBefore, "guardian does not consume proposal nonce");
+        assertEq(
+            proxy.emergencyNonce(),
+            emergencyNonceBefore + 2,
+            "guardian and federation each consume a authorization.nonce"
+        );
+        assertEq(proxy.proposalNonce(), proposalNonceBefore, "guardian does not consume proposal authorization.nonce");
 
-        proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
+        proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
         _assertSuccessfulRelease(params, beforeState, outFee);
         assertEq(rgbModule.fundsInRecords(opId), netIn, "mint record remains permanent");
     }

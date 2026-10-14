@@ -38,6 +38,25 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
         bytes[] sigs;
     }
 
+    /// @dev Registration executes its signed timelock before a release is prepared.
+    function _deployLzAdapter(address oft) private returns (MockOutboundLZAdapter adapter) {
+        adapter = new MockOutboundLZAdapter(address(token), oft, address(proxy), LZ_NATIVE_FEE);
+        _setLzAdapter(address(adapter));
+    }
+
+    function _snapshotRelease(address adapter, address oft) private view returns (ReleaseSnapshot memory state) {
+        state.bridge = token.balanceOf(address(bridge));
+        state.adapter = token.balanceOf(adapter);
+        state.oft = token.balanceOf(oft);
+        state.cm = token.balanceOf(address(cm));
+        state.cmPool = cm.tokenCommissionPool(address(token));
+        state.nativePool = cm.nativeCommissionPool();
+        state.record = rgbModule.fundsInRecords(seedOpId);
+        state.proxyEth = address(proxy).balance;
+        state.adapterEth = adapter.balance;
+        state.oftEth = oft.balance;
+    }
+
     function _setTokenCommission(uint256 stablePercent) private {
         vm.prank(address(proxy));
         cm.setCommissionRule(
@@ -81,23 +100,13 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
         assertEq(quote.netAmount, AMOUNT - quote.tokenCommission, "net adapter amount");
 
         address mockOft = makeAddr("mockOft");
-        MockOutboundLZAdapter adapter =
-            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        _setLzAdapter(address(adapter));
+        MockOutboundLZAdapter adapter = _deployLzAdapter(mockOft);
 
         IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
 
         ReleaseAuthorization memory auth = _authorizeRelease(params);
 
-        beforeState.bridge = token.balanceOf(address(bridge));
-        beforeState.adapter = token.balanceOf(address(adapter));
-        beforeState.oft = token.balanceOf(mockOft);
-        beforeState.cm = token.balanceOf(address(cm));
-        beforeState.cmPool = cm.tokenCommissionPool(address(token));
-        beforeState.record = rgbModule.fundsInRecords(seedOpId);
-        beforeState.proxyEth = address(proxy).balance;
-        beforeState.adapterEth = address(adapter).balance;
-        beforeState.oftEth = mockOft.balance;
+        beforeState = _snapshotRelease(address(adapter), mockOft);
 
         assertEq(beforeState.bridge, AMOUNT * 10, "pre bridge pool");
         assertEq(beforeState.adapter, 0, "pre adapter token");
@@ -163,25 +172,14 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
         assertEq(quote.nativeCommission, 0, "native fee is zero");
 
         address mockOft = makeAddr("mockOft");
-        MockOutboundLZAdapter adapter =
-            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        _setLzAdapter(address(adapter));
+        MockOutboundLZAdapter adapter = _deployLzAdapter(mockOft);
 
         IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
 
         ReleaseAuthorization memory auth = _authorizeRelease(params);
 
         // Snapshot all state touched by the first Bridge leg and the failed adapter leg.
-        beforeState.bridge = token.balanceOf(address(bridge));
-        beforeState.adapter = token.balanceOf(address(adapter));
-        beforeState.oft = token.balanceOf(mockOft);
-        beforeState.cm = token.balanceOf(address(cm));
-        beforeState.cmPool = cm.tokenCommissionPool(address(token));
-        beforeState.nativePool = cm.nativeCommissionPool();
-        beforeState.record = rgbModule.fundsInRecords(seedOpId);
-        beforeState.proxyEth = address(proxy).balance;
-        beforeState.adapterEth = address(adapter).balance;
-        beforeState.oftEth = mockOft.balance;
+        beforeState = _snapshotRelease(address(adapter), mockOft);
 
         assertEq(beforeState.bridge, AMOUNT * 10, "pre bridge pool");
         assertEq(beforeState.adapter, 0, "pre adapter token");
@@ -224,29 +222,18 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
         assertEq(quote.nativeCommission, 0, "native fee is zero");
 
         address mockOft = makeAddr("mockOft");
-        MockOutboundLZAdapter adapter =
-            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        _setLzAdapter(address(adapter));
+        MockOutboundLZAdapter adapter = _deployLzAdapter(mockOft);
 
         IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
         // Well-formed two-pair proof whose source block is unknown to the relay,
         // so Bridge.fundsOut reverts before the adapter send can run.
         params.proof = abi.encode(uint256(999_999), keccak256("unknown-block"), LATEST_HEIGHT, LATEST_COMMIT);
-        params.burnId = _deriveBurnId(params.amount, params.sourceChainId, params.sourceAddress, SRC_BURN_TX_ID);
 
         ReleaseAuthorization memory auth = _authorizeRelease(params);
 
-        // The adapter is funded; only the Bridge verifier failure should stop dispatch.
-        beforeState.bridge = token.balanceOf(address(bridge));
-        beforeState.adapter = token.balanceOf(address(adapter));
-        beforeState.oft = token.balanceOf(mockOft);
-        beforeState.cm = token.balanceOf(address(cm));
-        beforeState.cmPool = cm.tokenCommissionPool(address(token));
-        beforeState.nativePool = cm.nativeCommissionPool();
-        beforeState.record = rgbModule.fundsInRecords(seedOpId);
-        beforeState.proxyEth = address(proxy).balance;
-        beforeState.adapterEth = address(adapter).balance;
-        beforeState.oftEth = mockOft.balance;
+        // The Bridge is funded and the adapter is configured; the verifier
+        // failure stops dispatch before tokens reach the adapter.
+        beforeState = _snapshotRelease(address(adapter), mockOft);
 
         assertEq(beforeState.bridge, AMOUNT * 10, "pre bridge pool");
         assertEq(beforeState.adapter, 0, "pre adapter token");
@@ -288,9 +275,7 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
         assertEq(quote.nativeCommission, 0, "native fee is zero");
 
         address mockOft = makeAddr("mockOft");
-        MockOutboundLZAdapter adapter =
-            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        _setLzAdapter(address(adapter));
+        MockOutboundLZAdapter adapter = _deployLzAdapter(mockOft);
 
         bytes32[] memory duplicateIds = new bytes32[](2);
         duplicateIds[0] = seedOpId;
@@ -304,16 +289,7 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
         // pure read, so referencing the same id twice with its (correct) amount
         // simply passes both times. Solvency is the Bridge's concern, not the
         // module's.
-        beforeState.bridge = token.balanceOf(address(bridge));
-        beforeState.adapter = token.balanceOf(address(adapter));
-        beforeState.oft = token.balanceOf(mockOft);
-        beforeState.cm = token.balanceOf(address(cm));
-        beforeState.cmPool = cm.tokenCommissionPool(address(token));
-        beforeState.nativePool = cm.nativeCommissionPool();
-        beforeState.record = rgbModule.fundsInRecords(seedOpId);
-        beforeState.proxyEth = address(proxy).balance;
-        beforeState.adapterEth = address(adapter).balance;
-        beforeState.oftEth = mockOft.balance;
+        beforeState = _snapshotRelease(address(adapter), mockOft);
 
         assertEq(beforeState.bridge, AMOUNT * 10, "pre bridge pool");
         assertEq(beforeState.adapter, 0, "pre adapter token");
@@ -378,9 +354,7 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
         assertEq(quote.nativeCommission, 0, "native fee is zero");
 
         address mockOft = makeAddr("mockOft");
-        MockOutboundLZAdapter adapter =
-            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        _setLzAdapter(address(adapter));
+        MockOutboundLZAdapter adapter = _deployLzAdapter(mockOft);
 
         bytes32[] memory duplicateIds = new bytes32[](2);
         duplicateIds[0] = secondOpId;
@@ -392,16 +366,9 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
 
         // The module keeps permanent records, so a duplicated id is just
         // verified twice against the same (intact) record and passes.
-        beforeState.bridge = token.balanceOf(address(bridge));
-        beforeState.adapter = token.balanceOf(address(adapter));
-        beforeState.oft = token.balanceOf(mockOft);
-        beforeState.cm = token.balanceOf(address(cm));
-        beforeState.cmPool = cm.tokenCommissionPool(address(token));
-        beforeState.originalRecord = rgbModule.fundsInRecords(seedOpId);
+        beforeState = _snapshotRelease(address(adapter), mockOft);
+        beforeState.originalRecord = beforeState.record;
         beforeState.duplicateRecord = rgbModule.fundsInRecords(secondOpId);
-        beforeState.proxyEth = address(proxy).balance;
-        beforeState.adapterEth = address(adapter).balance;
-        beforeState.oftEth = mockOft.balance;
 
         assertEq(beforeState.bridge, AMOUNT * 11, "pre bridge pool");
         assertEq(beforeState.adapter, 0, "pre adapter token");
@@ -471,9 +438,7 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
         assertEq(quote.netAmount, AMOUNT - quote.tokenCommission, "net = gross - fee");
 
         address mockOft = makeAddr("mockOft");
-        MockOutboundLZAdapter adapter =
-            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        _setLzAdapter(address(adapter));
+        MockOutboundLZAdapter adapter = _deployLzAdapter(mockOft);
 
         IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
         ReleaseAuthorization memory auth = _authorizeRelease(params);
@@ -508,9 +473,7 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
 
     function test_lzFundsOutCall_revertsOnDeadlineTooFar() public {
         address mockOft = makeAddr("mockOft");
-        MockOutboundLZAdapter adapter =
-            new MockOutboundLZAdapter(address(token), mockOft, address(proxy), LZ_NATIVE_FEE);
-        _setLzAdapter(address(adapter));
+        _deployLzAdapter(mockOft);
 
         IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
@@ -536,5 +499,94 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
 
         vm.expectRevert(IMultisigProxy.LZAdapterNotSet.selector);
         proxy.lzFundsOutCall(params, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_lzFundsOutCall_settlementDataRemainsSigned() public {
+        MockOutboundLZAdapter adapter = _deployLzAdapter(makeAddr("mockOft"));
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
+        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
+        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
+        params.settlementData = bytes.concat(params.settlementData, hex"01");
+        vm.deal(address(this), LZ_NATIVE_FEE);
+        vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce);
+        assertFalse(bridge.consumedBurnIds(params.burnId));
+        assertEq(adapter.sendOutCalls(), 0);
+    }
+
+    function test_lzFundsOutCall_changedSettlementCannotReplaySameBurn() public {
+        address oft = makeAddr("mockOft");
+        MockOutboundLZAdapter adapter = _deployLzAdapter(oft);
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
+        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
+        (uint256 nonce, uint256 bitmap, bytes[] memory sigs) = _signLzEnclave(params, deadline);
+        vm.deal(address(this), LZ_NATIVE_FEE * 2);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
+        uint256 balance = token.balanceOf(oft);
+
+        params.settlementData = bytes.concat(params.settlementData, hex"00");
+        // Fresh valid signatures authorize the changed payload and current nonce.
+        (nonce, bitmap, sigs) = _signLzEnclave(params, deadline);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, params.burnId));
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce, "failed release restores nonce");
+        assertEq(adapter.sendOutCalls(), 1, "no second send");
+        assertEq(token.balanceOf(oft), balance, "no second payout");
+    }
+
+    function test_lzFundsOutCall_acceptsDeadlineAtMaxBoundary() public {
+        address mockOft = makeAddr("mockOft");
+        _deployLzAdapter(mockOft);
+
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
+        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 deadline = vm.getBlockTimestamp() + proxy.MAX_TEE_DEADLINE(); // exact boundary
+
+        bytes32 digest = MultisigHelper.digestTeeLzFundsOut(domainSep, params, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        vm.deal(address(this), LZ_NATIVE_FEE);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
+        assertEq(token.balanceOf(mockOft), AMOUNT, "lz release executes at the exact deadline ceiling");
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce + 1, "teeNonce incremented");
+    }
+
+    function test_lzFundsOutCall_revertsOnConsumedNonceForDifferentBurn() public {
+        address oft = makeAddr("stale-nonce-oft");
+        MockOutboundLZAdapter adapter = _deployLzAdapter(oft);
+        IMultisigProxy.LzFundsOutParams memory first =
+            _lzFundsOutParams(AMOUNT / 4, keccak256("nonce-first-lz-release"), _fundsInIds());
+        ReleaseAuthorization memory auth = _authorizeRelease(first);
+        vm.deal(address(this), LZ_NATIVE_FEE * 2);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(first, auth.nonce, auth.deadline, auth.bitmap, auth.sigs);
+        IMultisigProxy.LzFundsOutParams memory second =
+            _lzFundsOutParams(AMOUNT / 4, keccak256("nonce-second-lz-release"), _fundsInIds());
+        (uint256[] memory keys,) = _encSigSet2of3();
+        auth.sigs = MultisigHelper.signAll(
+            vm, MultisigHelper.digestTeeLzFundsOut(domainSep, second, auth.nonce, auth.deadline), keys
+        );
+        vm.expectRevert(IMultisigProxy.InvalidNonce.selector);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(second, auth.nonce, auth.deadline, auth.bitmap, auth.sigs);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), auth.nonce + 1, "stale nonce does not change lane");
+        assertEq(adapter.sendOutCalls(), 1, "only the first send executes");
+        assertEq(token.balanceOf(oft), AMOUNT / 4, "only the first payload pays out");
+        assertEq(oft.balance, LZ_NATIVE_FEE, "only the first native fee is forwarded");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT * 10 - AMOUNT / 4, "only the first debit persists");
+        assertFalse(bridge.consumedBurnIds(second.burnId), "rejected burn remains fresh");
+
+        ReleaseAuthorization memory fresh = _authorizeRelease(second);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(second, fresh.nonce, fresh.deadline, fresh.bitmap, fresh.sigs);
+        assertEq(adapter.sendOutCalls(), 2, "fresh nonce accepts the same second payload");
+        assertEq(token.balanceOf(oft), AMOUNT / 2, "fresh nonce pays the second payload");
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), 2, "fresh nonce advances the lane");
+    }
+
+    function test_lzFundsOutCall_unknownSourcePrecedesInvalidNonce() public {
+        IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
+        params.sourceChainId = 424_242;
+        vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnknownSourceChain.selector, uint256(424_242)));
+        proxy.lzFundsOutCall(params, 1, vm.getBlockTimestamp() + 1 hours, 0, new bytes[](0));
     }
 }

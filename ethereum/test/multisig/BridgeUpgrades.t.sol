@@ -263,27 +263,15 @@ contract MultisigBridgeUpgradesTest is MultisigProxyTestBase {
     }
 
     function test_executeProposal_rejectsUpgradeAfterBridgeTargetRotation() public {
+        address replacementBridge = makeAddr("replacementBridge");
         address signedBridge = address(bridge);
         BridgeV2Mock nextImplementation = new BridgeV2Mock();
         bytes memory initializationData = bytes("");
         uint256 deadline = vm.getBlockTimestamp() + 1 days;
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
 
-        uint256 upgradeNonce = proxy.proposalNonce();
-        bytes32 upgradeDigest = MultisigHelper.digestProposeUpgradeBridgeImplementation(
-            domainSep, signedBridge, address(nextImplementation), initializationData, upgradeNonce, deadline
-        );
-        bytes32 upgradeId = proxy.proposeUpgradeBridgeImplementation(
-            signedBridge,
-            address(nextImplementation),
-            initializationData,
-            upgradeNonce,
-            deadline,
-            bitmap,
-            MultisigHelper.signAll(vm, upgradeDigest, pks)
-        );
+        bytes32 upgradeId = _submitBridgeUpgrade(address(nextImplementation), initializationData);
 
-        address replacementBridge = makeAddr("replacementBridge");
         uint256 updateNonce = proxy.proposalNonce();
         bytes32 updateDigest =
             MultisigHelper.digestProposeUpdateBridge(domainSep, replacementBridge, updateNonce, deadline);

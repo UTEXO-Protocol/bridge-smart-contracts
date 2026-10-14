@@ -46,6 +46,7 @@ library MultisigHelper {
 
     bytes32 internal constant PROPOSE_UPDATE_BRIDGE_TYPEHASH =
         keccak256("ProposeUpdateBridge(address newBridge,uint256 nonce,uint256 deadline)");
+
     bytes32 internal constant PROPOSE_UPGRADE_BRIDGE_IMPLEMENTATION_TYPEHASH = keccak256(
         "ProposeUpgradeBridgeImplementation(address bridgeProxy,address newImplementation,bytes initializationData,uint256 nonce,uint256 deadline)"
     );
@@ -87,6 +88,7 @@ library MultisigHelper {
 
     bytes32 internal constant PROPOSE_UPDATE_LZ_ADAPTER_TYPEHASH =
         keccak256("ProposeUpdateLZAdapter(address newLZAdapter,uint256 nonce,uint256 deadline)");
+
     bytes32 internal constant PROPOSE_DISABLE_LZ_ADAPTER_TYPEHASH =
         keccak256("ProposeDisableLZAdapter(uint256 nonce,uint256 deadline)");
 

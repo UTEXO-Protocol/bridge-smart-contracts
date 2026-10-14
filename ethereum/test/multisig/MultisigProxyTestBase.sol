@@ -75,26 +75,18 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant TIMELOCK = 1 hours;
 
-    uint256 internal constant MIN_TIMELOCK = 1 hours;
-
-    // floor passed to the proxy constructor in tests
+    uint256 internal constant MIN_TIMELOCK = 1 hours; // floor passed to the proxy constructor in tests
 
     bytes32 internal domainSep;
 
     // Chain identifiers + canonical fundsOut args
-    uint256 internal constant SOURCE_CHAIN_ID = 31337;
+    uint256 internal constant SOURCE_CHAIN_ID = 31337; // foundry block.chainid
 
-    // foundry block.chainid
-
-    uint256 internal constant RGB_CHAIN_ID = 1_000_001;
-
-    // backend-assigned for RGB
+    uint256 internal constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
 
     string internal constant DST_ADDR = "";
 
-    string internal constant SRC_ADDR = "";
-
-    // RGB has no source-address concept
+    string internal constant SRC_ADDR = ""; // RGB has no source-address concept
 
     bytes32 internal constant SRC_BURN_TX_ID = keccak256("multisig-burn-tx-default");
 
@@ -116,15 +108,11 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
 
     // BtcRelay test data. RGB proof = two (height, commit) pairs: a deep
     // source block (RGB burn/lock) and a fresh latest block. gap = 6 - 1 = 5.
-    uint256 internal constant BLOCK_HEIGHT = 850_000;
-
-    // source block
+    uint256 internal constant BLOCK_HEIGHT = 850_000; // source block
 
     bytes32 internal constant COMMITMENT_HASH = keccak256("test-btc-block-commitment");
 
-    uint256 internal constant BTC_CONFIRMATIONS = 6;
-
-    // source confirmations
+    uint256 internal constant BTC_CONFIRMATIONS = 6; // source confirmations
 
     uint256 internal constant LATEST_HEIGHT = 850_005;
 

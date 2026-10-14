@@ -81,4 +81,18 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         assertEq(bridge.totalLockedLiquidity(), AMOUNT);
         assertEq(bridge.sourceSenderNonces(customSource, sourceSender), 0);
     }
+
+    function test_fundsInFromAdapter_revertsOnZeroSourceChain() public {
+        address adapter = makeAddr("zero-source-adapter");
+        vm.prank(multisig);
+        bridge.setLZAdapter(adapter);
+        usdt0.mint(adapter, AMOUNT);
+        vm.prank(adapter);
+        usdt0.approve(address(bridge), AMOUNT);
+        vm.expectRevert(IBridge.InvalidSourceChainId.selector);
+        vm.prank(adapter);
+        bridge.fundsIn(AMOUNT, 0, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        assertEq(usdt0.balanceOf(adapter), AMOUNT, "invalid source does not pull tokens");
+        assertEq(bridge.totalLockedLiquidity(), 0, "invalid source creates no liquidity");
+    }
 }

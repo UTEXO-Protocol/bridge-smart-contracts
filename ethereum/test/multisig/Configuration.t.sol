@@ -6,18 +6,8 @@ import {IMultisigProxy} from "../../src/interfaces/IMultisigProxy.sol";
 import {MultisigHelper} from "../helpers/MultisigHelper.sol";
 import {MultisigProxyTestBase} from "./MultisigProxyTestBase.sol";
 
-/// @notice Constructor validation, signer quorum and timelock configuration.
+/// @notice Constructor bounds and proposed signer/timelock configuration.
 contract MultisigConfigurationTest is MultisigProxyTestBase {
-    // ========================================================================
-    // Strict-majority signer threshold floor
-    // Both signer sets, at construction and on signer-update, must be a strict
-    // majority of at least 2 signers: n >= 2, threshold >= 2, threshold <= n,
-    // 2*threshold > n. Rejects 1-of-N, the degenerate 1-of-1, and sub-majority
-    // quorums; the smallest valid sets are 2-of-2 and 2-of-3.
-    // Intrinsic signer-set validation runs when proposing a rotation;
-    // execution additionally checks disjointness against the live opposite set.
-    // ========================================================================
-
     /// @dev Deterministic, distinct nonzero signer addresses for quorum checks.
     function _signers(uint256 n) private pure returns (address[] memory a) {
         a = new address[](n);
@@ -617,5 +607,146 @@ contract MultisigConfigurationTest is MultisigProxyTestBase {
         // Signer-set size is checked when proposing the rotation.
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.TooManySigners.selector, max + 1, max));
         proxy.proposeUpdateEnclaveSigners(RGB_CHAIN_ID, newSigners, newThreshold, nonce, deadline, bitmap, sigs);
+    }
+
+    function test_proposeUpdateEnclaveSigners_updatesQuorumAfterTimelock() public {
+        address newSigner = makeAddr("newEncSigner");
+        address[] memory newSigners = new address[](2);
+        newSigners[0] = encA1;
+        newSigners[1] = newSigner;
+        uint256 newThreshold = 2;
+
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = vm.getBlockTimestamp() + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(
+            domainSep, RGB_CHAIN_ID, newSigners, newThreshold, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id =
+            proxy.proposeUpdateEnclaveSigners(RGB_CHAIN_ID, newSigners, newThreshold, nonce, deadline, bitmap, sigs);
+
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
+        proxy.executeProposal(id, abi.encode(RGB_CHAIN_ID, newSigners, newThreshold));
+
+        address[] memory after_ = proxy.getEnclaveSigners(RGB_CHAIN_ID);
+        assertEq(after_.length, 2);
+        assertEq(after_[1], newSigner);
+        assertEq(proxy.enclaveThreshold(RGB_CHAIN_ID), newThreshold);
+    }
+
+    function test_proposeSetTimelockDuration_updatesDurationAfterTimelock() public {
+        uint256 newDuration = 2 hours;
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = vm.getBlockTimestamp() + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(domainSep, newDuration, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
+
+        bytes32 id = proxy.proposeSetTimelockDuration(newDuration, nonce, deadline, bitmap, sigs);
+
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
+
+        vm.expectEmit(false, false, false, true, address(proxy));
+        emit IMultisigProxy.TimelockDurationUpdated(newDuration);
+        proxy.executeProposal(id, abi.encode(newDuration));
+
+        assertEq(proxy.timelockDuration(), newDuration);
+    }
+
+    /// @dev A SetTimelockDuration proposal below the immutable MIN_TIMELOCK
+    ///      floor is rejected at execution; the floor holds.
+    function test_proposeSetTimelockDuration_revertsBelowMinTimelock() public {
+        uint256 t = vm.getBlockTimestamp();
+        uint256 newDuration = MIN_TIMELOCK - 1; // just under the floor
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = t + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(domainSep, newDuration, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 id = proxy.proposeSetTimelockDuration(
+            newDuration, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks)
+        );
+
+        vm.warp(t + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.TimelockTooShort.selector);
+        proxy.executeProposal(id, abi.encode(newDuration));
+
+        assertEq(proxy.timelockDuration(), TIMELOCK, "timelock unchanged");
+    }
+
+    /// @dev A value exactly at MIN_TIMELOCK is still accepted (boundary).
+    function test_proposeSetTimelockDuration_acceptsAtMinTimelock() public {
+        uint256 initialDuration = MIN_TIMELOCK * 2;
+        proxy = new MultisigProxy(
+            address(bridge),
+            address(cm),
+            emergencyGuardian,
+            _validEnc(),
+            2,
+            RGB_CHAIN_ID,
+            _validFed(),
+            2,
+            initialDuration,
+            MIN_TIMELOCK
+        );
+        domainSep = MultisigHelper.domainSeparator(address(proxy), block.chainid);
+        assertGt(proxy.timelockDuration(), MIN_TIMELOCK, "initial timelock is above the boundary");
+
+        uint256 t = vm.getBlockTimestamp();
+        uint256 newDuration = MIN_TIMELOCK; // exactly the floor
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = t + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(domainSep, newDuration, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 id = proxy.proposeSetTimelockDuration(
+            newDuration, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks)
+        );
+
+        vm.warp(t + initialDuration + 1);
+        proxy.executeProposal(id, abi.encode(newDuration));
+        assertEq(proxy.timelockDuration(), newDuration);
+    }
+
+    function test_constructor_preservesDistinctTimelockAndMinimum() public {
+        uint256 duration = MIN_TIMELOCK * 2;
+        MultisigProxy configured = new MultisigProxy(
+            address(bridge),
+            address(cm),
+            emergencyGuardian,
+            _validEnc(),
+            2,
+            RGB_CHAIN_ID,
+            _validFed(),
+            2,
+            duration,
+            MIN_TIMELOCK
+        );
+        assertEq(configured.timelockDuration(), duration, "mutable duration uses its constructor argument");
+        assertEq(configured.MIN_TIMELOCK(), MIN_TIMELOCK, "immutable minimum uses its constructor argument");
+    }
+
+    function test_executeProposal_revertsWhenTimelockEqualsMaximumLifetime() public {
+        uint256 duration = proxy.MAX_PROPOSAL_LIFETIME();
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = vm.getBlockTimestamp() + 1 days;
+        (uint256[] memory keys, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(domainSep, duration, nonce, deadline);
+        bytes32 id = proxy.proposeSetTimelockDuration(
+            duration, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, keys)
+        );
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.TimelockTooLong.selector);
+        proxy.executeProposal(id, abi.encode(duration));
+        assertEq(proxy.timelockDuration(), TIMELOCK, "rejected duration preserves timelock");
+        assertEq(
+            uint256(proxy.getProposal(id).status),
+            uint256(IMultisigProxy.ProposalStatus.Pending),
+            "failed proposal remains pending"
+        );
     }
 }

@@ -21,7 +21,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         }
     }
 
-    function test_rebalanceLiquidity_revertsNotOwner() public {
+    function test_rebalanceLiquidity_revertsForNonOwner() public {
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
@@ -138,7 +138,6 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         // (ARCH → SOURCE) was never registered as a route.
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         p.destinationChainId = SOURCE_CHAIN_ID;
-        p.burnId = _deriveRebalanceBurnId(p);
         vm.prank(multisig);
         vm.expectRevert(abi.encodeWithSelector(IRouteRegistry.RouteNotEnabled.selector, ARCH_CHAIN_ID, SOURCE_CHAIN_ID));
         bridge.rebalanceLiquidity(p);
@@ -174,10 +173,9 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         bridge.rebalanceLiquidity(p);
     }
 
-    function test_rebalanceLiquidity_revertsVerifierRejectsBadProof() public {
+    function test_rebalanceLiquidity_revertsOnInvalidProof() public {
         IBridge.RebalanceParams memory p = _rgbToArchParams(AMOUNT, rgbSeedOpId);
         p.proof = abi.encode(BLOCK_HEIGHT + 1, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT); // unknown block
-        p.burnId = _deriveRebalanceBurnId(p);
         vm.prank(multisig);
         vm.expectRevert("verify: block commitment");
         bridge.rebalanceLiquidity(p);
@@ -216,5 +214,34 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
             )
         );
         bridge.rebalanceLiquidity(p);
+    }
+
+    /// @notice All three variable-size fields are bounded before any debit.
+    function test_rebalanceLiquidity_revertsOnOversizedAddressOrProof() public {
+        uint256 sourceBefore = bridge.lockedLiquidity(ARCH_CHAIN_ID);
+        uint256 destinationBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 totalBefore = bridge.totalLockedLiquidity();
+        for (uint256 field; field < 3; ++field) {
+            IBridge.RebalanceParams memory params =
+                field == 1 ? _rgbToArchParams(AMOUNT, rgbSeedOpId) : _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
+            uint256 maximum = field == 2 ? bridge.MAX_PROOF_LENGTH() : bridge.MAX_ADDRESS_LENGTH();
+            bytes memory oversized = _filledBytes(maximum + 1);
+            if (field == 0) {
+                params.sourceAddress = string(oversized);
+                params.burnId = _deriveRebalanceBurnId(params);
+            } else if (field == 1) {
+                params.destinationAddress = string(oversized);
+            } else {
+                params.proof = oversized;
+            }
+            bytes4 errorSelector = field == 2 ? IBridge.ProofTooLong.selector : IBridge.AddressTooLong.selector;
+            vm.expectRevert(abi.encodeWithSelector(errorSelector, maximum + 1, maximum));
+            vm.prank(multisig);
+            bridge.rebalanceLiquidity(params);
+            assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), sourceBefore, "oversized payload preserves source");
+            assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), destinationBefore, "oversized payload preserves destination");
+            assertEq(bridge.totalLockedLiquidity(), totalBefore, "oversized payload preserves total");
+            assertFalse(bridge.consumedBurnIds(params.burnId), "oversized payload preserves burn state");
+        }
     }
 }

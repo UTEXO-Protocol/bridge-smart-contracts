@@ -81,17 +81,11 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     bytes32 internal domainSep;
 
-    uint256 internal constant SOURCE_CHAIN_ID = 31337;
+    uint256 internal constant SOURCE_CHAIN_ID = 31337; // foundry default block.chainid
 
-    // foundry default block.chainid
+    uint256 internal constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
 
-    uint256 internal constant RGB_CHAIN_ID = 1_000_001;
-
-    // backend-assigned for RGB
-
-    uint256 internal constant USER_DEPOSIT = 1 ether;
-
-    // one 18-decimal mock token gross
+    uint256 internal constant USER_DEPOSIT = 1 ether; // one 18-decimal mock token gross
 
     // FUNDS_IN route: 2% token commission (stablePercent = 200, multiplier = 100 → 200/100/100 = 2%).
     uint256 internal constant FUNDS_IN_PERCENT = 200;
@@ -110,15 +104,11 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     // RGB proof = two (height, commit) pairs: a deep source block (RGB
     // burn/lock) and a fresh latest block (relay head). gap = 6 - 1 = 5.
-    uint256 internal constant BLOCK_HEIGHT = 850_000;
-
-    // source block
+    uint256 internal constant BLOCK_HEIGHT = 850_000; // source block
 
     bytes32 internal constant COMMITMENT_HASH = keccak256("integration-btc-block");
 
-    uint256 internal constant BTC_CONFIRMATIONS = 6;
-
-    // source confirmations
+    uint256 internal constant BTC_CONFIRMATIONS = 6; // source confirmations
 
     uint256 internal constant LATEST_HEIGHT = 850_005;
 
@@ -128,7 +118,7 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant TIMELOCK = 1 hours;
 
-    uint256 internal constant MIN_TIMELOCK = 1 hours;
+    uint256 internal constant MIN_TIMELOCK = 1 hours; // floor passed to the proxy constructor in tests
 
     string internal constant RGB_INVOICE = "";
 
@@ -149,8 +139,6 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
         bytes32 globalBucketState;
         bool burnConsumed;
     }
-
-    // floor passed to the proxy constructor in tests
 
     function setUp() public {
         encA1 = vm.addr(ENC_PK_1);
@@ -297,14 +285,14 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
         proxy.executeProposal(proposalId, callData);
     }
 
-    function _signEnclave2of3(bytes32 digest) internal view returns (bytes[] memory sigs) {
+    function _signEnclave2of3(bytes32 digest) internal pure returns (bytes[] memory sigs) {
         uint256[] memory pks = new uint256[](2);
         pks[0] = ENC_PK_1;
         pks[1] = ENC_PK_2;
         sigs = MultisigHelper.signAll(vm, digest, pks);
     }
 
-    function _signFed2of3(bytes32 digest) internal view returns (bytes[] memory sigs) {
+    function _signFed2of3(bytes32 digest) internal pure returns (bytes[] memory sigs) {
         uint256[] memory pks = new uint256[](2);
         pks[0] = FED_PK_1;
         pks[1] = FED_PK_2;

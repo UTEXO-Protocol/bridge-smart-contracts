@@ -238,16 +238,21 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
     function test_calculateFundsInCommission_zeroFeeRouteIgnoresFloorChanges() public {
         vm.prank(owner);
         cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
-        MockDepositFloor(BRIDGE).setMinFundsInAmount(1);
+        (uint256 beforeFee,, uint256 beforeNet) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), DEPOSIT_FLOOR);
+        MockDepositFloor(BRIDGE).setMinFundsInAmount(DEPOSIT_FLOOR * 2);
 
-        (uint256 tok,, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10);
+        (uint256 tok,, uint256 net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), DEPOSIT_FLOOR);
         assertEq(tok, 0);
-        assertEq(net, 10);
+        assertEq(tok, beforeFee, "zero fee is unchanged by the higher floor");
+        assertEq(net, beforeNet, "net quote is unchanged by the higher floor");
+        assertEq(net, DEPOSIT_FLOOR, "zero-fee amount bridges in full");
     }
 
     /// @dev The Bridge read is scoped to routes that actually charge a flat fee.
     ///      A percentage-only route keeps quoting even with the floor
-    ///      unreadable, so the new coupling cannot brick today's routes.
+    ///      unreadable.
     function test_calculateFundsInCommission_percentageOnlyQuoteDoesNotReadFloor() public {
         vm.prank(owner);
         cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
@@ -297,5 +302,14 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
 
         vm.expectRevert(ICommissionManager.AmountFloorUnavailable.selector);
         cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+    }
+
+    function test_amountFloors_revertWhenBridgeGettersFail() public {
+        vm.mockCallRevert(BRIDGE, abi.encodeWithSignature("minFundsInAmount()"), bytes("inbound floor unavailable"));
+        vm.mockCallRevert(BRIDGE, abi.encodeWithSignature("minFundsOutAmount()"), bytes("outbound floor unavailable"));
+        vm.expectRevert(ICommissionManager.AmountFloorUnavailable.selector);
+        cm.depositFloor();
+        vm.expectRevert(ICommissionManager.AmountFloorUnavailable.selector);
+        cm.releaseFloor();
     }
 }

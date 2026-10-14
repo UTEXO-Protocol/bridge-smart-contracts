@@ -132,4 +132,21 @@ contract CommissionManagerRouteRulesTest is CommissionManagerTestBase {
         assertEq(logged.stablePercent, 1000);
         assertTrue(cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token)).isSet);
     }
+
+    function test_commissionRules_revertOnZeroTokenForSetAndClear() public {
+        CommissionConfig memory config = CommissionConfig({
+            stablePercent: 0,
+            baseFee: 0,
+            multiplier: 100,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+        vm.expectRevert(ICommissionManager.InvalidToken.selector);
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(0), config);
+        vm.expectRevert(ICommissionManager.InvalidToken.selector);
+        vm.prank(owner);
+        cm.clearCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(0));
+    }
 }

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
+import {CommissionManager} from "../../src/CommissionManager.sol";
+
 import {ICommissionManager} from "../../src/interfaces/ICommissionManager.sol";
 import {CommissionManagerTestBase} from "./CommissionManagerTestBase.sol";
 
@@ -102,6 +104,11 @@ contract CommissionManagerPoolsTest is CommissionManagerTestBase {
         vm.prank(BRIDGE);
         cm.receiveTokenCommission(address(token), amount);
 
+        vm.deal(BRIDGE, amount);
+        vm.prank(BRIDGE);
+        (bool funded,) = address(cm).call{value: amount}("");
+        assertTrue(funded, "native pool funded before legacy withdrawals");
+
         bytes[] memory legacyCalls = new bytes[](4);
         legacyCalls[0] =
             abi.encodeWithSignature("withdrawTokenCommission(address,address,uint256)", address(token), user, amount);
@@ -111,11 +118,14 @@ contract CommissionManagerPoolsTest is CommissionManagerTestBase {
 
         for (uint256 i = 0; i < legacyCalls.length; i++) {
             vm.prank(owner);
-            (bool ok,) = address(cm).call(legacyCalls[i]);
+            (bool ok, bytes memory result) = address(cm).call(legacyCalls[i]);
             assertFalse(ok, "legacy free-recipient selector must not exist");
+            assertEq(result.length, 0, "unknown selector returns empty revert data");
         }
 
         assertEq(cm.tokenCommissionPool(address(token)), amount, "failed legacy calls preserve pool");
+        assertEq(cm.nativeCommissionPool(), amount, "legacy calls preserve native pool");
+        assertEq(address(cm).balance, amount, "legacy calls preserve native custody");
         assertEq(token.balanceOf(user), 0, "arbitrary recipient receives nothing");
         assertEq(token.balanceOf(recipient), 0, "no valid withdrawal executed");
     }
@@ -177,5 +187,47 @@ contract CommissionManagerPoolsTest is CommissionManagerTestBase {
         vm.prank(owner);
         vm.expectRevert(ICommissionManager.InsufficientBalance.selector);
         cm.withdrawNativeCommission(1 wei);
+    }
+
+    function test_tokenCommissionEntryPoints_revertOnZeroToken() public {
+        vm.expectRevert(ICommissionManager.InvalidToken.selector);
+        vm.prank(BRIDGE);
+        cm.receiveTokenCommission(address(0), 1);
+        vm.expectRevert(ICommissionManager.InvalidToken.selector);
+        vm.prank(owner);
+        cm.withdrawTokenCommission(address(0), 1);
+        vm.expectRevert(ICommissionManager.InvalidToken.selector);
+        vm.prank(owner);
+        cm.withdrawAllTokenCommission(address(0));
+    }
+
+    function test_withdrawAllCommission_revertsOnEmptyTokenAndNativePools() public {
+        vm.expectRevert(ICommissionManager.NoBalance.selector);
+        vm.prank(owner);
+        cm.withdrawAllTokenCommission(address(token));
+        vm.expectRevert(ICommissionManager.NoBalance.selector);
+        vm.prank(owner);
+        cm.withdrawAllNativeCommission();
+    }
+
+    function test_withdrawNativeCommission_failedRecipientRestoresPoolForBothForms() public {
+        vm.prank(owner);
+        CommissionManager rejecting = new CommissionManager(BRIDGE, address(token));
+        uint256 amount = 1 ether;
+        vm.deal(BRIDGE, amount);
+        vm.prank(BRIDGE);
+        (bool funded,) = address(rejecting).call{value: amount}("");
+        assertTrue(funded, "native pool funded");
+        vm.expectRevert(ICommissionManager.NativeTransferFailed.selector);
+        vm.prank(owner);
+        rejecting.withdrawNativeCommission(amount);
+        assertEq(rejecting.nativeCommissionPool(), amount, "partial withdrawal failure restores pool");
+        assertEq(address(rejecting).balance, amount, "partial withdrawal failure restores custody");
+        vm.expectRevert(ICommissionManager.NativeTransferFailed.selector);
+        vm.prank(owner);
+        rejecting.withdrawAllNativeCommission();
+        assertEq(rejecting.nativeCommissionPool(), amount, "full withdrawal failure restores pool");
+        assertEq(address(rejecting).balance, amount, "full withdrawal failure restores custody");
+        assertEq(address(token).balance, 0, "rejecting recipient receives nothing");
     }
 }

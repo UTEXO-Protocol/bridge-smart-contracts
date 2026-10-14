@@ -126,7 +126,7 @@ contract MultisigRoutesTest is MultisigProxyTestBase {
 
     function test_proposeUpdateRouteRegistry_revertsOnZero() public {
         // Bridge.setRouteRegistry rejects zero; the error propagates through
-        // the proposal’s bound target.
+        // the proposal's bound target.
         bytes32 id = _proposeUpdateRouteRegistry(address(0));
 
         vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);

@@ -56,8 +56,7 @@ contract BridgeRollingOutflowTest is BridgeTestBase {
         assertEq(bridge.totalLockedLiquidity(), 729e6);
     }
 
-    /// @dev Once
-    ///      an earlier release has reduced actual liquidity, the bucket prices
+    /// @dev After an earlier release has reduced actual liquidity, the bucket prices
     ///      every later request against that lower liquidity immediately. The
     ///      rolling slot can expire and change the safety allowance, but cannot
     ///      make the bucket's reference or full allowance step down again.

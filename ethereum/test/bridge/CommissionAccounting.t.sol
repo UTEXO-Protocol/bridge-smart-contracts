@@ -2,34 +2,12 @@
 pragma solidity 0.8.35;
 
 import {IBridge} from "../../src/interfaces/IBridge.sol";
-import {
-    CommissionConfig,
-    CommissionCurrency,
-    CommissionSide,
-    ICommissionManager
-} from "../../src/interfaces/ICommissionManager.sol";
+import {CommissionConfig, CommissionCurrency, CommissionSide} from "../../src/interfaces/ICommissionManager.sol";
 import {MockSettlementModule} from "../mocks/MockSettlementModule.sol";
 import {BridgeTestBase} from "./BridgeTestBase.sol";
 
 /// @notice Commission forwarding, pool credits and settled custody.
 contract BridgeCommissionAccountingTest is BridgeTestBase {
-    function _setFundsOutNativeRule(uint256 percent) private {
-        vm.prank(deployer);
-        cm.setCommissionRule(
-            RGB_CHAIN_ID,
-            SOURCE_CHAIN_ID,
-            address(usdt0),
-            CommissionConfig({
-                stablePercent: percent,
-                baseFee: 0,
-                multiplier: 100,
-                side: CommissionSide.FUNDS_OUT,
-                currency: CommissionCurrency.NATIVE,
-                isSet: true
-            })
-        );
-    }
-
     function test_fundsIn_tokenCommissionRoutesToCM() public {
         uint256 percent = 400; // 4%
         _setFundsInTokenRule(percent);
@@ -140,13 +118,6 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         assertEq(cm.tokenCommissionPool(address(usdt0)), expectedCommission, "cm recorded");
     }
 
-    /// @dev The invalid (NATIVE, FUNDS_OUT) shape is rejected by the
-    ///      CommissionManager setter, so it can never reach and brick fundsOut.
-    function test_setCommissionRule_nativeFundsOutReverts() public {
-        vm.expectRevert(ICommissionManager.NativeCommissionNotAllowedOnFundsOut.selector);
-        _setFundsOutNativeRule(100); // setCommissionRule(... NATIVE, FUNDS_OUT ...)
-    }
-
     function test_fundsIn_revertsOnNativeValueMismatchZeroRuleButValueSent() public {
         vm.deal(user, 1 ether);
         vm.expectRevert(IBridge.NativeValueMismatch.selector);
@@ -162,22 +133,14 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
             cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
 
         // Snapshot every balance/pool/record this TOKEN-commission flow should touch.
-        uint256 userBefore = usdt0.balanceOf(user);
-        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
-        uint256 cmBefore = usdt0.balanceOf(address(cm));
-        uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
-        uint256 nativePoolBefore = cm.nativeCommissionPool();
-        uint256 userEthBefore = user.balance;
-        uint256 bridgeEthBefore = address(bridge).balance;
-        uint256 cmEthBefore = address(cm).balance;
         bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, netAmount);
-        uint256 recordBefore = rgbModule.fundsInRecords(expectedOpId);
+        LedgerSnapshot memory beforeState = _snapshotLedger(expectedOpId);
 
-        assertEq(bridgeBefore, 0, "pre bridge token");
-        assertEq(cmBefore, 0, "pre cm token");
-        assertEq(cmPoolBefore, 0, "pre cm pool");
-        assertEq(nativePoolBefore, 0, "pre native pool");
-        assertEq(recordBefore, 0, "pre record");
+        assertEq(beforeState.bridgeToken, 0, "pre bridge token");
+        assertEq(beforeState.cmToken, 0, "pre cm token");
+        assertEq(beforeState.cmPool, 0, "pre cm pool");
+        assertEq(beforeState.nativePool, 0, "pre native pool");
+        assertEq(beforeState.record, 0, "pre record");
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit IBridge.FundsIn(user, RGB_OP_ID, uint64(netAmount));
@@ -203,19 +166,22 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(opId, expectedOpId, "returned id matches derivation");
 
-        assertEq(usdt0.balanceOf(user), userBefore - AMOUNT, "user gross spent");
-        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + netAmount, "bridge net delta");
-        assertEq(usdt0.balanceOf(address(cm)), cmBefore + tokenCommission, "cm fee delta");
-        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore + tokenCommission, "cm pool delta");
-        assertEq(cm.nativeCommissionPool(), nativePoolBefore, "native pool unchanged");
-        assertEq(user.balance, userEthBefore, "user native unchanged");
-        assertEq(address(bridge).balance, bridgeEthBefore, "bridge native unchanged");
-        assertEq(address(cm).balance, cmEthBefore, "cm native unchanged");
-        assertEq(rgbModule.fundsInRecords(opId), recordBefore + netAmount, "record delta = net");
+        assertEq(usdt0.balanceOf(user), beforeState.userToken - AMOUNT, "user gross spent");
+        assertEq(usdt0.balanceOf(address(bridge)), beforeState.bridgeToken + netAmount, "bridge net delta");
+        assertEq(usdt0.balanceOf(address(cm)), beforeState.cmToken + tokenCommission, "cm fee delta");
+        assertEq(cm.tokenCommissionPool(address(usdt0)), beforeState.cmPool + tokenCommission, "cm pool delta");
+        assertEq(cm.nativeCommissionPool(), beforeState.nativePool, "native pool unchanged");
+        assertEq(user.balance, beforeState.userNative, "user native unchanged");
+        assertEq(address(bridge).balance, beforeState.bridgeNative, "bridge native unchanged");
+        assertEq(address(cm).balance, beforeState.cmNative, "cm native unchanged");
+        assertEq(rgbModule.fundsInRecords(opId), beforeState.record + netAmount, "record delta = net");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), netAmount, "chain liquidity credits net receipt");
+        assertEq(bridge.totalLockedLiquidity(), netAmount, "total liquidity credits net receipt");
 
         // Gross USDT0 is conserved between Bridge liquidity and CM commission custody.
         assertEq(
-            (usdt0.balanceOf(address(bridge)) - bridgeBefore) + (usdt0.balanceOf(address(cm)) - cmBefore),
+            (usdt0.balanceOf(address(bridge)) - beforeState.bridgeToken)
+                + (usdt0.balanceOf(address(cm)) - beforeState.cmToken),
             AMOUNT,
             "gross token conserved"
         );
@@ -234,22 +200,14 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         vm.deal(user, nativeCommission);
 
         // Snapshot token/native balances, pools, and RGB record touched by native-fee fundsIn.
-        uint256 userTokenBefore = usdt0.balanceOf(user);
-        uint256 bridgeTokenBefore = usdt0.balanceOf(address(bridge));
-        uint256 cmTokenBefore = usdt0.balanceOf(address(cm));
-        uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
-        uint256 nativePoolBefore = cm.nativeCommissionPool();
-        uint256 userEthBefore = user.balance;
-        uint256 bridgeEthBefore = address(bridge).balance;
-        uint256 cmEthBefore = address(cm).balance;
         bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, netAmount);
-        uint256 recordBefore = rgbModule.fundsInRecords(expectedOpId);
+        LedgerSnapshot memory beforeState = _snapshotLedger(expectedOpId);
 
-        assertEq(bridgeTokenBefore, 0, "pre bridge token");
-        assertEq(cmTokenBefore, 0, "pre cm token");
-        assertEq(cmPoolBefore, 0, "pre token pool");
-        assertEq(nativePoolBefore, 0, "pre native pool");
-        assertEq(recordBefore, 0, "pre record");
+        assertEq(beforeState.bridgeToken, 0, "pre bridge token");
+        assertEq(beforeState.cmToken, 0, "pre cm token");
+        assertEq(beforeState.cmPool, 0, "pre token pool");
+        assertEq(beforeState.nativePool, 0, "pre native pool");
+        assertEq(beforeState.record, 0, "pre record");
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit IBridge.FundsIn(user, RGB_OP_ID, uint64(netAmount));
@@ -274,19 +232,21 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         bytes32 opId = bridge.fundsIn{value: nativeCommission}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(opId, expectedOpId, "returned id matches derivation");
 
-        assertEq(usdt0.balanceOf(user), userTokenBefore - AMOUNT, "user token gross spent");
-        assertEq(usdt0.balanceOf(address(bridge)), bridgeTokenBefore + netAmount, "bridge token delta");
-        assertEq(usdt0.balanceOf(address(cm)), cmTokenBefore, "cm token unchanged");
-        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, "token pool unchanged");
-        assertEq(cm.nativeCommissionPool(), nativePoolBefore + nativeCommission, "native pool delta");
-        assertEq(user.balance, userEthBefore - nativeCommission, "user native paid");
-        assertEq(address(bridge).balance, bridgeEthBefore, "bridge native unchanged");
-        assertEq(address(cm).balance, cmEthBefore + nativeCommission, "cm native delta");
-        assertEq(rgbModule.fundsInRecords(opId), recordBefore + netAmount, "record delta = net");
+        assertEq(usdt0.balanceOf(user), beforeState.userToken - AMOUNT, "user token gross spent");
+        assertEq(usdt0.balanceOf(address(bridge)), beforeState.bridgeToken + netAmount, "bridge token delta");
+        assertEq(usdt0.balanceOf(address(cm)), beforeState.cmToken, "cm token unchanged");
+        assertEq(cm.tokenCommissionPool(address(usdt0)), beforeState.cmPool, "token pool unchanged");
+        assertEq(cm.nativeCommissionPool(), beforeState.nativePool + nativeCommission, "native pool delta");
+        assertEq(user.balance, beforeState.userNative - nativeCommission, "user native paid");
+        assertEq(address(bridge).balance, beforeState.bridgeNative, "bridge native unchanged");
+        assertEq(address(cm).balance, beforeState.cmNative + nativeCommission, "cm native delta");
+        assertEq(rgbModule.fundsInRecords(opId), beforeState.record + netAmount, "record delta = net");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), netAmount, "chain liquidity credits full native-fee principal");
+        assertEq(bridge.totalLockedLiquidity(), netAmount, "total liquidity credits full native-fee principal");
 
         // Native fee is conserved in CM custody while the full USDT0 principal stays in Bridge.
-        assertEq(usdt0.balanceOf(address(bridge)) - bridgeTokenBefore, AMOUNT, "gross token in bridge");
-        assertEq(address(cm).balance - cmEthBefore, nativeCommission, "native fee conserved");
+        assertEq(usdt0.balanceOf(address(bridge)) - beforeState.bridgeToken, AMOUNT, "gross token in bridge");
+        assertEq(address(cm).balance - beforeState.cmNative, nativeCommission, "native fee conserved");
     }
 
     function test_fundsOut_partialReleasePaysNetAndCollectsCommission() public {
@@ -463,33 +423,11 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         uint256 recipientBefore = usdt0.balanceOf(recipient);
         uint256 poolBefore = cm.tokenCommissionPool(address(usdt0));
 
-        _releaseRGB(release, keccak256("AmountFloors.t-burn-0"));
+        _releaseRGB(release, keccak256("outbound-percentage-and-flat-fee"));
 
         assertEq(usdt0.balanceOf(recipient) - recipientBefore, release - expectedCommission, "recipient gets net");
         assertEq(
             cm.tokenCommissionPool(address(usdt0)) - poolBefore, expectedCommission, "pool holds percentage + flat"
         );
-    }
-
-    /// @dev A 100% fee shape is rejected before it can become an active route
-    ///      rule and create zero-net records.
-    function test_setCommissionRule_revertsOnHundredPercentFeeShape() public {
-        CommissionConfig memory cfg = CommissionConfig({
-            stablePercent: 8_100,
-            baseFee: 0,
-            multiplier: 90,
-            side: CommissionSide.FUNDS_IN,
-            currency: CommissionCurrency.TOKEN,
-            isSet: true
-        });
-
-        vm.expectRevert(
-            abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, cfg.stablePercent, cfg.multiplier)
-        );
-        vm.prank(deployer);
-        cm.setCommissionRule(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), cfg);
-
-        CommissionConfig memory stored = cm.getCommissionRule(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0));
-        assertFalse(stored.isSet, "invalid rule was not stored");
     }
 }

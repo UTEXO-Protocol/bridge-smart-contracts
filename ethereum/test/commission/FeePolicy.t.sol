@@ -227,10 +227,16 @@ contract CommissionManagerFeePolicyTest is CommissionManagerTestBase {
         uint256 maximumPercent = denominator * 9_000 / 10_000;
         maximumPercent = maximumPercent < 9_000 ? maximumPercent : 9_000;
         stablePercent = bound(stablePercent, 0, maximumPercent);
-        amount = bound(amount, 1, 1e30);
+        amount = bound(amount, denominator, 1e30);
         vm.prank(owner);
         cm.setGlobalDefaults(stablePercent, 0, multiplier, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
-        uint256 fee = cm.calculateStableFee(amount, stablePercent, multiplier);
+        (uint256 fee, uint256 nativeFee, uint256 net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), amount);
+        assertEq(cm.globalStablePercent(), stablePercent, "accepted numerator is stored");
+        assertEq(cm.globalMultiplier(), multiplier, "accepted denominator is stored");
+        assertEq(fee, amount * stablePercent / denominator, "quote uses the stored rate exactly");
+        assertEq(nativeFee, 0, "token policy has no native fee");
+        assertEq(net, amount - fee, "net matches the actual quote");
         assertLe(fee * 10_000, amount * 9_000, "accepted config charges at most 90%");
         assertLt(fee, amount, "accepted config leaves a positive net amount");
     }
@@ -268,5 +274,27 @@ contract CommissionManagerFeePolicyTest is CommissionManagerTestBase {
         vm.expectRevert(ICommissionManager.StablePercentTooHigh.selector);
         vm.prank(owner);
         cm.setGlobalDefaults(stablePercent, 0, multiplier, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+    }
+
+    /// @dev A 100% fee shape is rejected before it can become an active route
+    ///      rule and create zero-net records.
+    function test_setCommissionRule_revertsOnHundredPercentFeeShape() public {
+        CommissionConfig memory cfg = CommissionConfig({
+            stablePercent: 8_100,
+            baseFee: 0,
+            multiplier: 90,
+            side: CommissionSide.FUNDS_IN,
+            currency: CommissionCurrency.TOKEN,
+            isSet: true
+        });
+
+        vm.expectRevert(
+            abi.encodeWithSelector(ICommissionManager.InvalidFeeShape.selector, cfg.stablePercent, cfg.multiplier)
+        );
+        vm.prank(owner);
+        cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), cfg);
+
+        CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token));
+        assertFalse(stored.isSet, "invalid rule was not stored");
     }
 }

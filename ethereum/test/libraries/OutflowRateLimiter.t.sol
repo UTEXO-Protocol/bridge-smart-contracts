@@ -13,9 +13,7 @@ contract OutflowRateLimiterTest is Test {
 
     address internal constant TOKEN = address(0xBEEF);
 
-    address internal constant AGGREGATE = address(0);
-
-    // sentinel selecting aggregate-scope errors
+    address internal constant AGGREGATE = address(0); // sentinel selecting aggregate-scope errors
 
     uint128 internal constant CAP = 1_000;
 
@@ -269,17 +267,26 @@ contract OutflowRateLimiterTest is Test {
         assertEq(b.tokens, capacity - uint128(amount), "debit is exact");
     }
 
-    /// @dev Refill never decreases over time, grows before saturation and stays capped.
+    /// @dev Both previews equal min(elapsed * RATE, CAP), remain monotonic and
+    ///      grow while unsaturated. Sampling mixes short and full uint32 spans.
     function testFuzz_refill_isMonotonicAndCapped(uint32 earlySeed, uint32 laterSeed) public {
         _prime(CAP, RATE);
         harness.spend(CAP, TOKEN);
         uint256 start = vm.getBlockTimestamp();
-        uint256 earlyElapsed = bound(uint256(earlySeed), 0, CAP / RATE + 1);
-        uint256 laterElapsed = bound(uint256(laterSeed), earlyElapsed, CAP / RATE + 60);
+        uint256 earlyElapsed = earlySeed % 2 == 0 ? bound(uint256(earlySeed), 0, CAP / RATE) : uint256(earlySeed);
+        uint256 shortHorizon = earlyElapsed + CAP / RATE;
+        if (shortHorizon > type(uint32).max) shortHorizon = type(uint32).max;
+        uint256 laterElapsed = laterSeed % 2 == 0
+            ? bound(uint256(laterSeed), earlyElapsed, shortHorizon)
+            : bound(uint256(laterSeed), earlyElapsed, type(uint32).max);
         vm.warp(start + earlyElapsed);
         uint256 earlyAvailable = harness.currentState().tokens;
         vm.warp(start + laterElapsed);
         uint256 laterAvailable = harness.currentState().tokens;
+        uint256 earlyExpected = earlyElapsed * RATE;
+        uint256 laterExpected = laterElapsed * RATE;
+        assertEq(earlyAvailable, earlyExpected < CAP ? earlyExpected : CAP, "early refill has the configured rate");
+        assertEq(laterAvailable, laterExpected < CAP ? laterExpected : CAP, "later refill has the configured rate");
         assertLe(earlyAvailable, CAP, "early refill remains capped");
         assertLe(laterAvailable, CAP, "later refill remains capped");
         assertGe(laterAvailable, earlyAvailable, "time cannot reduce allowance");

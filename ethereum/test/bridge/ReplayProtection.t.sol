@@ -176,11 +176,6 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
         bytes memory originalData = _settlement(_ids(opId1));
         bytes memory changedData = _settlement(_ids(opId2));
         uint256 burnId = _deriveBurnId(AMOUNT, RGB_CHAIN_ID, SRC_ADDR, SRC_BURN_TX_ID);
-        assertEq(
-            _deriveBurnId(AMOUNT, RGB_CHAIN_ID, SRC_ADDR, SRC_BURN_TX_ID),
-            burnId,
-            "backing records do not change burn identity"
-        );
 
         vm.prank(multisig);
         _fundsOutWithBurnId(recipient, AMOUNT, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, originalData);
@@ -264,5 +259,17 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
         assertEq(bridge.totalLockedLiquidity(), totalLiquidity, "rejected release preserves total liquidity");
         assertEq(usdt0.balanceOf(recipient), recipientBalance, "rejected release pays no tokens");
         assertEq(rgbModule.fundsInRecords(opId), AMOUNT * 10, "reused backing record remains permanent");
+
+        bytes32 exactCapBurn = keccak256("rolling-exact-cap-burn");
+        vm.prank(multisig);
+        uint256 acceptedBurnId = _fundsOut(
+            recipient, remaining, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), settlementData, exactCapBurn
+        );
+        assertTrue(bridge.consumedBurnIds(acceptedBurnId), "burn at the exact cap is consumed");
+        assertEq(bridge.availableChainSafetyOutflow(RGB_CHAIN_ID), 0, "chain rolling cap is exactly consumed");
+        assertEq(bridge.availableGlobalSafetyOutflow(), 0, "global rolling cap is exactly consumed");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT * 8, "exactly 20% left the chain");
+        assertEq(bridge.totalLockedLiquidity(), AMOUNT * 8, "exactly 20% left globally");
+        assertEq(usdt0.balanceOf(recipient), AMOUNT * 2, "recipient receives exactly the rolling cap");
     }
 }

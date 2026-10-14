@@ -115,11 +115,8 @@ contract MultisigAdapterGovernanceTest is MultisigProxyTestBase {
 
     function test_proposeAdminExecuteAdapter_executesCallOnAdapter() public {
         MockERC20 adapter = new MockERC20("LZ Stub", "LZS");
-        bytes32 idSet = _proposeUpdateLZAdapter(address(adapter));
-        // Each proposal must complete its own timelock before adapter dispatch.
-        uint256 firstExec = vm.getBlockTimestamp() + TIMELOCK + 1;
-        vm.warp(firstExec);
-        proxy.executeProposal(idSet, abi.encode(address(adapter)));
+        _setLzAdapter(address(adapter));
+        uint256 firstExec = vm.getBlockTimestamp();
         assertEq(proxy.lzAdapter(), address(adapter));
 
         bytes memory callData = abi.encodeWithSignature("mint(address,uint256)", recipient, 1e18);
@@ -156,9 +153,7 @@ contract MultisigAdapterGovernanceTest is MultisigProxyTestBase {
 
     function test_executeProposal_wrapsEmptyAdapterRevertAsCallFailed() public {
         MockERC20 adapter = new MockERC20("LZ Stub", "LZS");
-        bytes32 idSet = _proposeUpdateLZAdapter(address(adapter));
-        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
-        proxy.executeProposal(idSet, abi.encode(address(adapter)));
+        _setLzAdapter(address(adapter));
 
         bytes memory callData = abi.encodeWithSignature("nonExistent()");
         uint256 nonce = proxy.proposalNonce();

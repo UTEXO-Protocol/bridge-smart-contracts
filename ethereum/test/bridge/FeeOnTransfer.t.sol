@@ -132,14 +132,27 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
         uint256 received = AMOUNT - s.token.feeOn(AMOUNT);
         assertLt(received, AMOUNT, "sanity: fee token delivers less than nominal");
 
+        bytes32 expectedOperationId = keccak256(
+            abi.encode(
+                keccak256(
+                    "UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)"
+                ),
+                address(s.bridge),
+                block.chainid,
+                address(s.token),
+                RGB_CHAIN_ID,
+                RGB_OP_ID,
+                received
+            )
+        );
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
 
         // BridgeFundsIn must carry gross `amount == AMOUNT` and `netAmount == received`.
         vm.expectEmit(true, true, false, true, address(s.bridge));
         emit IBridge.FundsIn(user, RGB_OP_ID, uint64(received));
-        vm.expectEmit(false, true, true, true, address(s.bridge));
+        vm.expectEmit(true, true, true, true, address(s.bridge));
         emit IBridge.BridgeFundsIn(
-            bytes32(0),
+            expectedOperationId,
             sourceSender,
             user,
             0,
@@ -156,7 +169,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
         vm.prank(user);
         bytes32 opId = s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        assertEq(opId, s.bridge.rgbMintDepositId(RGB_CHAIN_ID, RGB_OP_ID, received), "id uses actual received");
+        assertEq(opId, expectedOperationId, "id uses actual received");
         assertEq(s.module.fundsInRecords(opId), received, "record credits actual received");
         assertEq(s.bridge.lockedLiquidity(RGB_CHAIN_ID), received, "lockedLiquidity credits actual received");
         assertEq(s.token.balanceOf(address(s.bridge)), received, "bridge token balance == received");

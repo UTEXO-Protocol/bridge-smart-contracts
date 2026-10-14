@@ -25,7 +25,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         assertEq(tInQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, "quote in");
         assertEq(netIn, USER_DEPOSIT - tInQuote, "net in");
 
-        // 2. User fundsIn — TOKEN commission routed to CM; the RGB settlement
+        // User fundsIn — TOKEN commission routed to CM; the RGB settlement
         //    module records the inbound deposit.
 
         uint256 userBefore = token.balanceOf(user);
@@ -47,7 +47,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         assertEq(cm.tokenCommissionPool(address(token)), tokenCommissionIn, "cm pool mirrors balance");
         assertEq(rgbModule.fundsInRecords(opId), netBridgedIn, "record stores net");
 
-        // 3. TEE-signed fundsOut — RGBVerifier checks the BtcRelay header, the
+        // TEE-signed fundsOut — RGBVerifier checks the BtcRelay header, the
         //    settlement module verifies the referenced mint exists for the exact
         //    amount (no consumption), Bridge releases `netBridgedIn` from the
         //    pool. 1% outbound commission to CM, the rest to recipient.
@@ -104,7 +104,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
 
         proxy.executeProposal(proposalId, opData);
 
-        // 5. Final invariants: the nine-deposit safety reserve remains in the
+        // Final invariants: the nine-deposit safety reserve remains in the
         //    bridge, CM is empty, and all commissions reached their receiver.
 
         assertEq(token.balanceOf(address(bridge)), netBridgedIn * 9, "nine-deposit safety reserve remains");
@@ -124,7 +124,10 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         // Configure a NATIVE FUNDS_IN route (2% on token amount, paid in wei).
         // Wire the complete mandatory oracle config through federation
         // governance — dependencies first, ETH/USD feed last.
-        MockAggregatorV3 sequencerFeed = new MockAggregatorV3(0, 0, vm.getBlockTimestamp());
+        // Establish a healthy round independently of the governance timelocks.
+        vm.warp(vm.getBlockTimestamp() + cm.SEQUENCER_GRACE_PERIOD() + 1);
+        MockAggregatorV3 sequencerFeed =
+            new MockAggregatorV3(0, 0, vm.getBlockTimestamp() - cm.SEQUENCER_GRACE_PERIOD() - 1);
         ethUsdFeed = new MockAggregatorV3(8, 2_000e8, vm.getBlockTimestamp());
         _proposeAndExecuteCmAdminCall(
             abi.encodeWithSelector(ICommissionManager.setSequencerUptimeFeed.selector, address(sequencerFeed))
@@ -217,11 +220,12 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT + outBaseFee;
         (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
         ReleaseState memory beforeState = _releaseState(burnId);
+        FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         vm.expectEmit(true, true, false, true, address(bridge));
         emit IBridge.BridgeFundsOut(
             recipient, netIn, netIn - outFee, outFee, burnId, RGB_CHAIN_ID, SOURCE_CHAIN_ID, "", params.settlementData
         );
-        _submitFundsOut(params);
+        proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
         _assertSuccessfulRelease(params, beforeState, outFee);
         assertEq(rgbModule.fundsInRecords(opId), netIn, "release preserves mint record");
 

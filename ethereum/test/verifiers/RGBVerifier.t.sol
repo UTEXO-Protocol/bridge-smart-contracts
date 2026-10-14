@@ -6,7 +6,7 @@ import {FundsOutContext} from "../../src/interfaces/RouteTypes.sol";
 import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
 import {MockBtcRelay} from "../mocks/MockBtcRelay.sol";
 
-/// @notice RGB proof shape, checkpoint, commitment and confirmation validation.
+/// @notice RGB source-address, commitment and confirmation validation.
 contract RGBVerifierTest is Test {
     bytes32 internal constant SRC_BURN_TX_ID = keccak256("unit-burn-tx");
 
@@ -153,5 +153,15 @@ contract RGBVerifierTest is Test {
     function test_verify_revertsOnUnknownLatestBlock() public {
         vm.expectRevert(bytes("verify: block commitment"));
         verifier.verify(_ctx(), _proof(SOURCE_HEIGHT, SOURCE_COMMIT, 999_999, keccak256("unknown-latest")));
+    }
+
+    function test_verify_revertsOnIncompleteProofEncoding() public view {
+        for (uint256 length; length < 128; length += 127) {
+            bytes memory incomplete = new bytes(length);
+            (bool success, bytes memory result) =
+                address(verifier).staticcall(abi.encodeCall(RGBVerifier.verify, (_ctx(), incomplete)));
+            assertFalse(success, "incomplete four-word proof must fail decoding");
+            assertEq(result.length, 0, "ABI decoding failure has empty revert data");
+        }
     }
 }

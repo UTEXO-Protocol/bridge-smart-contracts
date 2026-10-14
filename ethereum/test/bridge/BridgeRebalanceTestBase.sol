@@ -52,21 +52,13 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
 
     address internal multisig = makeAddr("multisig");
 
-    uint256 internal constant SOURCE_CHAIN_ID = 31337;
+    uint256 internal constant SOURCE_CHAIN_ID = 31337; // foundry block.chainid
 
-    // foundry block.chainid
+    uint256 internal constant RGB_CHAIN_ID = 1_000_001; // primary RGB mint/burn network
 
-    uint256 internal constant RGB_CHAIN_ID = 1_000_001;
+    uint256 internal constant ARCH_CHAIN_ID = 1_000_002; // backend-assigned for Arch
 
-    // primary RGB mint/burn network
-
-    uint256 internal constant ARCH_CHAIN_ID = 1_000_002;
-
-    // backend-assigned for Arch
-
-    uint256 internal constant SECONDARY_RGB_CHAIN_ID = 1_000_003;
-
-    // second RGB mint/burn network (shared canonical ledger)
+    uint256 internal constant SECONDARY_RGB_CHAIN_ID = 1_000_003; // second RGB mint/burn network (shared canonical ledger)
 
     uint256 internal constant PRODUCTION_RGB_MINT_BURN_CHAIN_ID = 96;
 
@@ -74,9 +66,7 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
 
     string internal constant ARCH_DST_ADDR = "arch:bridge-wallet";
 
-    string internal constant RGB_SRC_ADDR = "";
-
-    // RGB has no source-address concept
+    string internal constant RGB_SRC_ADDR = ""; // RGB has no source-address concept
 
     string internal constant ARCH_SRC_ADDR = "arch:burner";
 

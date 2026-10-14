@@ -18,13 +18,6 @@ contract BridgeDepositsTest is BridgeTestBase {
         assertEq(usdt0.balanceOf(user), userBefore - AMOUNT);
     }
 
-    function test_fundsIn_storesRecordOnModule() public {
-        vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-
-        assertEq(rgbModule.fundsInRecords(opId), AMOUNT);
-    }
-
     function test_fundsIn_anyUserCanCall() public {
         address stranger = makeAddr("stranger");
         usdt0.mint(stranger, AMOUNT);

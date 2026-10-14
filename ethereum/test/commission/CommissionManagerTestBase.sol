@@ -26,22 +26,16 @@ abstract contract CommissionManagerTestBase is Test {
 
     /// @dev Chain identifiers are uint256: EVM uses native block.chainid;
     ///      non-EVM endpoints use backend-assigned identifiers.
-    uint256 internal constant SRC_CHAIN_ID = 1;
+    uint256 internal constant SRC_CHAIN_ID = 1; // Ethereum mainnet
 
-    // Ethereum mainnet
-
-    uint256 internal constant DST_CHAIN_ID = 1_000_001;
-
-    // RGB (backend-assigned)
+    uint256 internal constant DST_CHAIN_ID = 1_000_001; // RGB (backend-assigned)
 
     // Chainlink feed defaults. ETH/USD on Arbitrum reports with 8 decimals;
     // heartbeat 86400 s in production — tests use 1 hour to keep stale-path
     // timestamps deterministic.
     uint8 internal constant FEED_DECIMALS = 8;
 
-    int256 internal constant DEFAULT_ETH_USD = 2_000e8;
-
-    // $2000 / ETH
+    int256 internal constant DEFAULT_ETH_USD = 2_000e8; // $2000 / ETH
 
     uint256 internal constant HEARTBEAT = 1 hours;
 
@@ -51,7 +45,9 @@ abstract contract CommissionManagerTestBase is Test {
 
     /// @dev Bridge dust floors the manager reads to bound a flat `baseFee` on
     ///      each side. 1 USDT0 / 2 USDT0 at 6 decimals — deliberately different
-    ///      so a test that reads the wrong one fails.
+    ///      so a test that reads the wrong one fails. This isolated getter fixture
+    ///      intentionally inverts the Bridge ordering (inbound >= outbound);
+    ///      real Bridge minimum-order validation is covered in bridge/AmountFloors.
     uint256 internal constant DEPOSIT_FLOOR = 1_000_000;
 
     uint256 internal constant RELEASE_FLOOR = 2_000_000;
@@ -60,7 +56,7 @@ abstract contract CommissionManagerTestBase is Test {
         // Start past the heartbeat so stale-time interval subtraction is safe.
         vm.warp(HEARTBEAT * 10);
 
-        // Install deterministic amount-floor getters at the manager’s
+        // Install deterministic amount-floor getters at the manager's
         // configured Bridge address for these isolated unit tests.
         _installFloors(BRIDGE, DEPOSIT_FLOOR, RELEASE_FLOOR);
 

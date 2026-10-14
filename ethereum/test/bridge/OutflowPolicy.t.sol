@@ -37,12 +37,16 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         uint256 cap = 100e6;
         _setRGBBucket(cap, cap); // reconfig down → available == cap
 
-        _releaseRGB(cap, keccak256("OutflowPolicy.t-burn-11"));
+        _releaseRGB(cap, keccak256("chain-capacity-first-burst"));
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 0, "capacity fully spent");
 
         // One unit over the (now empty) bucket but still within capacity → rate-limited.
-        vm.expectPartialRevert(OutflowRateLimiter.TokenOutflowThrottled.selector);
-        _releaseRGB(1, keccak256("OutflowPolicy.t-burn-10"));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OutflowRateLimiter.TokenOutflowThrottled.selector, uint256(1), uint256(0), address(usdt0)
+            )
+        );
+        _releaseRGB(1, keccak256("chain-capacity-next-unit"));
     }
 
     function test_outflow_releaseAboveCapacityReverts() public {
@@ -61,7 +65,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
                 address(usdt0)
             )
         );
-        _releaseRGB(cap + 1, keccak256("OutflowPolicy.t-burn-9"));
+        _releaseRGB(cap + 1, keccak256("chain-above-capacity-request"));
     }
 
     function test_outflow_refillAccruesOverTime() public {
@@ -69,7 +73,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         uint256 cap = 100e6;
         _setRGBBucket(cap, cap);
 
-        _releaseRGB(cap, keccak256("OutflowPolicy.t-burn-8"));
+        _releaseRGB(cap, keccak256("partial-refill-first-burst"));
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 0, "drained");
 
         // Half the share capacity is restored. Its token value is calculated
@@ -79,7 +83,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         uint256 expectedRefill = bridge.lockedLiquidity(RGB_CHAIN_ID) * 50 / bridge.BPS_DENOMINATOR();
         assertApproxEqRel(refilled, expectedRefill, 1e12, "partial linear refill"); // 1e-6 relative
 
-        _releaseRGB(refilled - 1, keccak256("OutflowPolicy.t-burn-7")); // the refilled allowance is spendable
+        _releaseRGB(refilled - 1, keccak256("partial-refill-second-burst")); // the refilled allowance is spendable
     }
 
     function test_outflow_noDoubleCapBurstOverShortGap() public {
@@ -87,11 +91,12 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         uint256 cap = 100e6;
         _setRGBBucket(cap, cap);
 
-        _releaseRGB(cap, keccak256("OutflowPolicy.t-burn-6"));
+        _releaseRGB(cap, keccak256("short-gap-first-burst"));
         vm.warp(vm.getBlockTimestamp() + 1); // one second later
 
         uint256 accrued = bridge.availableOutflow(RGB_CHAIN_ID);
-        uint256 expectedAccrued = bridge.lockedLiquidity(RGB_CHAIN_ID) * 100 / bridge.BPS_DENOMINATOR() / (24 hours);
+        uint256 expectedAccrued =
+            bridge.lockedLiquidity(RGB_CHAIN_ID) * 100 / bridge.BPS_DENOMINATOR() / bridge.BUCKET_REFILL_WINDOW();
         assertApproxEqRel(accrued, expectedAccrued, 1e12, "only one second of refill accrued");
         assertLt(accrued, cap, "not a fresh cap");
         bytes32 altLatestCommit = keccak256("test-btc-short-gap-latest-commitment");
@@ -101,7 +106,14 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         ids[0] = _seedOpId;
 
         uint256 currentCapacity = bridge.lockedLiquidity(RGB_CHAIN_ID) * 100 / bridge.BPS_DENOMINATOR();
-        vm.expectPartialRevert(OutflowRateLimiter.TokenOutflowThrottled.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OutflowRateLimiter.TokenOutflowThrottled.selector,
+                uint256(86_400),
+                uint256(115_740_740_740),
+                address(usdt0)
+            )
+        );
         vm.prank(multisig);
         _fundsOut(
             recipient,
@@ -132,7 +144,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
 
         _seedRGB(1000e6);
         _setRGBBucket(100e6, 100e6);
-        _releaseRGB(100e6, keccak256("OutflowPolicy.t-burn-5")); // drain RGB bucket to 0
+        _releaseRGB(100e6, keccak256("isolated-rgb-bucket-drain")); // drain RGB bucket to 0
 
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 0, "RGB drained");
         assertEq(bridge.availableOutflow(other), 50e6, "other chain bucket untouched");
@@ -145,18 +157,20 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         vm.prank(multisig);
         bridge.setGlobalOutflowLimit(globalBps, globalBps);
 
-        _releaseRGB(100e6, keccak256("OutflowPolicy.t-burn-4")); // consumes the whole global allowance
+        _releaseRGB(100e6, keccak256("global-bucket-first-burst")); // consumes the whole global allowance
         assertEq(bridge.availableGlobalOutflow(), 0, "global drained");
 
         // The per-chain bucket still has room, but the global aggregate trips.
-        vm.expectPartialRevert(OutflowRateLimiter.AggregateOutflowThrottled.selector);
-        _releaseRGB(1, keccak256("OutflowPolicy.t-burn-3"));
+        vm.expectRevert(
+            abi.encodeWithSelector(OutflowRateLimiter.AggregateOutflowThrottled.selector, uint256(1), uint256(0))
+        );
+        _releaseRGB(1, keccak256("global-bucket-next-unit"));
     }
 
     function test_outflow_reconfigPreservesAvailableNoGift() public {
         _seedRGB(1000e6);
         _setRGBBucket(100e6, 100e6);
-        _releaseRGB(60e6, keccak256("OutflowPolicy.t-burn-2")); // 4,000 bps of shares remain
+        _releaseRGB(60e6, keccak256("carry-over-bucket-debit")); // 4,000 bps of shares remain
         uint256 availableBefore = bridge.availableOutflow(RGB_CHAIN_ID);
         assertEq(availableBefore, 39.76e6, "pre");
 
@@ -184,6 +198,9 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(100e6, unconfigured, DST_ADDR, _rgbData());
 
+        vm.prank(multisig);
+        bridge.setGlobalOutflowLimit(MAX_BURST_BPS, MAX_REFILL_BPS);
+        assertGt(bridge.availableGlobalOutflow(), 0, "global bucket is configured independently");
         bytes32[] memory ids = _ids(opId);
         vm.expectRevert(OutflowRateLimiter.LimitNotConfigured.selector);
         vm.prank(multisig);
@@ -405,7 +422,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         bridge.setOutflowLimit(RGB_CHAIN_ID, burstBps, refillBps);
 
         uint256 drain = bridge.chainOutflowReference(RGB_CHAIN_ID) * drainBps / bridge.BPS_DENOMINATOR();
-        _releaseRGB(drain, keccak256("OutflowPolicy.t-burn-1"));
+        _releaseRGB(drain, keccak256("fuzz-share-space-debit"));
 
         vm.warp(vm.getBlockTimestamp() + elapsed);
 
@@ -447,7 +464,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         uint256 amount = refLiquidity * amountBps / bridge.BPS_DENOMINATOR();
 
         (uint128 sharesBefore,,,,) = bridge.chainBuckets(RGB_CHAIN_ID);
-        _releaseRGB(amount, keccak256("OutflowPolicy.t-burn-0"));
+        _releaseRGB(amount, keccak256("combined-policy-capacity-debit"));
 
         uint256 shareUnit = bridge.SHARE_UNIT();
         uint256 spentShares = (amount * shareUnit + refLiquidity - 1) / refLiquidity;

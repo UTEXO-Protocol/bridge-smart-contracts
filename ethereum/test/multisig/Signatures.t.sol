@@ -50,7 +50,7 @@ contract MultisigSignaturesTest is MultisigProxyTestBase {
         assertEq(dsAfter, MultisigHelper.domainSeparator(address(proxy), forkedChainId), "rebuilt over new chain id");
     }
 
-    function test_fundsOut_callSignatureNotReplayableAfterChainIdChange() public {
+    function test_fundsOutCall_rejectsSignatureAfterChainIdChange() public {
         // Sign a valid TEE fundsOut on the original chain (domainSep was cached
         // at setUp for block.chainid).
         IBridge.FundsOutParams memory params = _fundsOutParams();

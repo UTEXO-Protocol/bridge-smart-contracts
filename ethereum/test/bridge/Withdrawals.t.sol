@@ -375,4 +375,29 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
         );
         assertEq(rgbModule.fundsInRecords(opId), beforeState.recordAmount, "record unchanged (proof-of-mint permanent)");
     }
+
+    function test_fundsOut_revertsOnZeroSourceOrDestinationChain() public {
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _ensureRgbSafetyCapacity(AMOUNT);
+        bytes memory settlement = _settlement(_ids(opId));
+        for (uint256 field; field < 2; ++field) {
+            bytes4 errorSelector =
+                field == 0 ? IBridge.InvalidSourceChainId.selector : IBridge.InvalidDestinationChainId.selector;
+            vm.expectRevert(errorSelector);
+            vm.prank(multisig);
+            _fundsOut(
+                recipient,
+                AMOUNT,
+                field == 0 ? 0 : RGB_CHAIN_ID,
+                field == 1 ? 0 : SOURCE_CHAIN_ID,
+                SRC_ADDR,
+                _proof(),
+                settlement,
+                SRC_BURN_TX_ID
+            );
+            assertEq(usdt0.balanceOf(recipient), 0, "invalid route pays nothing");
+            assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT * 10, "invalid route preserves liquidity");
+        }
+    }
 }

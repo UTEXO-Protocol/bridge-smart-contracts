@@ -5,7 +5,7 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Vm} from "forge-std/Test.sol";
 import {CommissionManager} from "../../src/CommissionManager.sol";
-import {MultisigProxy} from "../../src/MultisigProxy.sol";
+
 import {RouteRegistry} from "../../src/RouteRegistry.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {IBridgeProxy} from "../../src/interfaces/IBridgeProxy.sol";
@@ -123,109 +123,6 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         return proxy.proposeAdminExecuteRouteRegistry(callData, nonce, deadline, bitmap, signatures);
     }
 
-    function test_proposeUpdateEnclaveSigners_updatesQuorumAfterTimelock() public {
-        address newSigner = makeAddr("newEncSigner");
-        address[] memory newSigners = new address[](2);
-        newSigners[0] = encA1;
-        newSigners[1] = newSigner;
-        uint256 newThreshold = 2;
-
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = vm.getBlockTimestamp() + 1 days;
-
-        bytes32 digest = MultisigHelper.digestProposeUpdateEnclaveSigners(
-            domainSep, RGB_CHAIN_ID, newSigners, newThreshold, nonce, deadline
-        );
-        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        bytes32 id =
-            proxy.proposeUpdateEnclaveSigners(RGB_CHAIN_ID, newSigners, newThreshold, nonce, deadline, bitmap, sigs);
-
-        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
-        proxy.executeProposal(id, abi.encode(RGB_CHAIN_ID, newSigners, newThreshold));
-
-        address[] memory after_ = proxy.getEnclaveSigners(RGB_CHAIN_ID);
-        assertEq(after_.length, 2);
-        assertEq(after_[1], newSigner);
-        assertEq(proxy.enclaveThreshold(RGB_CHAIN_ID), newThreshold);
-    }
-
-    function test_proposeSetTimelockDuration_updatesDurationAfterTimelock() public {
-        uint256 newDuration = 2 hours;
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = vm.getBlockTimestamp() + 1 days;
-
-        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(domainSep, newDuration, nonce, deadline);
-        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
-
-        bytes32 id = proxy.proposeSetTimelockDuration(newDuration, nonce, deadline, bitmap, sigs);
-
-        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
-
-        vm.expectEmit(false, false, false, true, address(proxy));
-        emit IMultisigProxy.TimelockDurationUpdated(newDuration);
-        proxy.executeProposal(id, abi.encode(newDuration));
-
-        assertEq(proxy.timelockDuration(), newDuration);
-    }
-
-    /// @dev A SetTimelockDuration proposal below the immutable MIN_TIMELOCK
-    ///      floor is rejected at execution; the floor holds.
-    function test_proposeSetTimelockDuration_revertsBelowMinTimelock() public {
-        uint256 t = vm.getBlockTimestamp();
-        uint256 newDuration = MIN_TIMELOCK - 1; // just under the floor
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = t + 1 days;
-
-        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(domainSep, newDuration, nonce, deadline);
-        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes32 id = proxy.proposeSetTimelockDuration(
-            newDuration, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks)
-        );
-
-        vm.warp(t + TIMELOCK + 1);
-        vm.expectRevert(IMultisigProxy.TimelockTooShort.selector);
-        proxy.executeProposal(id, abi.encode(newDuration));
-
-        assertEq(proxy.timelockDuration(), TIMELOCK, "timelock unchanged");
-    }
-
-    /// @dev A value exactly at MIN_TIMELOCK is still accepted (boundary).
-    function test_proposeSetTimelockDuration_acceptsAtMinTimelock() public {
-        uint256 initialDuration = MIN_TIMELOCK * 2;
-        proxy = new MultisigProxy(
-            address(bridge),
-            address(cm),
-            emergencyGuardian,
-            _validEnc(),
-            2,
-            RGB_CHAIN_ID,
-            _validFed(),
-            2,
-            initialDuration,
-            MIN_TIMELOCK
-        );
-        domainSep = MultisigHelper.domainSeparator(address(proxy), block.chainid);
-        assertGt(proxy.timelockDuration(), MIN_TIMELOCK, "initial timelock is above the boundary");
-
-        uint256 t = vm.getBlockTimestamp();
-        uint256 newDuration = MIN_TIMELOCK; // exactly the floor
-        uint256 nonce = proxy.proposalNonce();
-        uint256 deadline = t + 1 days;
-
-        bytes32 digest = MultisigHelper.digestProposeSetTimelockDuration(domainSep, newDuration, nonce, deadline);
-        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
-        bytes32 id = proxy.proposeSetTimelockDuration(
-            newDuration, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks)
-        );
-
-        vm.warp(t + initialDuration + 1);
-        proxy.executeProposal(id, abi.encode(newDuration));
-        assertEq(proxy.timelockDuration(), newDuration);
-    }
-
     function test_proposeAdminExecute_canCallBridge() public {
         bytes memory callData = abi.encodeWithSignature("pauseInflow()");
         uint256 nonce = proxy.proposalNonce();
@@ -281,7 +178,7 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IMultisigProxy.CommissionManagerUpdated(address(cm), address(newCm));
+        emit IBridge.CommissionManagerUpdated(address(cm), address(newCm));
         vm.expectEmit(true, true, false, true, address(proxy));
         emit IMultisigProxy.CommissionManagerUpdated(address(cm), address(newCm));
 
@@ -579,12 +476,7 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         );
         assertEq(proxy.getProposal(staleId).federationVersion, 1, "proposal snapshots version one");
 
-        uint256[] memory newPks = new uint256[](3);
-        address[] memory newSigners = new address[](3);
-        for (uint256 i = 0; i < 3; i++) {
-            newPks[i] = 0xFA1 + i;
-            newSigners[i] = vm.addr(newPks[i]);
-        }
+        (address[] memory newSigners, uint256[] memory newPks) = _signerSetFromPrivateKeys(0xFA1, 3);
 
         uint256 rotationNonce = proxy.proposalNonce();
         bytes32 rotationDigest = MultisigHelper.digestProposeUpdateFederationSigners(
@@ -611,9 +503,7 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         // cleanup; cancellation intentionally has no version restriction.
         uint256 cancelDeadline = vm.getBlockTimestamp() + 1 days;
         bytes32 cancelDigest = MultisigHelper.digestCancelProposal(domainSep, staleId, cancelDeadline);
-        uint256[] memory cancellingPks = new uint256[](2);
-        cancellingPks[0] = newPks[0];
-        cancellingPks[1] = newPks[1];
+        uint256[] memory cancellingPks = _slice(newPks, 2);
         proxy.cancelProposal(staleId, cancelDeadline, 3, MultisigHelper.signAll(vm, cancelDigest, cancellingPks));
         assertEq(
             uint256(proxy.getProposal(staleId).status),
@@ -862,5 +752,46 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
 
         proxy.fundsOutCall(params, encNonce, t + 1 days, ebitmap, esigs);
         assertEq(token.balanceOf(recipient), AMOUNT, "withdrawal succeeded while inflow paused");
+    }
+
+    function test_executeProposal_revertsOnZeroCommissionManagerWithoutChangingPointers() public {
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = vm.getBlockTimestamp() + 1 days;
+        (uint256[] memory keys, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 digest = MultisigHelper.digestProposeUpdateCommissionManager(
+            domainSep, address(bridge), address(0), nonce, deadline
+        );
+        bytes32 id = proxy.proposeUpdateCommissionManager(
+            address(0), nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, keys)
+        );
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
+        vm.expectRevert(IMultisigProxy.ZeroCommissionManager.selector);
+        proxy.executeProposal(id, abi.encode(address(0)));
+        assertEq(proxy.commissionManager(), address(cm), "proxy pointer is preserved");
+        assertEq(address(bridge.commissionManager()), address(cm), "Bridge pointer is preserved");
+        assertEq(
+            uint256(proxy.getProposal(id).status),
+            uint256(IMultisigProxy.ProposalStatus.Pending),
+            "failed proposal remains pending"
+        );
+    }
+
+    function test_genericProposals_revertOnCalldataShorterThanSelectorInEveryLane() public {
+        _setLzAdapter(address(token));
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = vm.getBlockTimestamp() + 1 days;
+        bytes[] memory noSignatures = new bytes[](0);
+        for (uint256 length; length < 4; ++length) {
+            bytes memory data = new bytes(length);
+            vm.expectRevert(IMultisigProxy.CallDataTooShort.selector);
+            proxy.proposeAdminExecute(data, nonce, deadline, 0, noSignatures);
+            vm.expectRevert(IMultisigProxy.CallDataTooShort.selector);
+            proxy.proposeAdminExecuteCommissionManager(data, nonce, deadline, 0, noSignatures);
+            vm.expectRevert(IMultisigProxy.CallDataTooShort.selector);
+            proxy.proposeAdminExecuteRouteRegistry(data, nonce, deadline, 0, noSignatures);
+            vm.expectRevert(IMultisigProxy.CallDataTooShort.selector);
+            proxy.proposeAdminExecuteAdapter(data, nonce, deadline, 0, noSignatures);
+            assertEq(proxy.proposalNonce(), nonce, "truncated calldata consumes no nonce");
+        }
     }
 }

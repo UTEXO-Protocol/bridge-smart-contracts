@@ -163,8 +163,8 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         bridge.fundsOut(release);
     }
 
-    /// @notice A physical release followed by a
-    ///         rebalance of the same burn toward a different destination bucket.
+    /// @notice A physical release prevents rebalance of the same burn toward
+    ///         a different destination bucket.
     function test_replayProtection_releasedBurnCannotRebalanceToAnotherDestination() public {
         (IBridge.RebalanceParams memory p, IBridge.FundsOutParams memory release) = _seedMintBurnBurnOnBothPaths();
 

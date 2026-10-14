@@ -6,9 +6,9 @@ import {IBtcRelayView} from "../../src/interfaces/IBtcRelayView.sol";
 /// @title MockBtcRelay
 /// @notice Minimal mock of the Atomiq BtcRelay for testing.
 ///         Stores (height, commitmentHash) => confirmations.
-/// @dev The rejection rules of `verifyBlockheaderHash` mirror the real
-///      `BtcRelay._verifyBlockheaderHash` so an integration test cannot pass a
-///      proof here that the deployed relay would reject.
+/// @dev Enforces checkpoint, nonzero commitment and registered-block guards.
+///      Confirmations are supplied by the fixture; this mock does not model
+///      SPV validation, future-height rejection or Bitcoin chain evolution.
 contract MockBtcRelay is IBtcRelayView {
     mapping(bytes32 => uint256) private _blocks;
     uint32 private _blockHeight;

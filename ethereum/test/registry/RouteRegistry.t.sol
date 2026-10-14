@@ -14,8 +14,6 @@ import {MockSettlementModule} from "../mocks/MockSettlementModule.sol";
 contract RouteRegistryTest is Test {
     bytes32 internal constant SRC_BURN_TX_ID = keccak256("unit-burn-tx");
 
-    // Events re-declared for vm.expectEmit
-
     RouteRegistry internal registry;
 
     MockFinalityVerifier internal verifier;
@@ -34,17 +32,11 @@ contract RouteRegistryTest is Test {
 
     address internal token = makeAddr("token");
 
-    uint256 internal constant SOURCE_CHAIN_ID = 1_000_001;
+    uint256 internal constant SOURCE_CHAIN_ID = 1_000_001; // RGB
 
-    // RGB
+    uint256 internal constant DEST_CHAIN_ID = 42161; // arbitrum
 
-    uint256 internal constant DEST_CHAIN_ID = 42161;
-
-    // arbitrum
-
-    uint256 internal constant OTHER_CHAIN_ID = 8453;
-
-    // Base
+    uint256 internal constant OTHER_CHAIN_ID = 8453; // Base
 
     function setUp() public {
         registry = new RouteRegistry(bridge, owner);
@@ -296,9 +288,6 @@ contract RouteRegistryTest is Test {
         vm.prank(bridge);
         vm.expectRevert(MockFinalityVerifier.MockVerifierForcedRevert.selector);
         registry.beforeFundsOut(_fundsOutCtx(), "", "");
-
-        // No module writes persist after the verifier failure.
-        assertEq(module.beforeFundsOutCount(), 0, "no module writes persist after revert");
     }
 
     function test_beforeFundsOut_propagatesModuleRevert() public {

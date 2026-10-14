@@ -41,7 +41,7 @@ contract MultisigSourceChainSignersTest is MultisigProxyTestBase {
         IBridge.FundsOutParams memory p = _fundsOutParams();
         p.sourceChainId = 424_242; // not registered
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnknownSourceChain.selector, uint256(424_242)));
-        proxy.fundsOutCall(p, 0, vm.getBlockTimestamp() + 1 hours, 0, new bytes[](0));
+        proxy.fundsOutCall(p, 1, vm.getBlockTimestamp() + 1 hours, 0, new bytes[](0));
     }
 
     /// @dev A release for chain B signed by chain A's (RGB) enclave keys is
@@ -93,7 +93,7 @@ contract MultisigSourceChainSignersTest is MultisigProxyTestBase {
         assertEq(proxy.enclaveThreshold(chainB), 3);
         address[] memory got = proxy.getEnclaveSigners(chainB);
         assertEq(got.length, 4);
-        assertEq(got[0], sB[0]);
+        assertEq(got, sB, "every registered signer is stored in order");
 
         uint256[] memory chains = proxy.getEnclaveSourceChains();
         assertEq(chains.length, 2, "RGB + chainB");

@@ -51,11 +51,8 @@ contract CommissionManagerCalculationTest is CommissionManagerTestBase {
         address t = address(token);
         uint256 amount = 100_000 ether;
         (uint256 tok, uint256 nat, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, amount);
-        // 4% of 100_000 tokens = 4000 tokens stable fee. Delegate the math to
-        // the contract — that way the test stays correct if the formula
-        // changes (e.g. different feed decimals).
+        // 4% of 100_000 USD is 4000 USD; at 2000 USD per ETH, the fee is 2 ETH.
         uint256 expectedNat = 2 ether; // 4000 USD at 2000 USD per ETH
-        assertGt(expectedNat, 0, "sanity: positive native fee");
         assertEq(tok, 0);
         assertEq(nat, expectedNat);
         assertEq(net, amount);
@@ -109,5 +106,35 @@ contract CommissionManagerCalculationTest is CommissionManagerTestBase {
         assertEq(tok, 0);
         assertEq(nat, 0);
         assertEq(net, 40_000);
+    }
+
+    function test_calculateCommission_revertsWhenFlatFeeConsumesQuotedAmount() public {
+        uint256 baseFee = 1000;
+        for (uint256 side; side < 2; ++side) {
+            vm.prank(owner);
+            cm.setGlobalDefaults(0, baseFee, 100, CommissionSide(side), CommissionCurrency.TOKEN);
+            vm.expectRevert(abi.encodeWithSelector(ICommissionManager.ZeroNetAmount.selector, baseFee, baseFee));
+            if (side == 0) cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), baseFee);
+            else cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), baseFee);
+        }
+    }
+
+    function test_calculateFundsInCommission_revertsWhenNativeConversionRoundsToZero() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(1, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICommissionManager.CommissionRoundsToZero.selector, DEPOSIT_FLOOR, uint256(1), uint8(100)
+            )
+        );
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), DEPOSIT_FLOOR);
+    }
+
+    function test_calculateFundsInCommission_revertsWhenTokenDecimalsGetterFails() public {
+        vm.prank(owner);
+        cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
+        vm.mockCallRevert(address(token), abi.encodeWithSignature("decimals()"), bytes("decimals unavailable"));
+        vm.expectRevert(ICommissionManager.TokenDecimalsUnavailable.selector);
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1 ether);
     }
 }

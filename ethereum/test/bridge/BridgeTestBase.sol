@@ -43,19 +43,13 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
 
     address internal multisig = makeAddr("multisig");
 
-    uint256 internal constant SOURCE_CHAIN_ID = 31337;
+    uint256 internal constant SOURCE_CHAIN_ID = 31337; // foundry block.chainid
 
-    // foundry block.chainid
-
-    uint256 internal constant RGB_CHAIN_ID = 1_000_001;
-
-    // backend-assigned for RGB
+    uint256 internal constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
 
     string internal constant DST_ADDR = "";
 
-    string internal constant SRC_ADDR = "";
-
-    // RGB has no source-address concept
+    string internal constant SRC_ADDR = ""; // RGB has no source-address concept
 
     uint256 internal constant AMOUNT = 1e18;
 
@@ -69,15 +63,11 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     // BtcRelay test data
     // RGB proof = two (height, commit) pairs. The source block (RGB burn/lock)
     // is deep; the latest block is fresh (relay head). gap = 6 - 1 = 5.
-    uint256 internal constant BLOCK_HEIGHT = 850_000;
-
-    // source block
+    uint256 internal constant BLOCK_HEIGHT = 850_000; // source block
 
     bytes32 internal constant COMMITMENT_HASH = keccak256("test-btc-block-commitment");
 
-    uint256 internal constant CONFIRMATIONS = 6;
-
-    // source confirmations
+    uint256 internal constant CONFIRMATIONS = 6; // source confirmations
 
     uint256 internal constant LATEST_HEIGHT = 850_005;
 

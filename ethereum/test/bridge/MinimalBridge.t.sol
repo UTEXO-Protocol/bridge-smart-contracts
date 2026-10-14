@@ -190,7 +190,7 @@ contract MinimalBridgeTest is Test {
         bridge.unpauseInflow();
     }
 
-    function test_unpause_ownerCanUnpause() public {
+    function test_unpauseInflow_resumesDepositsForOwner() public {
         vm.prank(owner);
         bridge.pauseInflow();
         vm.prank(owner);
@@ -348,5 +348,18 @@ contract MinimalBridgeTest is Test {
 
         assertEq(token.balanceOf(recipient), uint256(releaseAmount));
         assertEq(token.balanceOf(address(bridge)), uint256(lockAmount) - uint256(releaseAmount));
+    }
+
+    function test_emergencyUnpauseAll_resumesPlannedInflowPauseAndIsIdempotent() public {
+        vm.startPrank(owner);
+        bridge.pauseInflow();
+        assertFalse(bridge.outflowPaused(), "planned pause leaves outflow open");
+        bridge.emergencyUnpauseAll();
+        assertFalse(bridge.paused(), "emergency unpause resumes inflow");
+        assertFalse(bridge.outflowPaused(), "outflow stays open");
+        vm.recordLogs();
+        bridge.emergencyUnpauseAll();
+        assertEq(vm.getRecordedLogs().length, 0, "repeated unpause emits no transitions");
+        vm.stopPrank();
     }
 }

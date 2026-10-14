@@ -579,7 +579,7 @@ contract MultisigTargetBindingTest is Test {
         }
     }
 
-    function test_proposeAdminExecute_rejectsSignaturesForRotatedTargetInEveryLane() public {
+    function test_proposalAuthorization_rejectsRotatedTargetSignaturesInEveryLane() public {
         for (uint256 lane; lane < 11; ++lane) {
             uint256 snapshot = vm.snapshotState();
             (bytes32 rotation, bytes memory rotationData) = _rotation(lane);
@@ -595,7 +595,7 @@ contract MultisigTargetBindingTest is Test {
         }
     }
 
-    function test_proposeAdminExecute_rejectsWrongTargetAndLegacySignatureInEveryLane() public {
+    function test_proposalAuthorization_rejectsWrongTargetAndLegacySignaturesInEveryLane() public {
         for (uint256 lane; lane < 11; ++lane) {
             uint256 nonce = proxy.proposalNonce();
             (bytes memory wrong,) = _signedCall(lane, address(replacement), false);
@@ -641,7 +641,7 @@ contract MultisigTargetBindingTest is Test {
         assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
     }
 
-    function test_proposeAdminExecute_rejectsUnsetRegistryWithoutConsumingNonce() public {
+    function test_registryProposals_rejectUnsetRegistryWithoutConsumingNonce() public {
         bridge.setRouteRegistry(address(0));
         for (uint256 lane = 2; lane <= 6; lane += 4) {
             uint256 nonce = proxy.proposalNonce();

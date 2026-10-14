@@ -226,19 +226,19 @@ All signatures use EIP-712 typed structured data with domain `name: "MultisigPro
 ## Setup
 
 ```sh
-forge install        # fetch forge-std + openzeppelin-contracts submodules
+forge install                                                                                            # fetch forge-std + openzeppelin-contracts submodules
 forge build
 ```
 
 ## Commands
 
 ```sh
-forge build                                      # compile
-forge test                                       # run all tests
-forge test --match-path 'test/bridge/Deposits.t.sol' # run one suite
-forge test -vvv                                  # with traces
-forge coverage --ir-minimum --skip script --exclude-tests # coverage summary
-forge clean                                      # delete out/ + cache/
+forge build                                                                                              # compile
+forge test                                                                                               # run all tests
+forge test --match-path 'test/bridge/Deposits.t.sol'                                                     # run one suite
+forge test -vvv                                                                                          # with traces
+forge coverage --ir-minimum --skip script --exclude-tests --no-match-coverage '^src/btc_relay/'          # coverage summary
+forge clean                                                                                              # delete out/ + cache/
 ```
 
 See [TESTING.md](TESTING.md) for suite organization, test conventions,
@@ -329,9 +329,7 @@ forge script script/deploy/DeployRouteRegistry.s.sol         --rpc-url $RPC_URL 
 forge script script/deploy/DeployBridge.s.sol                --rpc-url $RPC_URL --broadcast --verify
 forge script script/deploy/DeployRGBVerifier.s.sol           --rpc-url $RPC_URL --broadcast --verify
 forge script script/deploy/DeployRgbSettlementModule.s.sol   --rpc-url $RPC_URL --broadcast --verify
-forge script script/deploy/DeployMultisigProxy.s.sol         --rpc-url $RPC_URL --broadcast --verify
-
-# Transfer ownerships to MultisigProxy
+forge script script/deploy/DeployMultisigProxy.s.sol         --rpc-url $RPC_URL --broadcast --verify     # Transfer ownerships to MultisigProxy
 cast send $BRIDGE_ADDRESS         "transferOwnership(address)" $PROXY_ADDRESS --rpc-url $RPC_URL --private-key $PRIVATE_KEY
 cast send $COMMISSION_MANAGER     "transferOwnership(address)" $PROXY_ADDRESS --rpc-url $RPC_URL --private-key $PRIVATE_KEY
 cast send $ROUTE_REGISTRY_ADDRESS "transferOwnership(address)" $PROXY_ADDRESS --rpc-url $RPC_URL --private-key $PRIVATE_KEY

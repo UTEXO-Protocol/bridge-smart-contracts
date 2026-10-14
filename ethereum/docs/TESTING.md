@@ -68,7 +68,7 @@ forge test --match-path 'test/bridge/Rollback.t.sol' -vvv
 FOUNDRY_PROFILE=ci forge test
 ```
 
-The CI profile explicitly uses 256 fuzz runs, matching Foundry’s default, and
+The CI profile explicitly uses 256 fuzz runs, matching Foundry's default, and
 seed `0x1` for reproducible pull-request results. A fixed seed repeats the same
 inputs; use separate campaigns with other seeds to explore new inputs:
 
@@ -79,13 +79,16 @@ forge test --fuzz-runs 1000 --fuzz-seed 0x2
 ## Coverage
 
 ```sh
-forge coverage --ir-minimum --skip script --exclude-tests \
+forge coverage --ir-minimum --skip script --exclude-tests --no-match-coverage '^src/btc_relay/' \
   --report summary --report lcov --report-file lcov.info
 ```
 
 All test suites run. `--exclude-tests` removes test/support code from the report;
 `--skip script` avoids compiling unrelated deployment and interaction entrypoints.
 Scripts imported by a test harness remain available as dependencies.
+`--no-match-coverage` excludes the complete vendored `src/btc_relay/` tree
+from summary and LCOV metrics. Its existing tests still run; our RGB verifier
+and bridge integration code remain included.
 
 Ordinary `forge coverage` disables the optimizer and via-IR pipeline and hits
 stack-depth limits in this project. The minimal IR mode runs coverage without

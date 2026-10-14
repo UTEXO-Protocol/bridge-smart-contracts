@@ -279,7 +279,7 @@ contract BridgeRollbackTest is BridgeTestBase {
     // All selected failure paths must leave balances, commission pools, and RGB
     // accounting unchanged. Feed failures are pre-pull; route/module/commission
     // failures exercise post-pull rollback.
-    function testFuzz_fundsIn_revertsPathsLeaveStateUnchanged(uint128 amountSeed) public {
+    function testFuzz_fundsIn_failurePathsPreserveAccounting(uint128 amountSeed) public {
         // Lower bound keeps commission/native fee nonzero so intended reverts fire.
         uint256 amount = bound(uint256(amountSeed), 100, AMOUNT);
 

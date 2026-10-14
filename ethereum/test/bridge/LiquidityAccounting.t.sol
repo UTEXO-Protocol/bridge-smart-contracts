@@ -38,6 +38,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
 
         uint256 release = AMOUNT * 2 / 5;
         _ensureRgbSafetyCapacity(release);
+        _setFundsOutTokenRule(500); // 5% fee makes gross debit differ from payout
         uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
         vm.prank(multisig);
         // The settlement amount matches the original mint record.
@@ -52,6 +53,9 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
             SRC_BURN_TX_ID
         );
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), liquidityBefore - release, "bucket debited by gross release");
+        assertEq(bridge.totalLockedLiquidity(), liquidityBefore - release, "total debited by gross release");
+        assertEq(usdt0.balanceOf(recipient), release * 95 / 100, "recipient receives net after 5% fee");
+        assertEq(cm.tokenCommissionPool(address(usdt0)), release * 5 / 100, "commission receives remaining gross debit");
     }
 
     function test_isolatedLiquidity_chainCannotConsumeAnotherChainsLiquidity() public {
@@ -77,7 +81,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
         );
     }
 
-    function test_isolatedLiquidity_revertsRollsBackDebit() public {
+    function test_fundsOut_verifierRevertRestoresLiquidityDebit() public {
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
@@ -170,5 +174,66 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
             SRC_BURN_TX_ID
         );
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), amount - bucketLimit, "configured 10% burst debited");
+    }
+
+    // A plain ERC20 transfer can change Bridge's raw balance,
+    // but it does not enter the Bridge.fundsIn accounting path.
+    function test_liquidity_directTokenTransferDoesNotCreditAccounting() public {
+        address donor = makeAddr("directTransferDonor");
+        uint256 directAmount = 17e18;
+        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+
+        usdt0.mint(donor, directAmount);
+
+        uint256 donorBefore = usdt0.balanceOf(donor);
+        uint256 userBefore = usdt0.balanceOf(user);
+        uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
+        uint256 cmBefore = usdt0.balanceOf(address(cm));
+        uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
+        uint256 nativePoolBefore = cm.nativeCommissionPool();
+        uint256 recordBefore = rgbModule.fundsInRecords(expectedOpId);
+
+        assertEq(donorBefore, directAmount, "pre donor token");
+        assertEq(bridgeBefore, 0, "pre bridge token");
+        assertEq(recordBefore, 0, "pre record");
+
+        vm.prank(donor);
+        usdt0.transfer(address(bridge), directAmount);
+
+        assertEq(usdt0.balanceOf(donor), donorBefore - directAmount, "donor direct transfer spent");
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBefore + directAmount, "bridge raw balance increased");
+        assertEq(usdt0.balanceOf(address(cm)), cmBefore, "cm token unchanged");
+        assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, "cm pool unchanged");
+        assertEq(cm.nativeCommissionPool(), nativePoolBefore, "native pool unchanged");
+        assertEq(rgbModule.fundsInRecords(expectedOpId), recordBefore, "record not created");
+
+        vm.expectEmit(true, true, false, true, address(bridge));
+        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
+        vm.expectEmit(true, true, true, true, address(bridge));
+        emit IBridge.BridgeFundsIn(
+            expectedOpId,
+            bytes32(uint256(uint160(user))),
+            user,
+            0,
+            AMOUNT,
+            AMOUNT,
+            0,
+            0,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData()
+        );
+
+        vm.prank(user);
+        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        assertEq(usdt0.balanceOf(user), userBefore - AMOUNT, "user fundsIn spent");
+        assertEq(
+            usdt0.balanceOf(address(bridge)),
+            bridgeBefore + directAmount + AMOUNT,
+            "bridge includes direct plus fundsIn"
+        );
+        assertEq(rgbModule.fundsInRecords(opId), recordBefore + AMOUNT, "record created only by fundsIn");
     }
 }
