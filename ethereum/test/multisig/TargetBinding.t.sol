@@ -23,6 +23,30 @@ contract MultisigTargetBindingTest is Test {
 
     bytes32 private domain;
 
+    uint256 private constant LANE_BRIDGE_ADMIN_EXECUTE = 0;
+
+    uint256 private constant LANE_COMMISSION_MANAGER_ADMIN_EXECUTE = 1;
+
+    uint256 private constant LANE_ROUTE_REGISTRY_ADMIN_EXECUTE = 2;
+
+    uint256 private constant LANE_ADAPTER_ADMIN_EXECUTE = 3;
+
+    uint256 private constant LANE_WITHDRAW_TOKEN_COMMISSION = 4;
+
+    uint256 private constant LANE_WITHDRAW_NATIVE_COMMISSION = 5;
+
+    uint256 private constant LANE_SET_ROUTE = 6;
+
+    uint256 private constant LANE_UPDATE_COMMISSION_MANAGER = 7;
+
+    uint256 private constant LANE_UPDATE_ROUTE_REGISTRY = 8;
+
+    uint256 private constant LANE_PAUSE_INFLOW = 9;
+
+    uint256 private constant LANE_UNPAUSE_INFLOW = 10;
+
+    uint256 private constant MANAGED_LANE_COUNT = LANE_UNPAUSE_INFLOW + 1;
+
     uint256 private constant DELAY = 1 hours;
 
     function setUp() public {
@@ -62,9 +86,14 @@ contract MultisigTargetBindingTest is Test {
     }
 
     function _target(uint256 lane) private view returns (address) {
-        if (lane == 1 || lane == 4 || lane == 5) return proxy.commissionManager();
-        if (lane == 2 || lane == 6) return GovernanceTargetMock(proxy.bridge()).routeRegistry();
-        if (lane == 3) return proxy.lzAdapter();
+        if (
+            lane == LANE_COMMISSION_MANAGER_ADMIN_EXECUTE || lane == LANE_WITHDRAW_TOKEN_COMMISSION
+                || lane == LANE_WITHDRAW_NATIVE_COMMISSION
+        ) return proxy.commissionManager();
+        if (lane == LANE_ROUTE_REGISTRY_ADMIN_EXECUTE || lane == LANE_SET_ROUTE) {
+            return GovernanceTargetMock(proxy.bridge()).routeRegistry();
+        }
+        if (lane == LANE_ADAPTER_ADMIN_EXECUTE) return proxy.lzAdapter();
         return proxy.bridge();
     }
 
@@ -72,7 +101,10 @@ contract MultisigTargetBindingTest is Test {
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = vm.getBlockTimestamp() + 1 days;
         opData = abi.encode(address(replacement));
-        if (lane == 1 || lane == 4 || lane == 5) {
+        if (
+            lane == LANE_COMMISSION_MANAGER_ADMIN_EXECUTE || lane == LANE_WITHDRAW_TOKEN_COMMISSION
+                || lane == LANE_WITHDRAW_NATIVE_COMMISSION
+        ) {
             id = proxy.proposeUpdateCommissionManager(
                 address(replacement),
                 nonce,
@@ -84,7 +116,7 @@ contract MultisigTargetBindingTest is Test {
                     )
                 )
             );
-        } else if (lane == 2 || lane == 6) {
+        } else if (lane == LANE_ROUTE_REGISTRY_ADMIN_EXECUTE || lane == LANE_SET_ROUTE) {
             id = proxy.proposeUpdateRouteRegistry(
                 address(replacement),
                 nonce,
@@ -96,7 +128,7 @@ contract MultisigTargetBindingTest is Test {
                     )
                 )
             );
-        } else if (lane == 3) {
+        } else if (lane == LANE_ADAPTER_ADMIN_EXECUTE) {
             id = proxy.proposeUpdateLZAdapter(
                 address(replacement),
                 nonce,
@@ -127,7 +159,7 @@ contract MultisigTargetBindingTest is Test {
         bytes memory data = abi.encodeWithSignature("ping(uint256)", uint256(7));
         bytes32 digest;
         bytes32 independentHash;
-        if (lane == 0) {
+        if (lane == LANE_BRIDGE_ADMIN_EXECUTE) {
             digest = MultisigHelper.digestProposeAdminExecute(domain, target, bytes4(data), data, nonce, deadline);
             independentHash = keccak256(
                 abi.encode(
@@ -163,7 +195,7 @@ contract MultisigTargetBindingTest is Test {
             }
             submitData = abi.encodeCall(MultisigProxy.proposeAdminExecute, (data, nonce, deadline, 3, _sign(digest)));
             opData = data;
-        } else if (lane == 1) {
+        } else if (lane == LANE_COMMISSION_MANAGER_ADMIN_EXECUTE) {
             digest = MultisigHelper.digestProposeAdminExecuteCM(domain, target, bytes4(data), data, nonce, deadline);
             independentHash = keccak256(
                 abi.encode(
@@ -201,7 +233,7 @@ contract MultisigTargetBindingTest is Test {
                 MultisigProxy.proposeAdminExecuteCommissionManager, (data, nonce, deadline, 3, _sign(digest))
             );
             opData = data;
-        } else if (lane == 2) {
+        } else if (lane == LANE_ROUTE_REGISTRY_ADMIN_EXECUTE) {
             digest = MultisigHelper.digestProposeAdminExecuteRouteRegistry(
                 domain, target, bytes4(data), data, nonce, deadline
             );
@@ -241,7 +273,7 @@ contract MultisigTargetBindingTest is Test {
                 MultisigProxy.proposeAdminExecuteRouteRegistry, (data, nonce, deadline, 3, _sign(digest))
             );
             opData = data;
-        } else if (lane == 3) {
+        } else if (lane == LANE_ADAPTER_ADMIN_EXECUTE) {
             digest =
                 MultisigHelper.digestProposeAdminExecuteAdapter(domain, target, bytes4(data), data, nonce, deadline);
             independentHash = keccak256(
@@ -279,7 +311,7 @@ contract MultisigTargetBindingTest is Test {
             submitData =
                 abi.encodeCall(MultisigProxy.proposeAdminExecuteAdapter, (data, nonce, deadline, 3, _sign(digest)));
             opData = data;
-        } else if (lane == 4) {
+        } else if (lane == LANE_WITHDRAW_TOKEN_COMMISSION) {
             digest = MultisigHelper.digestProposeWithdrawTokenCommissionCM(
                 domain, target, address(0xCAFE), uint256(7), nonce, deadline
             );
@@ -320,7 +352,7 @@ contract MultisigTargetBindingTest is Test {
                 (address(0xCAFE), uint256(7), nonce, deadline, 3, _sign(digest))
             );
             opData = abi.encode(address(0xCAFE), uint256(7));
-        } else if (lane == 5) {
+        } else if (lane == LANE_WITHDRAW_NATIVE_COMMISSION) {
             digest = MultisigHelper.digestProposeWithdrawNativeCommissionCM(domain, target, uint256(7), nonce, deadline);
             independentHash = keccak256(
                 abi.encode(
@@ -356,7 +388,7 @@ contract MultisigTargetBindingTest is Test {
                 MultisigProxy.proposeWithdrawNativeCommissionCM, (uint256(7), nonce, deadline, 3, _sign(digest))
             );
             opData = abi.encode(uint256(7));
-        } else if (lane == 6) {
+        } else if (lane == LANE_SET_ROUTE) {
             digest = MultisigHelper.digestProposeSetRoute(
                 domain, target, uint256(1), uint256(2), true, address(0x111), address(0x222), nonce, deadline
             );
@@ -403,7 +435,7 @@ contract MultisigTargetBindingTest is Test {
                 (uint256(1), uint256(2), true, address(0x111), address(0x222), nonce, deadline, 3, _sign(digest))
             );
             opData = abi.encode(uint256(1), uint256(2), true, address(0x111), address(0x222));
-        } else if (lane == 7) {
+        } else if (lane == LANE_UPDATE_COMMISSION_MANAGER) {
             digest = MultisigHelper.digestProposeUpdateCommissionManager(
                 domain, target, address(replacement), nonce, deadline
             );
@@ -441,7 +473,7 @@ contract MultisigTargetBindingTest is Test {
                 MultisigProxy.proposeUpdateCommissionManager, (address(replacement), nonce, deadline, 3, _sign(digest))
             );
             opData = abi.encode(address(replacement));
-        } else if (lane == 8) {
+        } else if (lane == LANE_UPDATE_ROUTE_REGISTRY) {
             digest =
                 MultisigHelper.digestProposeUpdateRouteRegistry(domain, target, address(replacement), nonce, deadline);
             independentHash = keccak256(
@@ -478,7 +510,7 @@ contract MultisigTargetBindingTest is Test {
                 MultisigProxy.proposeUpdateRouteRegistry, (address(replacement), nonce, deadline, 3, _sign(digest))
             );
             opData = abi.encode(address(replacement));
-        } else if (lane == 9) {
+        } else if (lane == LANE_PAUSE_INFLOW) {
             digest = MultisigHelper.digestProposePauseInflow(domain, target, nonce, deadline);
             independentHash = keccak256(
                 abi.encode(
@@ -502,7 +534,7 @@ contract MultisigTargetBindingTest is Test {
             }
             submitData = abi.encodeCall(MultisigProxy.proposePauseInflow, (nonce, deadline, 3, _sign(digest)));
             opData = bytes("");
-        } else if (lane == 10) {
+        } else if (lane == LANE_UNPAUSE_INFLOW) {
             digest = MultisigHelper.digestProposeUnpauseInflow(domain, target, nonce, deadline);
             independentHash = keccak256(
                 abi.encode(
@@ -540,7 +572,7 @@ contract MultisigTargetBindingTest is Test {
     }
 
     function test_executeProposal_usesSignedTargetInEveryManagedLane() public {
-        for (uint256 lane; lane < 11; ++lane) {
+        for (uint256 lane; lane < MANAGED_LANE_COUNT; ++lane) {
             uint256 snapshot = vm.snapshotState();
             address target = _target(lane);
             (bytes memory data, bytes memory opData) = _signedCall(lane, target, false);
@@ -556,7 +588,7 @@ contract MultisigTargetBindingTest is Test {
     }
 
     function test_executeProposal_rejectsRotatedTargetInEveryManagedLane() public {
-        for (uint256 lane; lane < 11; ++lane) {
+        for (uint256 lane; lane < MANAGED_LANE_COUNT; ++lane) {
             uint256 snapshot = vm.snapshotState();
             address target = _target(lane);
             (bytes memory data, bytes memory opData) = _signedCall(lane, target, false);
@@ -580,7 +612,7 @@ contract MultisigTargetBindingTest is Test {
     }
 
     function test_proposalAuthorization_rejectsRotatedTargetSignaturesInEveryLane() public {
-        for (uint256 lane; lane < 11; ++lane) {
+        for (uint256 lane; lane < MANAGED_LANE_COUNT; ++lane) {
             uint256 snapshot = vm.snapshotState();
             (bytes32 rotation, bytes memory rotationData) = _rotation(lane);
             (bytes memory data,) = _signedCall(lane, _target(lane), false);
@@ -596,7 +628,7 @@ contract MultisigTargetBindingTest is Test {
     }
 
     function test_proposalAuthorization_rejectsWrongTargetAndLegacySignaturesInEveryLane() public {
-        for (uint256 lane; lane < 11; ++lane) {
+        for (uint256 lane; lane < MANAGED_LANE_COUNT; ++lane) {
             uint256 nonce = proxy.proposalNonce();
             (bytes memory wrong,) = _signedCall(lane, address(replacement), false);
             (bool ok, bytes memory result) = address(proxy).call(wrong);
@@ -611,7 +643,7 @@ contract MultisigTargetBindingTest is Test {
     }
 
     function test_executeProposal_rejectsTamperedDataInEveryManagedLane() public {
-        for (uint256 lane; lane < 11; ++lane) {
+        for (uint256 lane; lane < MANAGED_LANE_COUNT; ++lane) {
             uint256 snapshot = vm.snapshotState();
             (bytes memory data, bytes memory opData) = _signedCall(lane, _target(lane), false);
             bytes32 id = _submit(data);
@@ -624,7 +656,7 @@ contract MultisigTargetBindingTest is Test {
     }
 
     function test_executeProposal_rejectsPendingAdapterCallAfterDisable() public {
-        (bytes memory data, bytes memory opData) = _signedCall(3, address(adapter), false);
+        (bytes memory data, bytes memory opData) = _signedCall(LANE_ADAPTER_ADMIN_EXECUTE, address(adapter), false);
         bytes32 id = _submit(data);
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = vm.getBlockTimestamp() + 1 days;
@@ -641,9 +673,11 @@ contract MultisigTargetBindingTest is Test {
         assertEq(uint256(proxy.getProposal(id).status), uint256(IMultisigProxy.ProposalStatus.Pending));
     }
 
-    function test_registryProposals_rejectUnsetRegistryWithoutConsumingNonce() public {
+    function test_registryProposal_revertsOnUnsetRegistryWithoutConsumingNonce() public {
         bridge.setRouteRegistry(address(0));
-        for (uint256 lane = 2; lane <= 6; lane += 4) {
+        uint256[2] memory registryLanes = [LANE_ROUTE_REGISTRY_ADMIN_EXECUTE, LANE_SET_ROUTE];
+        for (uint256 i; i < registryLanes.length; ++i) {
+            uint256 lane = registryLanes[i];
             uint256 nonce = proxy.proposalNonce();
             (bytes memory data,) = _signedCall(lane, address(0), false);
             (bool ok, bytes memory result) = address(proxy).call(data);

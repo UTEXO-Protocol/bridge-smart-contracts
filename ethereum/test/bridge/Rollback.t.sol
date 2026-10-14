@@ -10,6 +10,18 @@ import {BridgeTestBase} from "./BridgeTestBase.sol";
 
 /// @notice Failed hooks and fee forwarding restore custody and accounting.
 contract BridgeRollbackTest is BridgeTestBase {
+    uint8 private constant MODE_ROUTE_DISABLED = 0;
+
+    uint8 private constant MODE_SETTLEMENT_MODULE_REVERT = 1;
+
+    uint8 private constant MODE_COMMISSION_FORWARDING_REVERT = 2;
+
+    uint8 private constant MODE_STALE_PRICE = 3;
+
+    uint8 private constant MODE_INVALID_PRICE = 4;
+
+    uint8 private constant FAILURE_MODE_COUNT = MODE_INVALID_PRICE + 1;
+
     struct ReleaseRollbackSnapshot {
         uint256 bridgeBalance;
         uint256 recipientBalance;
@@ -40,31 +52,32 @@ contract BridgeRollbackTest is BridgeTestBase {
         bytes memory expectedRevert;
         MockSettlementModule revertingModule;
 
-        if (failureMode == 0) {
+        if (failureMode == MODE_ROUTE_DISABLED) {
             vm.prank(deployer);
             routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, false, address(rgbVerifier), address(rgbModule));
             expectedRevert =
                 abi.encodeWithSelector(IRouteRegistry.RouteNotEnabled.selector, SOURCE_CHAIN_ID, RGB_CHAIN_ID);
-        } else if (failureMode == 1) {
+        } else if (failureMode == MODE_SETTLEMENT_MODULE_REVERT) {
             revertingModule = new MockSettlementModule();
             revertingModule.setShouldRevertOnFundsIn(true);
 
             vm.prank(deployer);
             routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(revertingModule));
             expectedRevert = abi.encodeWithSelector(MockSettlementModule.MockModuleForcedRevert.selector);
-        } else if (failureMode == 2) {
+        } else if (failureMode == MODE_COMMISSION_FORWARDING_REVERT) {
             _setFundsInTokenRule(400); // 4%, positive for the fuzzed amount range.
             // Deploy the stub BEFORE the prank — as a call argument it would consume it.
             address wrongBridge = _wrongBridgeWithFloor();
             vm.prank(deployer);
             cm.setBridgeAddress(wrongBridge);
             expectedRevert = abi.encodeWithSelector(ICommissionManager.OnlyBridge.selector);
-        } else if (failureMode == 3) {
+        } else if (failureMode == MODE_STALE_PRICE) {
             _setFundsInNativeRule(100); // Positive native quote for the fuzzed amount range.
             vm.warp(vm.getBlockTimestamp() + 2 hours);
             ethUsdFeed.setUpdatedAt(vm.getBlockTimestamp() - 2 hours);
             expectedRevert = abi.encodeWithSelector(ICommissionManager.StalePrice.selector);
         } else {
+            // MODE_INVALID_PRICE: the round is fresh but its answer is nonpositive.
             _setFundsInNativeRule(100); // Positive native quote for the fuzzed amount range.
             ethUsdFeed.setUpdatedAt(vm.getBlockTimestamp());
             ethUsdFeed.setAnswer(0);
@@ -72,10 +85,10 @@ contract BridgeRollbackTest is BridgeTestBase {
         }
 
         uint256 expectedNet = amount;
-        if (failureMode == 2) {
+        if (failureMode == MODE_COMMISSION_FORWARDING_REVERT) {
             (,, expectedNet) = cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
         }
-        bytes32 expectedOpId = failureMode == 1
+        bytes32 expectedOpId = failureMode == MODE_SETTLEMENT_MODULE_REVERT
             ? _deriveOpId(
                 SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, amount, RGB_CHAIN_ID, DST_ADDR, _rgbData()
             )
@@ -88,7 +101,7 @@ contract BridgeRollbackTest is BridgeTestBase {
 
         _assertLedgerUnchanged(before, expectedOpId);
 
-        if (failureMode == 1) {
+        if (failureMode == MODE_SETTLEMENT_MODULE_REVERT) {
             assertEq(revertingModule.onFundsInCount(), 0, "module state unchanged");
         }
     }
@@ -283,7 +296,7 @@ contract BridgeRollbackTest is BridgeTestBase {
         // Lower bound keeps commission/native fee nonzero so intended reverts fire.
         uint256 amount = bound(uint256(amountSeed), 100, AMOUNT);
 
-        for (uint8 failureMode = 0; failureMode < 5; failureMode++) {
+        for (uint8 failureMode = 0; failureMode < FAILURE_MODE_COUNT; failureMode++) {
             uint256 snapshotId = vm.snapshotState();
             _assertFundsInRevertPathLeavesStateUnchanged(amount, failureMode);
             assertTrue(vm.revertToStateAndDelete(snapshotId), "scenario snapshot restored");

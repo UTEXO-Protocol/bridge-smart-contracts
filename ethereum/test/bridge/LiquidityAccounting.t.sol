@@ -176,9 +176,9 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), amount - bucketLimit, "configured 10% burst debited");
     }
 
-    // A plain ERC20 transfer can change Bridge's raw balance,
-    // but it does not enter the Bridge.fundsIn accounting path.
-    function test_liquidity_directTokenTransferDoesNotCreditAccounting() public {
+    /// @dev A plain ERC20 transfer increases custody without crediting either
+    ///      liquidity ledger. Only fundsIn creates the accounted credit.
+    function test_fundsIn_directTokenTransferDoesNotCreditLiquidity() public {
         address donor = makeAddr("directTransferDonor");
         uint256 directAmount = 17e18;
         bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
@@ -206,6 +206,8 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
         assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore, "cm pool unchanged");
         assertEq(cm.nativeCommissionPool(), nativePoolBefore, "native pool unchanged");
         assertEq(rgbModule.fundsInRecords(expectedOpId), recordBefore, "record not created");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 0, "direct transfer creates no chain liquidity");
+        assertEq(bridge.totalLockedLiquidity(), 0, "direct transfer creates no total liquidity");
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit IBridge.FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
@@ -235,5 +237,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
             "bridge includes direct plus fundsIn"
         );
         assertEq(rgbModule.fundsInRecords(opId), recordBefore + AMOUNT, "record created only by fundsIn");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT, "only fundsIn credits chain liquidity");
+        assertEq(bridge.totalLockedLiquidity(), AMOUNT, "only fundsIn credits total liquidity");
     }
 }

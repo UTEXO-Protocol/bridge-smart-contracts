@@ -156,8 +156,9 @@ contract RGBVerifierTest is Test {
     }
 
     function test_verify_revertsOnIncompleteProofEncoding() public view {
-        for (uint256 length; length < 128; length += 127) {
-            bytes memory incomplete = new bytes(length);
+        uint256[2] memory lengths = [uint256(0), uint256(127)];
+        for (uint256 i; i < lengths.length; ++i) {
+            bytes memory incomplete = new bytes(lengths[i]);
             (bool success, bytes memory result) =
                 address(verifier).staticcall(abi.encodeCall(RGBVerifier.verify, (_ctx(), incomplete)));
             assertFalse(success, "incomplete four-word proof must fail decoding");

@@ -233,8 +233,8 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000);
     }
 
-    /// @dev A zero-fee rule is unaffected by the floor moving, so a fee-free
-    ///      route can never be bricked by this coupling.
+    /// @dev A zero-fee quote stays unchanged when the mock floor exceeds the
+    ///      quoted amount or becomes unavailable.
     function test_calculateFundsInCommission_zeroFeeRouteIgnoresFloorChanges() public {
         vm.prank(owner);
         cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
@@ -248,6 +248,14 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         assertEq(tok, beforeFee, "zero fee is unchanged by the higher floor");
         assertEq(net, beforeNet, "net quote is unchanged by the higher floor");
         assertEq(net, DEPOSIT_FLOOR, "zero-fee amount bridges in full");
+
+        MockDepositFloor(BRIDGE).setMinFundsInAmount(0);
+        vm.expectRevert(ICommissionManager.AmountFloorUnavailable.selector);
+        cm.depositFloor();
+
+        (tok,, net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), DEPOSIT_FLOOR);
+        assertEq(tok, beforeFee, "zero fee does not require a readable floor");
+        assertEq(net, beforeNet, "unavailable floor preserves the full net quote");
     }
 
     /// @dev The Bridge read is scoped to routes that actually charge a flat fee.
@@ -304,7 +312,7 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
     }
 
-    function test_amountFloors_revertWhenBridgeGettersFail() public {
+    function test_amountFloor_revertsWhenBridgeGetterFails() public {
         vm.mockCallRevert(BRIDGE, abi.encodeWithSignature("minFundsInAmount()"), bytes("inbound floor unavailable"));
         vm.mockCallRevert(BRIDGE, abi.encodeWithSignature("minFundsOutAmount()"), bytes("outbound floor unavailable"));
         vm.expectRevert(ICommissionManager.AmountFloorUnavailable.selector);

@@ -36,7 +36,7 @@ contract CommissionManagerConfigurationTest is CommissionManagerTestBase {
         assertEq(cm.buildRouteKey(SRC_CHAIN_ID, DST_CHAIN_ID, t), expected);
     }
 
-    function test_getGlobalDefaults_initial() public {
+    function test_getGlobalDefaults_returnsConstructorDefaults() public {
         (uint256 sp, uint256 baseFee, uint8 m, CommissionSide side, CommissionCurrency cur) =
             new CommissionManager(BRIDGE, recipient).getGlobalDefaults();
         assertEq(sp, 0);

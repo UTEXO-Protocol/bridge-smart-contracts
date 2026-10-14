@@ -510,9 +510,9 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
         vm.deal(address(this), LZ_NATIVE_FEE);
         vm.expectRevert(IMultisigProxy.InvalidSignature.selector);
         proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, nonce, deadline, bitmap, sigs);
-        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce);
-        assertFalse(bridge.consumedBurnIds(params.burnId));
-        assertEq(adapter.sendOutCalls(), 0);
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce, "invalid settlement signature preserves the nonce");
+        assertFalse(bridge.consumedBurnIds(params.burnId), "invalid settlement signature leaves the burn fresh");
+        assertEq(adapter.sendOutCalls(), 0, "invalid settlement signature makes no adapter call");
     }
 
     function test_lzFundsOutCall_changedSettlementCannotReplaySameBurn() public {
@@ -583,7 +583,7 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
         assertEq(proxy.teeNonce(RGB_CHAIN_ID), 2, "fresh nonce advances the lane");
     }
 
-    function test_lzFundsOutCall_unknownSourcePrecedesInvalidNonce() public {
+    function test_lzFundsOutCall_revertsOnUnknownSourceBeforeNonceCheck() public {
         IMultisigProxy.LzFundsOutParams memory params = _lzFundsOutParams(AMOUNT, SRC_BURN_TX_ID, _fundsInIds());
         params.sourceChainId = 424_242;
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnknownSourceChain.selector, uint256(424_242)));

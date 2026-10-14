@@ -6,7 +6,7 @@ import {FundsOutContext} from "../../src/interfaces/RouteTypes.sol";
 import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
 import {MockBtcRelay} from "../mocks/MockBtcRelay.sol";
 
-/// @notice Mock checkpoint queries preserve the deployed relay’s below-checkpoint rejection.
+/// @notice Mock checkpoint queries preserve the deployed relay's below-checkpoint rejection.
 contract MockBtcRelayCheckpointTest is Test {
     uint256 internal constant CHECKPOINT_HEIGHT = 850_000;
 
@@ -22,12 +22,19 @@ contract MockBtcRelayCheckpointTest is Test {
 
     RGBVerifier internal verifier;
 
+    uint256 private constant MIN_SOURCE_CONFIRMATIONS = 6;
+
+    uint256 private constant MAX_LATEST_CONFIRMATIONS = 1;
+
+    uint256 private constant MIN_CONFIRMATION_GAP = 5;
+
     function setUp() public {
         relay = new MockBtcRelay();
         relay.setCheckpointHeight(CHECKPOINT_HEIGHT);
-        relay.setBlock(CHECKPOINT_HEIGHT, SOURCE_COMMIT, 6);
-        relay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, 1);
-        verifier = new RGBVerifier(address(relay), 6, 1, 5);
+        relay.setBlock(CHECKPOINT_HEIGHT, SOURCE_COMMIT, MIN_SOURCE_CONFIRMATIONS);
+        relay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, MAX_LATEST_CONFIRMATIONS);
+        verifier =
+            new RGBVerifier(address(relay), MIN_SOURCE_CONFIRMATIONS, MAX_LATEST_CONFIRMATIONS, MIN_CONFIRMATION_GAP);
     }
 
     /// @notice With no checkpoint, a registered height is accepted; configuring
@@ -79,7 +86,7 @@ contract MockBtcRelayCheckpointTest is Test {
     }
 
     function test_verifyBlockheaderHash_acceptsRegisteredBlock() public view {
-        assertEq(relay.verifyBlockheaderHash(CHECKPOINT_HEIGHT, SOURCE_COMMIT), 6);
+        assertEq(relay.verifyBlockheaderHash(CHECKPOINT_HEIGHT, SOURCE_COMMIT), MIN_SOURCE_CONFIRMATIONS);
     }
 
     /// @notice A zero-commitment source below the checkpoint fails relay validation.

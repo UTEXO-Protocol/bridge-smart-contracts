@@ -133,7 +133,7 @@ contract CommissionManagerRouteRulesTest is CommissionManagerTestBase {
         assertTrue(cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token)).isSet);
     }
 
-    function test_commissionRules_revertOnZeroTokenForSetAndClear() public {
+    function test_commissionRule_revertsOnZeroTokenForSetAndClear() public {
         CommissionConfig memory config = CommissionConfig({
             stablePercent: 0,
             baseFee: 0,

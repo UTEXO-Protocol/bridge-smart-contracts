@@ -2,7 +2,6 @@
 pragma solidity 0.8.35;
 
 import {CommissionManager} from "../../src/CommissionManager.sol";
-
 import {ICommissionManager} from "../../src/interfaces/ICommissionManager.sol";
 import {CommissionManagerTestBase} from "./CommissionManagerTestBase.sol";
 
@@ -189,7 +188,7 @@ contract CommissionManagerPoolsTest is CommissionManagerTestBase {
         cm.withdrawNativeCommission(1 wei);
     }
 
-    function test_tokenCommissionEntryPoints_revertOnZeroToken() public {
+    function test_tokenCommission_revertsOnZeroTokenAcrossPoolEntryPoints() public {
         vm.expectRevert(ICommissionManager.InvalidToken.selector);
         vm.prank(BRIDGE);
         cm.receiveTokenCommission(address(0), 1);
@@ -211,6 +210,7 @@ contract CommissionManagerPoolsTest is CommissionManagerTestBase {
     }
 
     function test_withdrawNativeCommission_failedRecipientRestoresPoolForBothForms() public {
+        // The mock token has no payable receiver, so native payouts to it fail.
         vm.prank(owner);
         CommissionManager rejecting = new CommissionManager(BRIDGE, address(token));
         uint256 amount = 1 ether;

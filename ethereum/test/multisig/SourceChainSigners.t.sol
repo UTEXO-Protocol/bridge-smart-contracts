@@ -37,7 +37,7 @@ contract MultisigSourceChainSignersTest is MultisigProxyTestBase {
 
     /// @dev `fundsOutCall` for a source chain with no registered enclave set
     ///      reverts UnknownSourceChain before touching the nonce/signatures.
-    function test_fundsOutCall_revertsForUnregisteredSourceChain() public {
+    function test_fundsOutCall_revertsOnUnknownSourceBeforeNonceCheck() public {
         IBridge.FundsOutParams memory p = _fundsOutParams();
         p.sourceChainId = 424_242; // not registered
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnknownSourceChain.selector, uint256(424_242)));

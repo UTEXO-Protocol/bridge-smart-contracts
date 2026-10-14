@@ -8,19 +8,11 @@ import {IRouteRegistry} from "../../src/interfaces/IRouteRegistry.sol";
 import {OutflowRateLimiter} from "../../src/libraries/OutflowRateLimiter.sol";
 import {RgbOutboundSettlementModule} from "../../src/settlement/RgbOutboundSettlementModule.sol";
 import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol";
+import {PayloadHelper} from "../helpers/PayloadHelper.sol";
 import {BridgeRebalanceTestBase} from "./BridgeRebalanceTestBase.sol";
 
 /// @notice Rebalance authorization, payload bounds and route checks.
 contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
-    /// @dev `len` bytes of 0x61: non-zero, so a 32-byte prefix decodes as a
-    ///      non-zero word.
-    function _filledBytes(uint256 len) private pure returns (bytes memory b) {
-        b = new bytes(len);
-        for (uint256 i = 0; i < len; i++) {
-            b[i] = 0x61;
-        }
-    }
-
     function test_rebalanceLiquidity_revertsForNonOwner() public {
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         vm.prank(user);
@@ -80,7 +72,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     function test_rebalanceLiquidity_revertsSettlementDataOutTooLong() public {
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
-        p.settlementDataOut = _filledBytes(max + 1);
+        p.settlementDataOut = PayloadHelper.filledBytes(max + 1);
         vm.prank(multisig);
         vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
         bridge.rebalanceLiquidity(p);
@@ -101,7 +93,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         // The credit leg shares the outbound cap, not the deposit one.
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
-        p.settlementDataIn = _filledBytes(max + 1);
+        p.settlementDataIn = PayloadHelper.filledBytes(max + 1);
         vm.prank(multisig);
         vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
         bridge.rebalanceLiquidity(p);
@@ -112,7 +104,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         // 32 bytes), so the credit leg records normally. The length is far
         // above the deposit cap: the rebalance credit leg is not bound by it.
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
-        p.settlementDataIn = _filledBytes(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH());
+        p.settlementDataIn = PayloadHelper.filledBytes(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH());
         assertGt(p.settlementDataIn.length, bridge.MAX_SETTLEMENT_DATA_IN_LENGTH());
         bytes32 expectedOperationId = _deriveRebalanceOpId(p);
 
@@ -216,7 +208,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         bridge.rebalanceLiquidity(p);
     }
 
-    /// @notice All three variable-size fields are bounded before any debit.
+    /// @notice Source and destination addresses and proof are bounded before any debit.
     function test_rebalanceLiquidity_revertsOnOversizedAddressOrProof() public {
         uint256 sourceBefore = bridge.lockedLiquidity(ARCH_CHAIN_ID);
         uint256 destinationBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
@@ -225,7 +217,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
             IBridge.RebalanceParams memory params =
                 field == 1 ? _rgbToArchParams(AMOUNT, rgbSeedOpId) : _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
             uint256 maximum = field == 2 ? bridge.MAX_PROOF_LENGTH() : bridge.MAX_ADDRESS_LENGTH();
-            bytes memory oversized = _filledBytes(maximum + 1);
+            bytes memory oversized = PayloadHelper.filledBytes(maximum + 1);
             if (field == 0) {
                 params.sourceAddress = string(oversized);
                 params.burnId = _deriveRebalanceBurnId(params);

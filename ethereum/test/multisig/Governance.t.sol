@@ -5,7 +5,6 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Vm} from "forge-std/Test.sol";
 import {CommissionManager} from "../../src/CommissionManager.sol";
-
 import {RouteRegistry} from "../../src/RouteRegistry.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {IBridgeProxy} from "../../src/interfaces/IBridgeProxy.sol";
@@ -776,7 +775,8 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         );
     }
 
-    function test_genericProposals_revertOnCalldataShorterThanSelectorInEveryLane() public {
+    function test_genericProposal_revertsOnCalldataShorterThanSelectorInEveryLane() public {
+        // Only a coded target is needed: short calldata fails before an adapter call.
         _setLzAdapter(address(token));
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = vm.getBlockTimestamp() + 1 days;

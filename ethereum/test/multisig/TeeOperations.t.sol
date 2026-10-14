@@ -5,7 +5,6 @@ import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {CommissionConfig, CommissionCurrency, CommissionSide} from "../../src/interfaces/ICommissionManager.sol";
 import {IMultisigProxy} from "../../src/interfaces/IMultisigProxy.sol";
 import {MultisigHelper} from "../helpers/MultisigHelper.sol";
-
 import {MultisigProxyTestBase} from "./MultisigProxyTestBase.sol";
 
 /// @notice TEE-authorized releases and rebalances validate signatures and nonces.
@@ -371,6 +370,8 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
         IBridge.RebalanceParams memory second = _rebalanceParams();
         second.amount = AMOUNT / 4;
         second.sourceBurnTxId = keccak256("nonce-second-rebalance");
+        // The first rebalance records RGB_OP_ID + 7; a fresh mint ID lets this
+        // payload succeed once it is signed with the current nonce.
         second.settlementDataIn = abi.encode(RGB_OP_ID + 8);
         second.burnId = _deriveRebalanceBurnId(second);
         bytes[] memory signatures =
@@ -390,7 +391,7 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
         assertEq(proxy.teeNonce(RGB_CHAIN_ID), 2, "fresh nonce advances the lane");
     }
 
-    function test_rebalanceCall_unknownSourcePrecedesInvalidNonce() public {
+    function test_rebalanceCall_revertsOnUnknownSourceBeforeNonceCheck() public {
         IBridge.RebalanceParams memory params = _rebalanceParams();
         params.sourceChainId = 424_242;
         vm.expectRevert(abi.encodeWithSelector(IMultisigProxy.UnknownSourceChain.selector, uint256(424_242)));

@@ -7,6 +7,8 @@ import {BridgeTestBase} from "./BridgeTestBase.sol";
 
 /// @notice Authenticated adapter deposits and source-chain identities.
 contract BridgeAdapterDepositsTest is BridgeTestBase {
+    uint256 private constant ADAPTER_SOURCE_CHAIN_ID = 137;
+
     function test_fundsInFromAdapter_revertsIfCallerIsNotLZAdapter() public {
         // No adapter set in setUp — caller is `user`.
         vm.prank(user);
@@ -23,10 +25,10 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         vm.prank(mockAdapter);
         usdt0.approve(address(bridge), AMOUNT);
 
-        uint256 customSrc = 137; // pretend Polygon
+        uint256 customSrc = ADAPTER_SOURCE_CHAIN_ID;
         bytes32 sourceSender = bytes32(uint256(uint160(user))); // authenticated far-chain sender
 
-        // Register the inbound Polygon -> RGB route selected by sourceChainId.
+        // Register the inbound adapter-source -> RGB route selected by sourceChainId.
         vm.prank(deployer);
         routeRegistry.setRoute(customSrc, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
 
@@ -66,7 +68,7 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         address adapter = makeAddr("shadowAdapter");
         vm.prank(multisig);
         bridge.setLZAdapter(adapter);
-        uint256 customSource = 137;
+        uint256 customSource = ADAPTER_SOURCE_CHAIN_ID;
         vm.prank(deployer);
         routeRegistry.setRoute(customSource, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
         usdt0.mint(adapter, AMOUNT);

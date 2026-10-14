@@ -256,8 +256,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
         return abi.encode(ids, amounts);
     }
 
-    /// @dev Valid strict-majority signer sets (2-of-2) used as filler in
-    ///      constructor-revert tests that target a non-threshold revert.
+    /// @dev Valid 2-of-2 enclave quorum for constructor tests.
     function _validEnc() internal view returns (address[] memory a) {
         a = new address[](2);
         a[0] = encA1;

@@ -19,10 +19,17 @@ contract BtcRelayCheckpointTest is Test {
 
     bytes32 internal checkpointCommitment;
 
+    uint256 private constant MIN_SOURCE_CONFIRMATIONS = 6;
+
+    uint256 private constant MAX_LATEST_CONFIRMATIONS = 1;
+
+    uint256 private constant MIN_CONFIRMATION_GAP = 5;
+
     function setUp() public {
         relay = new BtcRelay(_headerAtHeight(CHECKPOINT_HEIGHT), true);
         checkpointCommitment = relay.getTipCommitHash();
-        verifier = new RGBVerifier(address(relay), 6, 1, 5);
+        verifier =
+            new RGBVerifier(address(relay), MIN_SOURCE_CONFIRMATIONS, MAX_LATEST_CONFIRMATIONS, MIN_CONFIRMATION_GAP);
     }
 
     function _headerAtHeight(uint32 height) private pure returns (MainnetStoredBlockHeader memory header) {

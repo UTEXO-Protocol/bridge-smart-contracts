@@ -28,7 +28,7 @@ contract RgbSettlementModuleTest is Test {
 
     uint256 internal constant EVM_CHAIN_ID = 42161; // arbitrum
 
-    uint256 internal constant OTHER_RGB_CHAIN_ID = 1_000_002; // a second RGB network (e.g. mint/burn)
+    uint256 internal constant OTHER_RGB_CHAIN_ID = 1_000_002; // a second RGB network
 
     bytes32 internal constant TX_ID_1 = bytes32(uint256(100));
 

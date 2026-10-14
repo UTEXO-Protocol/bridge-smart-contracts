@@ -26,7 +26,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         assertEq(netIn, USER_DEPOSIT - tInQuote, "net in");
 
         // User fundsIn — TOKEN commission routed to CM; the RGB settlement
-        //    module records the inbound deposit.
+        // module records the inbound deposit.
 
         uint256 userBefore = token.balanceOf(user);
 
@@ -48,9 +48,9 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         assertEq(rgbModule.fundsInRecords(opId), netBridgedIn, "record stores net");
 
         // TEE-signed fundsOut — RGBVerifier checks the BtcRelay header, the
-        //    settlement module verifies the referenced mint exists for the exact
-        //    amount (no consumption), Bridge releases `netBridgedIn` from the
-        //    pool. 1% outbound commission to CM, the rest to recipient.
+        // settlement module verifies the referenced mint exists for the exact
+        // amount (no consumption), Bridge releases `netBridgedIn` from the
+        // pool. 1% outbound commission to CM, the rest to recipient.
 
         (IBridge.FundsOutParams memory params, uint256 burnId) =
             _buildFundsOut(opId, netBridgedIn, netBridgedIn, "", _validProof());
@@ -105,7 +105,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         proxy.executeProposal(proposalId, opData);
 
         // Final invariants: the nine-deposit safety reserve remains in the
-        //    bridge, CM is empty, and all commissions reached their receiver.
+        // bridge, CM is empty, and all commissions reached their receiver.
 
         assertEq(token.balanceOf(address(bridge)), netBridgedIn * 9, "nine-deposit safety reserve remains");
         assertEq(token.balanceOf(address(cm)), 0, "cm drained");

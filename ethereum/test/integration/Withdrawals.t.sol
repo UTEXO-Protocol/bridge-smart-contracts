@@ -229,17 +229,16 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         _assertReleaseUnchanged(burnId, beforeState);
 
         uint256 unpauseNonce = proxy.emergencyNonce();
-        assertEq(unpauseNonce, emergencyNonceBefore + 1, "guardian consumes emergency authorization.nonce");
-        bytes32 unpauseDigest = MultisigHelper.digestEmergencyUnpause(domainSep, unpauseNonce, authorization.deadline);
-        proxy.emergencyUnpause(unpauseNonce, authorization.deadline, 3, _signFed2of3(unpauseDigest));
+        uint256 unpauseDeadline = vm.getBlockTimestamp() + 1 hours;
+        assertEq(unpauseNonce, emergencyNonceBefore + 1, "guardian consumes emergency nonce");
+        bytes32 unpauseDigest = MultisigHelper.digestEmergencyUnpause(domainSep, unpauseNonce, unpauseDeadline);
+        proxy.emergencyUnpause(unpauseNonce, unpauseDeadline, 3, _signFed2of3(unpauseDigest));
         assertFalse(bridge.paused(), "federation resumed inflow");
         assertFalse(bridge.outflowPaused(), "federation resumed outflow");
         assertEq(
-            proxy.emergencyNonce(),
-            emergencyNonceBefore + 2,
-            "guardian and federation each consume a authorization.nonce"
+            proxy.emergencyNonce(), emergencyNonceBefore + 2, "guardian and federation each consume an emergency nonce"
         );
-        assertEq(proxy.proposalNonce(), proposalNonceBefore, "guardian does not consume proposal authorization.nonce");
+        assertEq(proxy.proposalNonce(), proposalNonceBefore, "emergency operations do not consume proposal nonce");
 
         proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
         _assertSuccessfulRelease(params, beforeState, outFee);

@@ -95,23 +95,23 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         vm.warp(vm.getBlockTimestamp() + 1); // one second later
 
         uint256 accrued = bridge.availableOutflow(RGB_CHAIN_ID);
+        uint256 policyBps = 100;
         uint256 expectedAccrued =
-            bridge.lockedLiquidity(RGB_CHAIN_ID) * 100 / bridge.BPS_DENOMINATOR() / bridge.BUCKET_REFILL_WINDOW();
+            bridge.lockedLiquidity(RGB_CHAIN_ID) * policyBps / bridge.BPS_DENOMINATOR() / bridge.BUCKET_REFILL_WINDOW();
         assertApproxEqRel(accrued, expectedAccrued, 1e12, "only one second of refill accrued");
         assertLt(accrued, cap, "not a fresh cap");
-        bytes32 altLatestCommit = keccak256("test-btc-short-gap-latest-commitment");
-        btcRelay.setBlock(LATEST_HEIGHT + 1, altLatestCommit, LATEST_CONFIRMATIONS);
-        bytes memory altProof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT + 1, altLatestCommit);
         bytes32[] memory ids = new bytes32[](1);
         ids[0] = _seedOpId;
 
-        uint256 currentCapacity = bridge.lockedLiquidity(RGB_CHAIN_ID) * 100 / bridge.BPS_DENOMINATOR();
+        uint256 currentCapacity = bridge.lockedLiquidity(RGB_CHAIN_ID) * policyBps / bridge.BPS_DENOMINATOR();
+        uint256 expectedRefillShares =
+            bridge.SHARE_UNIT() * policyBps / bridge.BPS_DENOMINATOR() / bridge.BUCKET_REFILL_WINDOW();
+        // The error reports shares rather than token units. The 1% share budget
+        // refills over one window, with its per-second rate rounded down.
+        // Rounded-down accrual leaves a full day of retry time for the whole cap.
         vm.expectRevert(
             abi.encodeWithSelector(
-                OutflowRateLimiter.TokenOutflowThrottled.selector,
-                uint256(86_400),
-                uint256(115_740_740_740),
-                address(usdt0)
+                OutflowRateLimiter.TokenOutflowThrottled.selector, uint256(1 days), expectedRefillShares, address(usdt0)
             )
         );
         vm.prank(multisig);
@@ -121,7 +121,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
             RGB_CHAIN_ID,
             SOURCE_CHAIN_ID,
             SRC_ADDR,
-            altProof,
+            _proof(),
             _settlementWithAmounts(ids, _one(_seedAmt)),
             SRC_BURN_TX_ID
         );

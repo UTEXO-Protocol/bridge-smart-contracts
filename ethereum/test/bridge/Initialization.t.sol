@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {Bridge} from "../../src/Bridge.sol";
 import {BridgeBaseUpgradeable} from "../../src/BridgeBaseUpgradeable.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
@@ -20,6 +21,14 @@ contract BridgeInitializationTest is BridgeTestBase {
         vm.expectRevert(BridgeBaseUpgradeable.InvalidTokenAddress.selector);
         _deployBridgeFromImplementation(
             implementation, address(0), address(routeRegistry), payable(address(cm)), address(0), 1, 1, deployer
+        );
+    }
+
+    function test_initialize_revertsOnZeroOwner() public {
+        Bridge implementation = new Bridge();
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableInvalidOwner.selector, address(0)));
+        _deployBridgeFromImplementation(
+            implementation, address(usdt0), address(routeRegistry), payable(address(cm)), address(0), 1, 1, address(0)
         );
     }
 

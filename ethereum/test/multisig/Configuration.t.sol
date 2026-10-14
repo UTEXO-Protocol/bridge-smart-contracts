@@ -632,9 +632,11 @@ contract MultisigConfigurationTest is MultisigProxyTestBase {
         proxy.executeProposal(id, abi.encode(RGB_CHAIN_ID, newSigners, newThreshold));
 
         address[] memory after_ = proxy.getEnclaveSigners(RGB_CHAIN_ID);
-        assertEq(after_.length, 2);
-        assertEq(after_[1], newSigner);
-        assertEq(proxy.enclaveThreshold(RGB_CHAIN_ID), newThreshold);
+        assertEq(after_.length, 2, "executed rotation installs two enclave signers");
+        assertEq(after_[1], newSigner, "executed rotation installs the proposed signer");
+        assertEq(
+            proxy.enclaveThreshold(RGB_CHAIN_ID), newThreshold, "executed rotation installs the proposed threshold"
+        );
     }
 
     function test_proposeSetTimelockDuration_updatesDurationAfterTimelock() public {
@@ -654,7 +656,7 @@ contract MultisigConfigurationTest is MultisigProxyTestBase {
         emit IMultisigProxy.TimelockDurationUpdated(newDuration);
         proxy.executeProposal(id, abi.encode(newDuration));
 
-        assertEq(proxy.timelockDuration(), newDuration);
+        assertEq(proxy.timelockDuration(), newDuration, "executed proposal updates the timelock duration");
     }
 
     /// @dev A SetTimelockDuration proposal below the immutable MIN_TIMELOCK
@@ -709,7 +711,7 @@ contract MultisigConfigurationTest is MultisigProxyTestBase {
 
         vm.warp(t + initialDuration + 1);
         proxy.executeProposal(id, abi.encode(newDuration));
-        assertEq(proxy.timelockDuration(), newDuration);
+        assertEq(proxy.timelockDuration(), newDuration, "timelock accepts the immutable minimum");
     }
 
     function test_constructor_preservesDistinctTimelockAndMinimum() public {

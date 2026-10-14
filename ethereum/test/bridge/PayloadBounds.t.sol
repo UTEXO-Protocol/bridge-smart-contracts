@@ -3,6 +3,7 @@ pragma solidity 0.8.35;
 
 import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
+import {PayloadHelper} from "../helpers/PayloadHelper.sol";
 import {MockSettlementModule} from "../mocks/MockSettlementModule.sol";
 import {BridgeTestBase} from "./BridgeTestBase.sol";
 
@@ -10,15 +11,7 @@ import {BridgeTestBase} from "./BridgeTestBase.sol";
 contract BridgePayloadBoundsTest is BridgeTestBase {
     /// @dev Build an ASCII string of exactly `len` bytes (for address-length caps).
     function _str(uint256 len) private pure returns (string memory) {
-        return string(_bytesOfLength(len));
-    }
-
-    /// @dev Build a `bytes` blob of exactly `len` bytes.
-    function _bytesOfLength(uint256 len) private pure returns (bytes memory b) {
-        b = new bytes(len);
-        for (uint256 i = 0; i < len; i++) {
-            b[i] = 0x61;
-        }
+        return string(PayloadHelper.filledBytes(len));
     }
 
     function test_fundsIn_revertsOnDestinationAddressTooLong() public {
@@ -49,7 +42,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
     function test_fundsIn_revertsOnSettlementDataTooLong() public {
         uint256 max = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH();
         assertLt(max + 1, bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH(), "inbound cap is below outbound cap");
-        bytes memory tooLong = _bytesOfLength(max + 1);
+        bytes memory tooLong = PayloadHelper.filledBytes(max + 1);
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
         vm.prank(user);
@@ -62,7 +55,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
         // 32 bytes read as uint256), so the deposit clears the guard and
         // records normally under the bridge-derived operationId.
         uint256 max = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH();
-        bytes memory atMax = _bytesOfLength(max);
+        bytes memory atMax = PayloadHelper.filledBytes(max);
 
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, atMax);
@@ -96,7 +89,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
-        bytes memory tooLong = _bytesOfLength(max + 1);
+        bytes memory tooLong = PayloadHelper.filledBytes(max + 1);
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
         vm.prank(multisig);
@@ -183,7 +176,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         uint256 max = bridge.MAX_PROOF_LENGTH();
-        bytes memory tooLong = _bytesOfLength(max + 1);
+        bytes memory tooLong = PayloadHelper.filledBytes(max + 1);
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.ProofTooLong.selector, max + 1, max));
         vm.prank(multisig);

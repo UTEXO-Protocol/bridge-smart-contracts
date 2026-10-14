@@ -12,6 +12,12 @@ import {MultisigProxyTestBase} from "./MultisigProxyTestBase.sol";
 
 /// @notice Route and registry proposals dispatch through the current Bridge.
 contract MultisigRoutesTest is MultisigProxyTestBase {
+    uint256 private constant NEW_SOURCE_CHAIN_ID = 1234;
+
+    uint256 private constant NEW_DESTINATION_CHAIN_ID = 5678;
+
+    uint256 private constant MISMATCHED_DESTINATION_CHAIN_ID = 9999;
+
     function _proposeSetRoute(uint256 srcId, uint256 dstId, bool enabled, address verifier, address module)
         private
         returns (bytes32 id)
@@ -37,9 +43,9 @@ contract MultisigRoutesTest is MultisigProxyTestBase {
     }
 
     function test_proposeSetRoute_addsBrandNewRoute() public {
-        // Register a fresh (1234, 5678) route via governance.
-        uint256 newSrc = 1234;
-        uint256 newDst = 5678;
+        // Register a previously unconfigured route via governance.
+        uint256 newSrc = NEW_SOURCE_CHAIN_ID;
+        uint256 newDst = NEW_DESTINATION_CHAIN_ID;
         bytes32 id = _proposeSetRoute(newSrc, newDst, true, address(rgbVerifier), address(rgbModule));
 
         vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
@@ -88,22 +94,30 @@ contract MultisigRoutesTest is MultisigProxyTestBase {
     }
 
     function test_proposeSetRoute_revertsOnZeroVerifier() public {
-        bytes32 id = _proposeSetRoute(1234, 5678, true, address(0), address(rgbModule));
+        bytes32 id =
+            _proposeSetRoute(NEW_SOURCE_CHAIN_ID, NEW_DESTINATION_CHAIN_ID, true, address(0), address(rgbModule));
 
         vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
         // Registry guard: ZeroFinalityVerifier propagates up through proxy.
         vm.expectRevert(IRouteRegistry.ZeroFinalityVerifier.selector);
-        proxy.executeProposal(id, abi.encode(uint256(1234), uint256(5678), true, address(0), address(rgbModule)));
+        proxy.executeProposal(
+            id, abi.encode(NEW_SOURCE_CHAIN_ID, NEW_DESTINATION_CHAIN_ID, true, address(0), address(rgbModule))
+        );
     }
 
     function test_proposeSetRoute_revertsOnDataMismatch() public {
-        bytes32 id = _proposeSetRoute(1234, 5678, true, address(rgbVerifier), address(rgbModule));
+        bytes32 id = _proposeSetRoute(
+            NEW_SOURCE_CHAIN_ID, NEW_DESTINATION_CHAIN_ID, true, address(rgbVerifier), address(rgbModule)
+        );
 
         vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
         vm.expectRevert(IMultisigProxy.DataMismatch.selector);
         // Wrong destChainId in opData.
         proxy.executeProposal(
-            id, abi.encode(uint256(1234), uint256(9999), true, address(rgbVerifier), address(rgbModule))
+            id,
+            abi.encode(
+                NEW_SOURCE_CHAIN_ID, MISMATCHED_DESTINATION_CHAIN_ID, true, address(rgbVerifier), address(rgbModule)
+            )
         );
     }
 

@@ -108,15 +108,20 @@ contract CommissionManagerCalculationTest is CommissionManagerTestBase {
         assertEq(net, 40_000);
     }
 
-    function test_calculateCommission_revertsWhenFlatFeeConsumesQuotedAmount() public {
+    function test_calculateFundsInCommission_revertsWhenFlatFeeConsumesQuotedAmount() public {
         uint256 baseFee = 1000;
-        for (uint256 side; side < 2; ++side) {
-            vm.prank(owner);
-            cm.setGlobalDefaults(0, baseFee, 100, CommissionSide(side), CommissionCurrency.TOKEN);
-            vm.expectRevert(abi.encodeWithSelector(ICommissionManager.ZeroNetAmount.selector, baseFee, baseFee));
-            if (side == 0) cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), baseFee);
-            else cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), baseFee);
-        }
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, baseFee, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.ZeroNetAmount.selector, baseFee, baseFee));
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), baseFee);
+    }
+
+    function test_calculateFundsOutCommission_revertsWhenFlatFeeConsumesQuotedAmount() public {
+        uint256 baseFee = 1000;
+        vm.prank(owner);
+        cm.setGlobalDefaults(0, baseFee, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
+        vm.expectRevert(abi.encodeWithSelector(ICommissionManager.ZeroNetAmount.selector, baseFee, baseFee));
+        cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), baseFee);
     }
 
     function test_calculateFundsInCommission_revertsWhenNativeConversionRoundsToZero() public {
