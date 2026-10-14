@@ -104,11 +104,11 @@
     "review_reason": "The sequencer check intentionally consumes answer and startedAt; it checks initialization, future timestamps, up status and the recovery grace period."
   },
   {
-    "id": "edb2302b31eaa7933bf7c85d23dd95f0b188a5772a254e03dece8c62ca2fa87b",
+    "id": "6f936fcff7b9a712342e58c62e224bc9dca65b8c0da974e8bb5e0bdc57b24813",
     "check": "unused-return",
     "impact": "Medium",
     "confidence": "Medium",
-    "description": "Bridge._fundsIn(address,bytes32,uint256,uint256,uint256,string,bytes,bool) (src/Bridge.sol#888-1055) ignores return value by (tokenCommission,nativeCommission,None) = commissionManager.calculateFundsInCommission(sourceChainId,destinationChainId,TOKEN,amount) (src/Bridge.sol#915-916)\n",
+    "description": "Bridge._fundsIn(address,bytes32,uint256,uint256,uint256,string,bytes,bool) (src/Bridge.sol#889-1056) ignores return value by (tokenCommission,nativeCommission,None) = commissionManager.calculateFundsInCommission(sourceChainId,destinationChainId,TOKEN,amount) (src/Bridge.sol#916-917)\n",
     "review_reason": "The nominal net amount is intentionally discarded; the bridge derives its credited net from the measured token receipt minus token commission."
   },
   {

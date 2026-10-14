@@ -56,7 +56,3 @@ To inspect results including these exclusions:
 ```sh
 slither . --fail-none --show-ignored-findings
 ```
-
-All reentrancy findings remain visible, including the CommissionManager rotation
-in MultisigProxy and intermediate liquidity reads during Bridge settlement
-callbacks. Governance hardening and callback tests belong in separate PRs.

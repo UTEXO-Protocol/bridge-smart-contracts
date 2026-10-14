@@ -4,7 +4,7 @@ pragma solidity 0.8.35;
 import {Script, console2} from "forge-std/Script.sol";
 import {MultisigProxy} from "../../src/MultisigProxy.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
-import {MultisigHelper} from "../../test/mocks/MultisigHelper.sol";
+import {MultisigHelper} from "../../test/helpers/MultisigHelper.sol";
 
 /// @title MultisigProposeSetRoute
 /// @notice Signs and submits a `proposeSetRoute(...)` federation proposal

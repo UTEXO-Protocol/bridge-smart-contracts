@@ -3,6 +3,7 @@ pragma solidity 0.8.35;
 
 import {Bridge} from "../../src/Bridge.sol";
 
+/// @notice Compatible Bridge upgrade fixture used to verify preserved proxy state.
 contract BridgeV2Mock is Bridge {
     uint256 public upgradeValue;
 
