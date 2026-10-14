@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-/// @dev Records calls so stale dispatch cannot hide behind a target-side revert.
+/// @notice Records dispatch so stale targets cannot hide behind a target-side revert.
 contract GovernanceTargetMock {
     address public routeRegistry;
     address public commissionManager;
