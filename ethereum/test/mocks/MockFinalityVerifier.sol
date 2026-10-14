@@ -4,12 +4,7 @@ pragma solidity 0.8.35;
 import {IFinalityVerifier} from "../../src/interfaces/IFinalityVerifier.sol";
 import {FundsOutContext} from "../../src/interfaces/RouteTypes.sol";
 
-/// @title MockFinalityVerifier
-/// @notice Test stub for `IFinalityVerifier`. The `verify` function is
-///         declared `view` by the interface, so this mock cannot record
-///         call counts on its own — but the test harness uses combined
-///         observations on the paired `MockSettlementModule` to prove
-///         that `verify` ran before (and authorised) the module call.
+/// @notice Configurable view verifier that accepts proofs or raises a distinct error.
 contract MockFinalityVerifier is IFinalityVerifier {
     error MockVerifierForcedRevert();
 

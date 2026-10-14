@@ -4,7 +4,7 @@ pragma solidity 0.8.35;
 import {Script, console2} from "forge-std/Script.sol";
 import {MultisigProxy} from "../../src/MultisigProxy.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
-import {MultisigHelper} from "../../test/mocks/MultisigHelper.sol";
+import {MultisigHelper} from "../../test/helpers/MultisigHelper.sol";
 
 /// @notice Minimal Bridge view used to derive the canonical funds-out replay
 ///         key from the same domain fields as `Bridge._deriveBurnId`.

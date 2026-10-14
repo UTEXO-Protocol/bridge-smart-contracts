@@ -28,8 +28,6 @@ No TEE verification, no destination chain field, **no commission integration**, 
 
 Production bridge for UTEXO. Runs behind the custom ERC-1967 `BridgeProxy` and implements `IBridge`. Route-agnostic: all per-route logic (finality verification, settlement bookkeeping) is delegated to plugins registered in `RouteRegistry`.
 
-`BridgeProxy` receives initialization calldata in its constructor, so the proxy is never left claimable. The implementation constructor disables initialization. `initialize` stores the token, registry, CommissionManager, optional LayerZero adapter, non-zero amount floors, and initial owner in proxy storage. Federation may retune mutable settings through the timelocked owner path. The bridge's own chain identifier is `block.chainid` — chain IDs are `uint256` throughout the stack (real EVM chain IDs for EVM legs; backend-assigned IDs in a reserved namespace above `2^32` for non-EVM endpoints, e.g. RGB = `1_000_001`).
-
 Amount floors must satisfy `minFundsInAmount >= minFundsOutAmount`. Initialization and both setters enforce this ordering; equal floors and different floors with a higher inbound minimum are allowed. Setters compare against the counterpart's current value at execution, so a pending governance proposal can revert if another proposal changed that value during the timelock. When changing both floors, raise the inbound floor first when necessary; lower the outbound floor first when necessary. These are gross operation minima: token commission can still reduce a minimum deposit's net amount below the withdrawal floor, so frontend and source-side tooling must account for fees separately.
 
 ### BridgeProxy (`src/BridgeProxy.sol`)
@@ -235,13 +233,19 @@ forge build
 ## Commands
 
 ```sh
-forge build                              # compile
-forge test                               # run all tests
-forge test --match-path "test/Bridge.t.sol"  # run one file
-forge test -vvv                          # with traces
-forge coverage                           # coverage report
-forge clean                              # delete out/ + cache/
+forge build                                      # compile
+forge test                                       # run all tests
+forge test --match-path 'test/bridge/Deposits.t.sol' # run one suite
+forge test -vvv                                  # with traces
+# Coverage summary for project-owned contracts, excluding the third-party relay tree.
+forge coverage --ir-minimum --skip script --exclude-tests --no-match-coverage '^src/btc_relay/'
+forge clean                                      # delete out/ + cache/
 ```
+
+See [TESTING.md](TESTING.md) for suite organization, test conventions,
+reproducible fuzzing and LCOV export. Coverage requires the minimal IR mode
+because legacy code generation without via-IR exceeds stack-depth limits in
+this project.
 
 Slither runs as a separate CI job, fails on High findings and publishes a report
 with Medium and lower findings remaining advisory. See [SLITHER.md](SLITHER.md)
@@ -459,25 +463,24 @@ script/
                                  MultisigProposeUpgradeBridge
 
 test/
-  BridgeTestBase.sol           — shared Bridge fixture and canonical id helpers
-  BridgeProxy.t.sol            — initialization, ownership handoff, compatibility, and upgrade-state tests
-  Bridge.t.sol                 — Bridge construction, configuration, deposits and release validation
-  BridgeOutflow.t.sol          — isolated liquidity, outflow limiting and fee-on-transfer tests
-  BridgeRebalance.t.sol        — rebalance accounting and shared burnId namespace tests
-  MinimalBridge.t.sol          — MinimalBridge tests
-  RouteRegistry.t.sol          — RouteRegistry tests (setRoute, dispatch, enabled gating)
-  RgbSettlementModule.t.sol    — canonical RGB ledger tests
-  RgbRejectList.t.sol          — reject list append, latest-entry-wins, paging, client sync, appender rotation and ownership tests
-  CommissionManager.t.sol      — CommissionManager tests (rules, pools, withdrawals, ETH/USD feed)
-  MultisigProxy.t.sol          — MultisigProxy tests (EIP-712, bitmap sigs, proposals incl. SetRoute / UpdateRouteRegistry)
-  Integration.t.sol            — End-to-end: user → Bridge → RouteRegistry → TEE multisig → fundsOut → CM withdrawal
-  mocks/
-    MockERC20.sol              — Mintable ERC-20 for tests
-    MockBtcRelay.sol           — Mock BtcRelay for tests
-    MockAggregatorV3.sol       — Mock Chainlink aggregator for tests
-    MockFinalityVerifier.sol   — Mock verifier for RouteRegistry / Bridge tests
-    MockSettlementModule.sol   — Mock settlement module for RouteRegistry / Bridge tests
-    MultisigHelper.sol         — EIP-712 digest builders and signAll helper
+  bridge/                      — deposits, releases, liquidity, limits, fees, rebalances and callbacks
+  multisig/                    — configuration, TEE operations, proposals, signatures and LayerZero releases
+  commission/                  — fee rules, quotes, oracle checks and commission pools
+  integration/                 — EVM contract interactions with mocked Bitcoin finality
+  proxy/                       — initialization, compatibility, ownership handoff and upgrade state
+  settlement/                  — RGB records, outbound settlement and reject lists
+  registry/                    — route configuration and dispatch
+  verifiers/                   — RGB finality validation
+  btc_relay/                   — checkpoint validation
+  libraries/                   — token buckets and rolling outflow accounting
+  helpers/                     — deployment, EIP-712 signing, library and script harnesses
+  mocks/                       — external counterparties, adversarial implementations and observation harnesses
+
+docs/
+  README.md                    — project overview and operational commands
+  TESTING.md                   — test conventions, suite selection and coverage
+  SLITHER.md                   — static analysis setup and reviewed exclusions
+  Storage Layout.md            — storage layout reference
 
 lib/                           — Foundry submodules (forge-std, openzeppelin-contracts)
 foundry.toml                   — Foundry configuration

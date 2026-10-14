@@ -2,17 +2,11 @@
 pragma solidity 0.8.35;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
 import {ISettlementModule} from "../../src/interfaces/ISettlementModule.sol";
 import {FundsInContext, FundsOutContext} from "../../src/interfaces/RouteTypes.sol";
 
-/// @title MockSettlementModule
-/// @notice Test stub for `ISettlementModule`. Records call counts and the
-///         relevant fields from the most recent invocation so the test
-///         harness can assert (a) the registry dispatcher invoked the
-///         module, (b) the canonical `ctx` / `settlementData` were
-///         forwarded byte-for-byte, and (c) a reverting verifier
-///         short-circuits the module call (counters stay at 0).
+/// @notice Records call counts, selected context fields and complete settlement data.
+/// @dev Distinct forced errors distinguish module dispatch from verifier rejection.
 contract MockSettlementModule is ISettlementModule {
     error MockModuleForcedRevert();
 
