@@ -86,8 +86,11 @@ forge coverage --ir-minimum --skip script --exclude-tests --no-match-coverage '^
 All test suites run. `--exclude-tests` removes test/support code from the report;
 `--skip script` avoids compiling unrelated deployment and interaction entrypoints.
 Scripts imported by a test harness remain available as dependencies.
-`--no-match-coverage` excludes the complete vendored `src/btc_relay/` tree
-from summary and LCOV metrics. Its existing tests still run; our RGB verifier
+`--no-match-coverage` deliberately excludes the complete third-party
+`src/btc_relay/` tree from summary and LCOV metrics. These percentages measure
+project-owned contracts, not the full set of deployed contracts: the project
+also deploys `BtcRelay`. This scope choice does not establish the relay's test
+completeness or audit status. Its existing tests still run; our RGB verifier
 and bridge integration code remain included.
 
 Ordinary `forge coverage` disables the optimizer and via-IR pipeline and hits
@@ -95,7 +98,13 @@ stack-depth limits in this project. The minimal IR mode runs coverage without
 changing production contracts. The test fixtures use memory snapshots and small
 execution helpers to compile in this mode.
 
-Minimal IR can produce imprecise source mappings and missing-anchor warnings.
+Minimal IR can produce imprecise source mappings.
+Empty hooks such as `NullVerifier.verify` and
+`NullSettlementModule.beforeFundsOut` can retain zero counters despite direct
+and route-level calls. Inherited pause wrappers and `chainid` assembly can also
+have missed line anchors despite successful behavior tests.
+`BridgeBaseUpgradeable.renounceOwnership` is an unused inherited implementation:
+the production `Bridge` overrides it without calling the base body.
 Use the report to investigate untested paths; it is not a release safety proof
 or a strict percentage gate. CI runs the test suite without a coverage threshold.
 
