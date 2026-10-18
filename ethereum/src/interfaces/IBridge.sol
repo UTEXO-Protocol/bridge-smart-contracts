@@ -385,6 +385,8 @@ interface IBridge {
     ///      Gated on `whenOutflowNotPaused` only: an inflow-only pause is
     ///      documented as "withdrawals stay open for liquidity migration", and
     ///      this is exactly a liquidity migration.
+    ///      The destination must not be the local chain (`block.chainid`);
+    ///      use `fundsOut` for physical token releases on this chain.
     function rebalanceLiquidity(RebalanceParams calldata params) external;
 
     // =========================================================================

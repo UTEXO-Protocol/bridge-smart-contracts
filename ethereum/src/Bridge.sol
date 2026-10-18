@@ -798,10 +798,12 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (params.burnId != expectedBurnId) revert InvalidBurnId(params.burnId, expectedBurnId);
     }
 
-    function _validateRebalanceParams(RebalanceParams calldata params) private pure {
+    function _validateRebalanceParams(RebalanceParams calldata params) private view {
         if (params.amount == 0) revert ZeroAmount();
         if (params.sourceChainId == 0) revert InvalidSourceChainId();
-        if (params.destinationChainId == 0) revert InvalidDestinationChainId();
+        if (params.destinationChainId == 0 || params.destinationChainId == block.chainid) {
+            revert InvalidDestinationChainId();
+        }
         if (params.sourceChainId == params.destinationChainId) revert RebalanceSameChain(params.sourceChainId);
         if (params.sourceBurnTxId == bytes32(0)) revert ZeroSourceBurnTxId();
 
