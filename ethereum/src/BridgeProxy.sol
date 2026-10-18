@@ -15,7 +15,6 @@ import {IBridgeProxy} from "./interfaces/IBridgeProxy.sol";
 ///      by implementations. Implementations must not expose UUPS upgrade entrypoints.
 contract BridgeProxy is ERC1967Proxy, IBridgeProxy {
     /// @dev Maximum upgrade initialization bytes, including the selector.
-    ///      Keep aligned with MultisigProxy's proposal/execution limit.
     uint256 private constant _MAX_UPGRADE_CALLDATA_LENGTH = 4096;
 
     /// @dev ERC-7201 openzeppelin.storage.Ownable namespace, with address _owner
@@ -67,8 +66,8 @@ contract BridgeProxy is ERC1967Proxy, IBridgeProxy {
     }
 
     function _requireCompatibleImplementation(address candidate) private view {
-        // Pointing the implementation slot at this proxy would make every
-        // fallback recurse into itself and permanently brick the Bridge.
+        // A self-reference would make delegated calls recurse into this proxy.
+        // Direct proxy upgrade calls would still remain available to the stored owner.
         if (candidate == address(this)) revert IncompatibleBridgeImplementation(candidate);
 
         // Implementations must expose a direct-call-only compatibility marker.

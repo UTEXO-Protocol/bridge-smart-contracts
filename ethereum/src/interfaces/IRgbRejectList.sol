@@ -34,7 +34,7 @@ interface IRgbRejectList {
     error EmptyBatch();
 
     /// @notice An entry carried the zero operation id, which no RGB operation
-    ///         has; rejected to catch uninitialised input.
+    ///         has; rejected to catch uninitialized input.
     error InvalidOpId();
 
     /// @notice The caller of `append` is not the appender.

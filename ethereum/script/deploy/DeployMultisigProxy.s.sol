@@ -54,9 +54,11 @@ contract DeployMultisigProxy is Script {
         console2.log("lzAdapter (proxy):        ", proxy.lzAdapter());
         console2.log("");
         console2.log("Next steps:");
-        console2.log("  1) Transfer Bridge ownership to MultisigProxy.");
-        console2.log("  2) Transfer CommissionManager ownership to MultisigProxy.");
-        console2.log("  3) Once the LayerZero adapter is deployed:");
+        console2.log("  1) Start ownership transfers for Bridge, CommissionManager and RouteRegistry.");
+        console2.log("  2) Propose and execute acceptOwnership() through each matching governance lane.");
+        console2.log("     transferOwnership() alone only sets pendingOwner.");
+        console2.log("  3) Configure routes and verify their plugin addresses.");
+        console2.log("  4) Once the LayerZero adapter is deployed:");
         console2.log("     a) propose Bridge.setLZAdapter(adapter) via proposeAdminExecute");
         console2.log("     b) propose MultisigProxy.lzAdapter via proposeUpdateLZAdapter");
     }

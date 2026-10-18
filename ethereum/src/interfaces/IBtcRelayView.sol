@@ -13,7 +13,7 @@ interface IBtcRelayView {
     /// @notice Returns the current tip block height.
     function getBlockheight() external view returns (uint32);
 
-    /// @notice Verify that a block header at the given height matches the commitment hash.
+    /// @notice Verifies that a block header at the given height matches the commitment hash.
     /// @param height                 Bitcoin block height.
     /// @param commitmentHash         keccak256 commitment of the StoredBlockHeader.
     /// @return confirmations  Number of confirmations (tip - height + 1). Reverts if unknown.

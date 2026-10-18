@@ -10,10 +10,7 @@ import {IBridgeProxy} from "./interfaces/IBridgeProxy.sol";
 import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
 
-/// @notice Minimal view of the LayerZero adapter's outbound entry point. The
-///         adapter itself lives in the `utexo-usdt0-contracts` repo; this
-///         interface pins the ABI `lzFundsOut` calls. Keep it in sync with
-///         `UtexoLZAdapter.sendOut`.
+/// @notice LayerZero adapter entry point used by `lzFundsOutCall`.
 interface ILZAdapterSendOut {
     function sendOut(uint32 dstEid, bytes32 recipient, uint256 amount, uint256 minAmountLD, bytes calldata extraOptions)
         external
@@ -45,17 +42,16 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     ///         until then (closes adapter-execute by default).
     address public lzAdapter;
 
-    /// @notice Enclave signer sets indexed by source chain.
-    /// @dev The signed sourceChainId selects the set used to authorize the operation.
+    /// @dev Enclave signer sets indexed by source chain.
+    ///      The signed sourceChainId selects the set used to authorize the operation.
     mapping(uint256 sourceChainId => address[]) private _enclaveSigners;
 
     /// @notice Per-source-chain enclave quorum. `0` means the source chain is
-    ///         not registered — used as the existence guard on the release path.
+    ///         not registered; releases and rebalances reject unknown source chains.
     mapping(uint256 sourceChainId => uint256) public enclaveThreshold;
 
-    /// @notice Registered enclave source chains, for enumeration and for
-    ///         checking federation candidates against every enclave set.
-    ///         Bounded by `MAX_ENCLAVE_SOURCE_CHAINS`.
+    /// @dev Registered source chains, used to check federation candidates against all enclave sets.
+    ///      Bounded by `MAX_ENCLAVE_SOURCE_CHAINS`.
     uint256[] private _enclaveSourceChains;
 
     address[] private _federationSigners;
@@ -68,11 +64,11 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     /// @notice Per-source-chain nonce shared by fundsOutCall, lzFundsOutCall and rebalanceCall.
     mapping(uint256 sourceChainId => uint256) public teeNonce;
 
-    /// @notice Federation proposals.
+    /// @dev Federation proposals.
     mapping(bytes32 => Proposal) private _proposals;
 
     /// @notice Sequential nonce for the regular federation proposal lane
-    ///         (`_propose` and all typed proposal entrypoints).
+    ///         (shared by bound and unbound proposal entrypoints).
     uint256 public proposalNonce;
 
     /// @notice Sequential nonce shared by federation emergency pause/unpause
@@ -123,10 +119,10 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     uint256 public constant SELECTOR_LENGTH = 4;
 
     /// @dev Maximum upgrade initialization bytes, including the selector.
-    ///      Keep aligned with BridgeProxy's direct upgrade limit.
+    ///      BridgeProxy enforces the same limit when executing the upgrade.
     uint256 private constant _MAX_UPGRADE_CALLDATA_LENGTH = 4096;
 
-    /// @notice CommissionManager withdrawal selectors that generic raw-call
+    /// @dev CommissionManager withdrawal selectors that generic raw-call
     ///         paths are NOT allowed to call.
     ///         The asset layer always pays CM's immutable recipient, while this
     ///         procedural guard keeps standard withdrawals on the dedicated,
@@ -137,7 +133,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     bytes4 private constant _SEL_WITHDRAW_ALL_TOKEN = ICommissionManager.withdrawAllTokenCommission.selector;
     bytes4 private constant _SEL_WITHDRAW_ALL_NATIVE = ICommissionManager.withdrawAllNativeCommission.selector;
 
-    /// @notice Bridge value-moving selectors reserved exclusively for the typed
+    /// @dev Bridge value-moving selectors reserved exclusively for the typed
     ///         enclave entrypoints. They are rejected from EVERY generic raw-call
     ///         lane, independent of its configured target, so aliasing a mutable
     ///         CommissionManager / RouteRegistry / adapter target to Bridge cannot
@@ -145,15 +141,15 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     bytes4 private constant _SEL_FUNDS_OUT = IBridge.fundsOut.selector;
     bytes4 private constant _SEL_REBALANCE_LIQUIDITY = IBridge.rebalanceLiquidity.selector;
 
-    /// @notice Proxy-control selectors are reserved for dedicated typed,
+    /// @dev Proxy-control selectors are reserved for dedicated typed,
     ///         timelocked operations and blocked from every generic lane.
     bytes4 private constant _SEL_UPGRADE_TO_AND_CALL = IBridgeProxy.upgradeToAndCall.selector;
 
-    /// @notice CommissionManager rotation is reserved for the typed operation,
+    /// @dev CommissionManager rotation is reserved for the typed operation,
     ///         which keeps the Bridge and proxy targets synchronized atomically.
     bytes4 private constant _SEL_SET_COMMISSION_MANAGER = IBridge.setCommissionManager.selector;
 
-    /// @notice Ownership transfer is reserved for the typed managed-target
+    /// @dev Ownership transfer is reserved for the typed managed-target
     ///         operation and rejected from every generic raw-call lane.
     bytes4 private constant _SEL_TRANSFER_OWNERSHIP = bytes4(keccak256("transferOwnership(address)"));
 
@@ -163,7 +159,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     bytes32 private constant _DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
-    // TEE — typed enclave release operations
+    // TEE — typed enclave releases and rebalances
     bytes32 private constant _TEE_FUNDS_OUT_TYPEHASH = keccak256(
         "TeeFundsOut(address recipient,uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,bytes proof,bytes settlementData,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)"
     );
@@ -174,7 +170,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         "TeeRebalance(uint256 amount,uint256 burnId,uint256 sourceChainId,uint256 destinationChainId,string sourceAddress,string destinationAddress,bytes proof,bytes settlementDataOut,bytes settlementDataIn,bytes32 sourceBurnTxId,uint256 nonce,uint256 deadline)"
     );
 
-    // Federation propose — typed EIP-712 structs per operation (Bridge side)
+    // Federation propose — Bridge and governance EIP-712 types
     bytes32 private constant _PROPOSE_ADMIN_EXECUTE_TYPEHASH =
         keccak256("ProposeAdminExecute(address target,bytes4 selector,bytes callData,uint256 nonce,uint256 deadline)");
     bytes32 private constant _PROPOSE_UPDATE_ENCLAVE_SIGNERS_TYPEHASH = keccak256(
@@ -463,7 +459,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     /// @dev Release leg of `lzFundsOutCall`, isolated in its own frame to keep
     ///      the caller free of stack-too-deep errors. Forces the Bridge recipient to the
     ///      adapter (never taken from `params`) and returns the balance the
-    ///      adapter ACTUALLY received, so the release and the onward send are
+    ///      adapter actually received, so the release and the onward send are
     ///      bound on-chain.
     function _releaseToAdapter(LzFundsOutParams calldata params, address adapter) private returns (uint256 delivered) {
         IBridge.FundsOutParams memory releaseParams = IBridge.FundsOutParams({
@@ -546,9 +542,8 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
 
         emergencyNonce++;
 
-        // Emergency freeze of BOTH inflow and outflow — no timelock, federation
-        // signatures only. Also halts the enclave/TEE release path (it routes
-        // through Bridge.fundsOut, now gated by whenOutflowNotPaused).
+        // Federation emergency pause stops deposits, releases and rebalances.
+        // No proposal or timelock is required.
         _emergencyPauseBridge();
 
         emit EmergencyPaused(nonce, fedBitmap);
@@ -783,8 +778,6 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         bytes4 selector;
         assembly { selector := calldataload(callData.offset) }
 
-        // Standard withdrawals use the dedicated typed operations; reject them
-        // on this generic path up front (recipient safety remains in CM).
         _requireAllowedGenericSelector(selector);
 
         address target = commissionManager;
@@ -832,6 +825,8 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
             OperationType.AdminExecuteRouteRegistry, callData, nonce, deadline, structHash, fedBitmap, fedSigs, target
         );
     }
+
+    // --- CommissionManager withdrawals and rotation ---
 
     /// @inheritdoc IMultisigProxy
     function proposeWithdrawTokenCommissionCM(
@@ -1035,6 +1030,8 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         );
     }
 
+    // --- Managed ownership and planned pauses ---
+
     /// @inheritdoc IMultisigProxy
     function proposeTransferManagedOwnership(
         address target,
@@ -1194,7 +1191,8 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     // Internal — propose helper
     // =========================================================================
 
-    /// @dev Common logic for all propose functions.
+    /// @dev Stores a proposal without a dynamic target snapshot; bound lanes use
+    ///      `_proposeForTarget`.
     function _propose(
         OperationType opType,
         bytes memory opData,
@@ -1341,9 +1339,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
             emergencyGuardian = newGuardian;
             emit EmergencyGuardianUpdated(oldGuardian, newGuardian);
         } else if (opType == OperationType.AdminExecuteCommissionManager) {
-            // opData = raw CommissionManager callData. Enforce (again, at the
-            // execution boundary) that standard withdrawals use their typed
-            // governance operations.
+            // Recheck generic selector restrictions at execution.
             bytes4 selector = _firstSelector(opData);
             _requireAllowedGenericSelector(selector);
             (bool ok, bytes memory ret) = target.call(opData);
@@ -1604,9 +1600,8 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         }
     }
 
-    /// @dev First 4 bytes of `data` as a selector, or `0x00000000` if `data` is
-    ///      shorter than a selector (such a payload can never be a withdrawal
-    ///      call and the downstream raw call rejects it anyway).
+    /// @dev Returns the first four bytes, or zero when `data` is shorter than a selector.
+    ///      Callers enforce any payload-length requirement separately.
     function _firstSelector(bytes memory data) private pure returns (bytes4 selector) {
         if (data.length >= SELECTOR_LENGTH) {
             assembly { selector := mload(add(data, 0x20)) }

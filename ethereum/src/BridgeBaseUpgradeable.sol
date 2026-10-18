@@ -13,7 +13,7 @@ abstract contract BridgeBaseUpgradeable is Ownable2StepUpgradeable, PausableUpgr
 
     /// @notice The accepted ERC-20 token, set during initialization.
     address public TOKEN;
-    /// @notice Withdrawal pause, independent of the Pausable inflow flag.
+    /// @dev Withdrawal pause, independent of the Pausable inflow flag.
     bool private _outflowPaused;
 
     /// @dev Reserved for future BridgeBaseUpgradeable state variables.
@@ -82,7 +82,7 @@ abstract contract BridgeBaseUpgradeable is Ownable2StepUpgradeable, PausableUpgr
         }
     }
 
-    /// @notice Always reverts; ownership must remain transferable.
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() public view virtual override onlyOwner {
         revert RenounceOwnershipBlocked();
     }

@@ -63,7 +63,8 @@ interface IBridge {
 
     /// @notice Emitted on every successful `setLZAdapter` (rotation to a
     ///         non-zero adapter).
-    /// @param oldAdapter             Previous trusted adapter (zero before first set).
+    /// @param oldAdapter             Previous adapter, including one set at initialization; zero
+    ///                               while disabled.
     /// @param newAdapter             New trusted adapter (always non-zero).
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
 
@@ -73,7 +74,7 @@ interface IBridge {
     event LZAdapterDisabled(address indexed oldAdapter);
 
     /// @notice Emitted on every successful `setRouteRegistry`.
-    /// @param oldRegistry            Previous registry (the constructor-supplied value
+    /// @param oldRegistry            Previous registry (the initialization value
     ///                               before the first rotation).
     /// @param newRegistry            New registry (non-zero by `setRouteRegistry` guard).
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
@@ -84,12 +85,12 @@ interface IBridge {
     event CommissionManagerUpdated(address indexed oldCommissionManager, address indexed newCommissionManager);
 
     /// @notice Emitted on every successful `setMinFundsInAmount`.
-    /// @param oldMinimum             Previous minimum (constructor value before first update).
+    /// @param oldMinimum             Previous minimum (initialization value before first update).
     /// @param newMinimum             New minimum (in token smallest units; always non-zero).
     event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
 
     /// @notice Emitted on every successful `setMinFundsOutAmount`.
-    /// @param oldMinimum             Previous minimum (constructor value before first update).
+    /// @param oldMinimum             Previous minimum (initialization value before first update).
     /// @param newMinimum             New minimum (in token smallest units; always non-zero).
     event MinFundsOutAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
 
@@ -97,7 +98,8 @@ interface IBridge {
     /// @param chainId                Source chain the limit applies to.
     /// @param burstBps               Max instant outflow, in bps of reference liquidity.
     /// @param refillBpsPerWindow     Allowance restored per refill window, in bps.
-    /// @param availableShares        Accrued allowance carried over, in shares.
+    /// @param availableShares        Available shares after configuration: full on first enable,
+    ///                               carried and capped on updates.
     event OutflowLimitUpdated(
         uint256 indexed chainId, uint256 burstBps, uint256 refillBpsPerWindow, uint256 availableShares
     );
@@ -105,7 +107,8 @@ interface IBridge {
     /// @notice Emitted on `setGlobalOutflowLimit` (aggregate outflow token bucket).
     /// @param burstBps               Max instant aggregate outflow, in bps of reference TVL.
     /// @param refillBpsPerWindow     Allowance restored per refill window, in bps.
-    /// @param availableShares        Accrued allowance carried over, in shares.
+    /// @param availableShares        Available shares after configuration: full on first enable,
+    ///                               carried and capped on updates.
     event GlobalOutflowLimitUpdated(uint256 burstBps, uint256 refillBpsPerWindow, uint256 availableShares);
 
     /// @notice Emitted after an outflow consumes immutable per-chain rolling
@@ -149,8 +152,7 @@ interface IBridge {
     /// @param nativeCommission       Fee charged in native wei (paid via `msg.value`).
     /// @param sourceChainId          EVM `block.chainid` for direct deposits, or the
     ///                               non-spoofable chain id forwarded by the adapter.
-    /// @param destinationChainId     Target chain id (backend-assigned for non-EVM
-    ///                               destinations like RGB / Bitcoin).
+    /// @param destinationChainId     Destination chain id (EVM chain id, or 827166 for RGB).
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
     /// @param settlementData         Opaque route-specific settlement payload.
@@ -174,11 +176,11 @@ interface IBridge {
     /// @param netAmount              Net token payout before any token transfer fee.
     /// @param tokenCommission        Fee taken in the bridged token (sent to the
     ///                               CommissionManager).
-    /// @param burnId                 Bridge-derived replay key. Stored on-chain to
-    ///                               block fundsOut replays for the same release intent.
+    /// @param burnId                 Bridge-derived replay key shared by fundsOut and
+    ///                               rebalanceLiquidity; the same source burn cannot be reused.
     /// @param sourceChainId          Source chain id (non-EVM side for RGB→EVM releases).
     /// @param destinationChainId     Destination chain id (EVM target receiving the release).
-    /// @param sourceAddress          Sender address on the source chain.
+    /// @param sourceAddress          Source address; empty when the source network is RGB.
     /// @param settlementData         Opaque route-specific settlement payload.
     event BridgeFundsOut(
         address indexed recipient,
@@ -205,9 +207,8 @@ interface IBridge {
     /// @param sourceChainId          Chain bucket debited.
     /// @param destinationChainId     Chain bucket credited.
     /// @param amount                 Amount migrated between the buckets (no commission).
-    /// @param sourceAddress          Source-chain identity behind the debit (e.g. the
-    ///                               RGB burner); its hash is folded into non-RGB
-    ///                               credit-leg `operationId`.
+    /// @param sourceAddress          Source identity, empty for RGB sources; its hash enters the
+    ///                               non-RGB credit-leg `operationId`.
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
     /// @param settlementDataOut      Opaque debit-leg settlement payload.
@@ -287,7 +288,7 @@ interface IBridge {
     /// @param sourceChainId          Source chain id.
     /// @param destinationChainId     Destination chain id; part of the
     ///                               CommissionManager route key.
-    /// @param sourceAddress          Sender address on the source chain.
+    /// @param sourceAddress          Source address; empty when the source network is RGB.
     /// @param proof                  Opaque per-route data for `IFinalityVerifier`.
     /// @param settlementData         Opaque per-route data for `ISettlementModule`.
     /// @param sourceBurnTxId         Source-chain identifier of the burn being
@@ -427,7 +428,7 @@ interface IBridge {
     ///         bucket that bounds total `fundsOut` across all source chains.
     ///         Owner-only. Same bps semantics, combined burst-plus-refill bound
     ///         (against `MAX_GLOBAL_OUTFLOW_BPS`) and accrue-and-preserve
-    ///         behaviour as `setOutflowLimit`.
+    ///         behavior as `setOutflowLimit`.
     function setGlobalOutflowLimit(uint256 burstBps, uint256 refillBpsPerWindow) external;
 
     /// @notice Spendable per-chain bucket allowance right now in token units,
@@ -478,6 +479,6 @@ interface IBridge {
     /// @notice Current `CommissionManager` Bridge uses for fee quotes and custody.
     function commissionManager() external view returns (ICommissionManager);
 
-    /// @notice Permanently blocked — ownership cannot be renounced.
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() external view;
 }

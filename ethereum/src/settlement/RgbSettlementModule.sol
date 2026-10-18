@@ -63,7 +63,7 @@ contract RgbSettlementModule is ISettlementModule {
     // Storage
     // =========================================================================
 
-    /// @notice The `RouteRegistry` instance authorised to drive this module.
+    /// @notice The `RouteRegistry` instance authorized to drive this module.
     ///         The pairing is fixed at deploy time.
     address public immutable routeRegistry;
 
@@ -109,6 +109,7 @@ contract RgbSettlementModule is ISettlementModule {
     ///      deposits and rebalance credits for the same tuple hit the duplicate guard.
     ///      settlementData is abi.encode(uint256 rgbOpId). destAddress must be empty:
     ///      the RGB destination is carried in the consignment, not this argument.
+    /// @return rgbOpId Mint OpId decoded from `settlementData`.
     function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
         external
         override

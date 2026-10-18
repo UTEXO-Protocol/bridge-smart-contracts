@@ -10,9 +10,8 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
     // ========================================================================
     // Isolated liquidity
     // fundsIn credits lockedLiquidity[destinationChainId] by netAmount; fundsOut
-    // debits lockedLiquidity[sourceChainId] by gross amount. A release can never
-    // draw more than was bridged toward that chain, and one chain's bucket can
-    // never be drained from another chain's release.
+    // debits lockedLiquidity[sourceChainId] by gross amount. A release cannot
+    // exceed its source bucket's current allocation or debit another bucket.
     // ========================================================================
 
     function test_isolatedLiquidity_fundsInCreditsNetAmount() public {
@@ -108,8 +107,6 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
     ///      Releasing its whole balance exceeds the configured burst capacity;
     ///      a tranche inside that capacity succeeds.
     function testFuzz_fundsOut_enforcesChainLiquidityAndBucketCapacity(uint256 amount) public {
-        // Bound to the user's funded balance and above the dust floor; no
-        // commission in setUp so net == gross.
         amount = bound(amount, 1e6, AMOUNT * 10);
 
         vm.prank(user);

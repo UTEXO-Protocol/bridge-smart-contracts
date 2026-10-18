@@ -19,7 +19,7 @@ contract MockBtcRelay is IBtcRelayView {
     ///      default is zero; deployed-relay fixtures configure a checkpoint.
     uint256 public checkpointHeight;
 
-    /// @notice Set the initialisation checkpoint. Call it in `setUp` with the
+    /// @notice Set the initialization checkpoint. Call it in `setUp` with the
     ///         same height the suite registers its blocks at.
     function setCheckpointHeight(uint256 height) external {
         checkpointHeight = height;

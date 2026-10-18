@@ -27,8 +27,8 @@ contract RGBVerifier is IFinalityVerifier {
     /// @notice The source block (RGB burn/lock) is not buried deeply enough.
     error InsufficientSourceConfirmations(uint256 confirmations, uint256 required);
 
-    /// @notice The latest block is not close enough to the relay head, so the
-    ///         relay's view of the chain may be stale.
+    /// @notice The proof's latest block exceeds the permitted depth relative to the relay tip.
+    /// @dev Does not establish whether the relay itself is synchronized with Bitcoin.
     error RelayNotFresh(uint256 confirmations, uint256 maxAllowed);
 
     /// @notice The source block is not buried far enough beneath the fresh

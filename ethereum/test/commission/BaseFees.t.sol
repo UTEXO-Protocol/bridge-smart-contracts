@@ -10,7 +10,7 @@ import {
 import {MockDepositFloor} from "../mocks/MockDepositFloor.sol";
 import {CommissionManagerTestBase} from "./CommissionManagerTestBase.sol";
 
-/// @notice Flat fees obey the appropriate deposit and release dust floors.
+/// @notice Flat-fee validation against deposit and release minimum amounts.
 contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
     function _cfg(uint256 stablePercent, uint256 baseFee, CommissionSide side, CommissionCurrency currency)
         private
@@ -274,8 +274,7 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         assertEq(net, 9_600_000);
     }
 
-    /// @dev …and configuring a percentage-only rule does not require the floor either.
-    function test_setCommissionRule_percentageOnlyRuleDoesNotReadFloor() public {
+    function test_setGlobalDefaults_percentageOnlyRuleDoesNotReadFloor() public {
         vm.prank(owner);
         cm.setBridgeAddress(makeAddr("floorless-bridge-2"));
 

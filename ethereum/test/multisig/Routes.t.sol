@@ -123,7 +123,7 @@ contract MultisigRoutesTest is MultisigProxyTestBase {
 
     function test_proposeUpdateRouteRegistry_rotatesBridgePointer() public {
         // Deploy a NEW registry, owned by proxy, paired with the same Bridge.
-        // In production the new registry's `bridge_` immutable MUST match the
+        // In production the new registry's `bridge` immutable MUST match the
         // live Bridge — otherwise dispatcher calls revert NotBridge.
         RouteRegistry newRegistry = new RouteRegistry(address(bridge), address(proxy));
 

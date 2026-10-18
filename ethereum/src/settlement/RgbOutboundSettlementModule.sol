@@ -50,7 +50,7 @@ contract RgbOutboundSettlementModule is ISettlementModule {
     // Storage
     // =========================================================================
 
-    /// @notice The `RouteRegistry` instance authorised to drive this module.
+    /// @notice The `RouteRegistry` instance authorized to drive this module.
     address public immutable routeRegistry;
 
     /// @notice Canonical `RgbSettlementModule` of the RGB network on the debit
@@ -105,11 +105,9 @@ contract RgbOutboundSettlementModule is ISettlementModule {
     }
 
     /// @inheritdoc ISettlementModule
-    /// @dev Same decoding and checks as `RgbSettlementModule.beforeFundsOut`,
-    ///      but against the wrapped module's ledger: at least one pair is
-    ///      required, and every referenced `operationId` must exist there, with
-    ///      an exactly matching amount, and recorded for the release's
-    ///      `ctx.sourceChainId` RGB network.
+    /// @dev Reads `(bytes32[] operationIds, uint256[] amounts)` from settlementData.
+    ///      Requires at least one pair even for rebalances. Every record must exist in
+    ///      the wrapped ledger with an exact amount and the source RGB network tag.
     function beforeFundsOut(FundsOutContext calldata ctx, bytes calldata settlementData)
         external
         view

@@ -207,8 +207,6 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
         );
     }
 
-    /// @dev Mirror of `Bridge._deriveRebalanceOperationId` (no nonce; folds in
-    ///      the canonical burnId so distinct intents get distinct ids).
     function _deriveRebalanceOpId(IBridge.RebalanceParams memory p) internal view returns (bytes32) {
         if (p.destinationChainId == RGB_CHAIN_ID || p.destinationChainId == SECONDARY_RGB_CHAIN_ID) {
             return keccak256(

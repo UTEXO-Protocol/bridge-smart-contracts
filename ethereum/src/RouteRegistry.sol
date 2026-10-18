@@ -30,8 +30,7 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // Storage
     // =========================================================================
 
-    /// @notice The Bridge instance this registry serves. Authorised caller
-    ///         of `onFundsIn` and `beforeFundsOut`.
+    /// @notice Bridge authorized to call this registry's dispatchers.
     address public immutable bridge;
 
     /// @dev Route table keyed by `keccak256(abi.encode(sourceChainId, destChainId))`.
@@ -81,9 +80,7 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
         emit RouteSet(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule);
     }
 
-    /// @inheritdoc Ownable
-    /// @dev Permanently blocked — the registry would otherwise be orphaned
-    ///      from any future federation governance action.
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() public view override(Ownable) onlyOwner {
         revert RenounceOwnershipBlocked();
     }

@@ -236,10 +236,8 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         assertEq(rgbModule.fundsInRecords(rgbSeedOpId), AMOUNT * 10, "shared backing record remains permanent");
     }
 
-    /// @notice Bridge refuses a settlement that does not name its source burn.
-    ///         The guard is route-agnostic on purpose: every chain supplies a
-    ///         burn id, and it is the only field that keeps `burnId` distinct on
-    ///         routes whose `settlementData` is empty.
+    /// @notice Rejects a rebalance that omits its source-burn identifier.
+    /// @dev Settlement data is excluded from `burnId`; it cannot distinguish source burns.
     function test_rebalanceLiquidity_revertsOnZeroSourceBurnTxId() public {
         IBridge.RebalanceParams memory p = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
         p.sourceBurnTxId = bytes32(0);

@@ -50,7 +50,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///      up to 1,404 RGB record pairs and bounds module processing.
     uint256 public constant MAX_SETTLEMENT_DATA_OUT_LENGTH = 90_000;
 
-    /// @notice Basis-point denominator for the immutable rolling safety limits.
+    /// @notice Basis-point denominator for outflow policies, safety limits and native-fee
+    ///         tolerance.
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
     /// @notice Native commission tolerance in basis points.
@@ -133,12 +134,10 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///         `fundsIn`; a downstream revert rolls the increment back.
     mapping(uint256 sourceChainId => mapping(bytes32 sourceSender => uint256 nonce)) public sourceSenderNonces;
 
-    /// @notice Isolated liquidity per non-Arbitrum chain. Tracks the
-    ///         net token amount locked on this chain on behalf of a given
-    ///         remote chain: `fundsIn` credits the deposit's `destinationChainId`
-    ///         bucket, `fundsOut` debits the release's `sourceChainId` bucket.
-    ///         A release can therefore never draw more than was actually
-    ///         bridged toward that chain.
+    /// @notice Accounted liquidity available to each remote network.
+    /// @dev Deposits credit their destination; releases debit their source. Rebalances
+    ///      move liquidity between buckets without moving tokens. A debit cannot exceed
+    ///      its source bucket's current allocation.
     mapping(uint256 chainId => uint256 locked) public lockedLiquidity;
 
     /// @notice Total accounted bridge liquidity across all isolated chain
@@ -148,11 +147,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///         `rebalanceLiquidity` preserves it.
     uint256 public totalLockedLiquidity;
 
-    /// @notice Per-source-chain outflow rate limiter. Bounds how fast
-    ///         `fundsOut` can drain a single chain's liquidity. The public
-    ///         getter exposes raw bucket `tokens`, `capacity`, and `rate` in
-    ///         normalized shares, not token units; use `availableOutflow` for
-    ///         the current token-denominated allowance.
+    /// @notice Per-source-chain limiter consumed by releases and rebalances.
+    /// @dev Raw bucket values are shares; `availableOutflow` returns token units.
     mapping(uint256 chainId => OutflowRateLimiter.Bucket) public chainBuckets;
 
     /// @notice Aggregate limiter for physical releases across all source chains.
@@ -541,9 +537,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     {
         _validateRebalanceParams(params);
 
-        // Credit-leg identity: the hash of the source-chain address string. Only
-        // used to derive a non-RGB credit `operationId` and label the event; unlike
-        // `_fundsIn`, no nonce stream is consumed here (see the replay guard).
+        // Pass the source-address hash to settlement and non-RGB credit-id derivation.
+        // Rebalances consume a burn id rather than a deposit sender nonce.
         bytes32 sourceSender = _hashCalldataString(params.sourceAddress);
 
         // Enclaves must derive every burnId field canonically and never attest a second
@@ -620,7 +615,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         _consumeChainSafetyOutflow(params.sourceChainId, chainSpent, chainSafetyReference, params.amount);
 
         // RGB-only correlation event, same contract as `_fundsIn`: the RGB
-        // listener authorises a mint against `FundsIn` and needs no awareness
+        // listener authorizes a mint against `FundsIn` and needs no awareness
         // of the rebalance mechanics.
         if (rgbOpId != 0) _emitRgbFundsIn(_msgSender(), rgbOpId, params.amount);
         emit BridgeRebalance(
@@ -636,7 +631,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         );
     }
 
-    /// @inheritdoc IBridge
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() public view override(BridgeBaseUpgradeable, IBridge) onlyOwner {
         revert RenounceOwnershipBlocked();
     }
@@ -999,13 +994,13 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         return _deriveBurnIdFromFields(params.amount, params.sourceChainId, params.sourceAddress, params.sourceBurnTxId);
     }
 
-    /// @dev Rebalance uses the SAME formula. Both settlement blobs are excluded:
+    /// @dev Rebalance uses the same formula. Both settlement blobs are excluded:
     ///      selecting other backing records cannot create a new replay key.
     function _deriveRebalanceBurnId(RebalanceParams calldata params) private view returns (uint256) {
         return _deriveBurnIdFromFields(params.amount, params.sourceChainId, params.sourceAddress, params.sourceBurnTxId);
     }
 
-    /// @dev The source address is hashed over its RAW bytes (never its ABI
+    /// @dev The source address is hashed over its raw bytes (never its ABI
     ///      encoding), matching EIP-712 treatment of dynamic types. An empty
     ///      value therefore hashes to
     ///      `0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470`,

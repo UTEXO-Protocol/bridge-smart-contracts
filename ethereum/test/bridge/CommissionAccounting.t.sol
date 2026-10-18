@@ -322,9 +322,6 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         );
     }
 
-    // The token commission is forwarded before the onFundsIn hook, so a
-    // settlement module reading getContractBalance during the hook
-    // observes only the net the Bridge retains — never the in-flight commission.
     function test_fundsIn_hookObservesCustodyAfterTokenCommissionForwarding() public {
         uint256 percent = 400; // 4%
         _setFundsInTokenRule(percent);
@@ -387,9 +384,6 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         assertEq(cm.tokenCommissionPool(address(usdt0)), cmPoolBefore + tokenCommission, "cm pool delta");
     }
 
-    /// @dev End-to-end mirror of the inbound flat-fee case: a `FUNDS_OUT` rule
-    ///      with a `baseFee` deducts percentage + flat from the release and
-    ///      forwards both to the CommissionManager pool.
     function test_fundsOut_baseFeeRoutesToCMOnTopOfPercentage() public {
         _seedRGB(1000e6);
 

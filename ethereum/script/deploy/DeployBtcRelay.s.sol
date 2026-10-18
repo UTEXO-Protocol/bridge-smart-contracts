@@ -161,15 +161,14 @@ contract DeployBtcRelay is Script {
     function _reportNextSteps(address relay, uint256 expectedHeight) private pure {
         console2.log("");
         console2.log("=== Next steps ===");
-        console2.log("1. The relay sits at the checkpoint and is NOT usable yet. Submit headers");
-        console2.log("   from this height up to the Bitcoin tip via submitMainBlockheaders");
-        console2.log("   (160-byte stored header + 48 bytes per block, chunked across txs).");
-        console2.log("   RGBVerifier enforces maxLatestConfirmations, so it rejects everything");
-        console2.log("   until the relay reaches the chain head - and keeping it there is a");
-        console2.log("   standing operational duty, not a one-off.");
+        console2.log("1. Synchronize the relay from its checkpoint to the Bitcoin tip");
+        console2.log("   via submitMainBlockheaders (160-byte stored header + 48 bytes per block).");
+        console2.log("   Source/latest proof commitments must exist in the relay at valid depths.");
+        console2.log("   Missing headers or insufficient depths reject those proofs.");
+        console2.log("   The verifier does not detect an externally stale relay; keep headers current.");
         console2.log("2. Export BTC_RELAY_ADDRESS for DeployRGBVerifier / DeployAll:");
         console2.log("   BTC_RELAY_ADDRESS=", relay);
-        console2.log("3. Checkpoint height, now the immutable floor of the finality gate:");
+        console2.log("3. Checkpoint height, the immutable floor of the finality gate:");
         console2.log("   ", expectedHeight);
     }
 }

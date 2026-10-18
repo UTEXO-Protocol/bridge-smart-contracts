@@ -32,8 +32,8 @@ contract MultisigExecuteFundsOut is Script {
         p.sourceAddress = vm.envString("SOURCE_ADDRESS");
         p.sourceBurnTxId = vm.envBytes32("SOURCE_BURN_TX_ID");
 
-        // RGBVerifier expects the confirmed source block plus a fresh block at
-        // the relay head: (sourceHeight, sourceCommit, latestHeight, latestCommit).
+        // RGBVerifier checks the source depth and latest-block depth relative to the relay tip.
+        // Proof layout: (sourceHeight, sourceCommit, latestHeight, latestCommit).
         p.proof = abi.encode(
             vm.envUint("SOURCE_BLOCK_HEIGHT"),
             vm.envBytes32("SOURCE_COMMITMENT_HASH"),

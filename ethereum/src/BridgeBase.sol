@@ -18,7 +18,7 @@ abstract contract BridgeBase is Ownable2Step, Pausable {
     /// @notice The only accepted ERC-20 token. Immutable after deploy.
     address public immutable TOKEN;
 
-    /// @notice Withdrawal pause, independent of the Pausable inflow flag.
+    /// @dev Withdrawal pause, independent of the Pausable inflow flag.
     bool private _outflowPaused;
 
     // =========================================================================
@@ -102,7 +102,7 @@ abstract contract BridgeBase is Ownable2Step, Pausable {
         }
     }
 
-    /// @notice Always reverts; ownership must remain transferable.
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() public view virtual override onlyOwner {
         revert RenounceOwnershipBlocked();
     }

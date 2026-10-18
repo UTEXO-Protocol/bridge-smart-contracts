@@ -155,10 +155,10 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         bridge.rebalanceLiquidity(p);
     }
 
-    function test_rebalanceLiquidity_revertsChainBucketThrottled() public {
+    function test_rebalanceLiquidity_revertsWhenRequestExceedsChainBucketCapacity() public {
         // CHAIN_A_ID holds AMOUNT * 10, so a 500 bps burst is AMOUNT / 2 — less than
-        // the AMOUNT being migrated. The rebalance must hit the same per-chain
-        // outflow throttle a release would.
+        // the AMOUNT being migrated. The requested shares exceed capacity,
+        // independently of the bucket's currently available allowance.
         vm.prank(multisig);
         bridge.setOutflowLimit(CHAIN_A_ID, 500, 1);
 

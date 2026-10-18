@@ -28,11 +28,10 @@ abstract contract CommissionManagerTestBase is Test {
     ///      non-EVM endpoints use backend-assigned identifiers.
     uint256 internal constant SRC_CHAIN_ID = 1; // Ethereum mainnet
 
-    uint256 internal constant DST_CHAIN_ID = 1_000_001; // RGB (backend-assigned)
+    uint256 internal constant DST_CHAIN_ID = 1_000_001; // Synthetic RGB route fixture
 
-    // Chainlink feed defaults. ETH/USD on Arbitrum reports with 8 decimals;
-    // heartbeat 86400 s in production — tests use 1 hour to keep stale-path
-    // timestamps deterministic.
+    // Oracle fixture: 8-decimal prices and a one-hour heartbeat for deterministic
+    // freshness-boundary tests.
     uint8 internal constant FEED_DECIMALS = 8;
 
     int256 internal constant DEFAULT_ETH_USD = 2_000e8; // $2000 / ETH
@@ -43,7 +42,7 @@ abstract contract CommissionManagerTestBase is Test {
 
     uint256 internal constant MAX_ETH_USD = 100_000e8;
 
-    /// @dev Bridge dust floors the manager reads to bound a flat `baseFee` on
+    /// @dev Bridge minimum amounts the manager reads to bound a flat `baseFee` on
     ///      each side, in token smallest units. Deliberately different values make
     ///      a test that reads the wrong one fail. This isolated getter fixture
     ///      intentionally inverts the Bridge ordering (inbound >= outbound);
@@ -79,7 +78,7 @@ abstract contract CommissionManagerTestBase is Test {
         vm.stopPrank();
     }
 
-    /// @dev Put the Bridge dust-floor getters at `where`, reporting `inFloor`
+    /// @dev Put the Bridge minimum-amount getters at `where`, reporting `inFloor`
     ///      for deposits and `outFloor` for releases.
     function _installFloors(address where, uint256 inFloor, uint256 outFloor) private {
         vm.etch(where, address(new MockDepositFloor()).code);

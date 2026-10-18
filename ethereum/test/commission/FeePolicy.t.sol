@@ -149,9 +149,8 @@ contract CommissionManagerFeePolicyTest is CommissionManagerTestBase {
 
     // =========================================================================
     // Effective-rate ceiling (90%)
-    // The charged fraction is `stablePercent / multiplier^2`, so bounding
-    // `stablePercent` alone only caps the rate at `multiplier == 100`. These
-    // cover the ceiling on the rate itself.
+    // The raw numerator cap does not enforce the 90% rate cap for small multipliers.
+    // These cases exercise the effective rate, `stablePercent / multiplier^2`.
     // =========================================================================
 
     /// @dev The canonical bypass: 99 / 10^2 = 99%, with both `stablePercent` and

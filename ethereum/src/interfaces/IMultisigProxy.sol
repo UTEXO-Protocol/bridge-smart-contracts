@@ -10,7 +10,8 @@ import {IBridge} from "./IBridge.sol";
 ///      bypass it. The guardian can pause only. Signatures use the MultisigProxy v1
 ///      EIP-712 domain; bitmap bit i selects signer i, with signatures in ascending order.
 ///      Enclave entrypoints have no generic dispatch. Anyone may execute a valid
-///      proposal after its timelock. CM withdrawal selectors are reserved for typed operations.
+///      proposal after its timelock. Generic lanes reject CM withdrawals, Bridge release/rebalance,
+///      CM rotation, ownership transfer and `upgradeToAndCall`; use their typed operations.
 interface IMultisigProxy {
     // =========================================================================
     // Errors
@@ -97,7 +98,7 @@ interface IMultisigProxy {
         Cancelled
     }
 
-    /// @notice Business parameters for `lzFundsOut`, bundled to keep the call
+    /// @notice Business parameters for `lzFundsOutCall`, bundled to keep the call
     ///         free of stack-too-deep errors. Signed as the EIP-712 `TeeLzFundsOut` struct
     ///         (these fields plus `nonce` and `deadline`).
     struct LzFundsOutParams {
@@ -132,7 +133,7 @@ interface IMultisigProxy {
     // Events
     // =========================================================================
 
-    // TEE — typed enclave releases
+    // TEE — typed enclave releases and rebalances
     event FundsOutExecuted(uint256 indexed sourceChainId, uint256 indexed nonce, uint256 enclaveBitmap);
     event RebalanceExecuted(
         uint256 indexed sourceChainId, uint256 indexed destinationChainId, uint256 nonce, uint256 enclaveBitmap
@@ -181,7 +182,7 @@ interface IMultisigProxy {
     // TEE-authorized
     // =========================================================================
 
-    /// @notice Typed enclave release: authorise `Bridge.fundsOut` with M-of-N
+    /// @notice Typed enclave release: authorize `Bridge.fundsOut` with M-of-N
     ///         enclave signatures over the release parameters. The only call this
     ///         makes is `Bridge.fundsOut` — there is no generic dispatch, so the
     ///         enclave path can never reach a privileged setter.
@@ -193,7 +194,7 @@ interface IMultisigProxy {
         bytes[] calldata enclaveSigs
     ) external;
 
-    /// @notice Typed enclave rebalance: authorise `Bridge.rebalanceLiquidity`
+    /// @notice Typed enclave rebalance: authorize `Bridge.rebalanceLiquidity`
     ///         with M-of-N signatures from the SOURCE chain's enclave set (it
     ///         attests the funds left that chain). The only call this makes is
     ///         `Bridge.rebalanceLiquidity` — no generic dispatch. Shares the
@@ -221,15 +222,16 @@ interface IMultisigProxy {
     // Federation instant (no timelock)
     // =========================================================================
 
-    /// @notice Emergency pause the Bridge. Instant, no timelock.
+    /// @notice Pauses deposits, releases and rebalances immediately with federation signatures.
     /// @dev Deadline must be between the current timestamp and one day ahead.
     function emergencyPause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
-    /// @notice Emergency unpause the Bridge. Instant, no timelock.
-    /// @dev Deadline must be between the current timestamp and one day ahead.
+    /// @notice Resumes both Bridge paths immediately with federation signatures.
+    /// @dev Also clears a planned inflow pause. Deadline must be between the current timestamp
+    ///      and one day ahead.
     function emergencyUnpause(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
-    /// @notice Emergency pause the Bridge directly as the configured guardian.
+    /// @notice Pauses both Bridge paths directly as the configured guardian.
     /// @dev Requires `msg.sender == emergencyGuardian`; no signatures, nonce argument, or deadline.
     ///      Every successful call increments emergencyNonce, even if already paused.
     function guardianEmergencyPause() external;
@@ -238,12 +240,10 @@ interface IMultisigProxy {
     // Federation propose (Phase 1 — timelock)
     // =========================================================================
 
-    /// @notice Propose a permitted administrative Bridge call (forwarded via
-    ///         `bridge.call`).
-    /// @dev `Bridge.fundsOut` and `Bridge.rebalanceLiquidity` are forbidden:
-    ///      value-moving operations must use the typed enclave-authorized
-    ///      `fundsOutCall`, `lzFundsOutCall`, or `rebalanceCall` entrypoints.
-    /// @dev opData = raw ABI-encoded bridge callData (selector + args).
+    /// @notice Proposes a permitted administrative call to the current Bridge.
+    /// @dev Subject to the generic selector restrictions listed on this interface.
+    ///      `opData` is the raw ABI-encoded call. The current Bridge address is signed
+    ///      and must still be current at execution.
     function proposeAdminExecute(
         bytes calldata callData,
         uint256 nonce,
@@ -252,7 +252,7 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose replacing (or registering) the enclave signer set for a
+    /// @notice Proposes replacing (or registering) the enclave signer set for a
     ///         given source chain. A `sourceChainId` with no set yet is
     ///         registered on execution (bounded by `MAX_ENCLAVE_SOURCE_CHAINS`).
     /// @dev opData = abi.encode(uint256 sourceChainId, address[] newSigners, uint256 newThreshold)
@@ -266,8 +266,10 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose replacing the federation signer set.
-    /// @dev opData = abi.encode(address[] newSigners, uint256 newThreshold)
+    /// @notice Proposes replacing the federation signer set.
+    /// @dev Execution increments the signer-set version and invalidates other pending
+    ///      proposals approved by the previous set.
+    ///      opData = abi.encode(address[] newSigners, uint256 newThreshold)
     function proposeUpdateFederationSigners(
         address[] calldata newSigners,
         uint256 newThreshold,
@@ -277,7 +279,7 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose updating the Bridge address.
+    /// @notice Proposes updating the Bridge address.
     /// @dev opData = abi.encode(address newBridge)
     function proposeUpdateBridge(
         address newBridge,
@@ -287,7 +289,7 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose upgrading the currently configured Bridge proxy.
+    /// @notice Proposes upgrading the currently configured Bridge proxy.
     /// @dev The signed proxy address prevents a pending proposal from being
     ///      redirected if `bridge` changes before execution.
     ///      Initialization calldata is capped at 4096 bytes including its selector,
@@ -303,8 +305,9 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose changing the timelock duration.
-    /// @dev opData = abi.encode(uint256 newDuration)
+    /// @notice Proposes changing the timelock duration.
+    /// @dev Execution requires `MIN_TIMELOCK <= newDuration < MAX_PROPOSAL_LIFETIME`.
+    ///      opData = abi.encode(uint256 newDuration)
     function proposeSetTimelockDuration(
         uint256 newDuration,
         uint256 nonce,
@@ -313,7 +316,7 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose rotating or disabling the direct emergency guardian.
+    /// @notice Proposes rotating or disabling the direct emergency guardian.
     /// @dev `address(0)` is explicitly allowed and disables the guardian path.
     ///      opData = abi.encode(address newGuardian)
     function proposeSetEmergencyGuardian(
@@ -326,11 +329,9 @@ interface IMultisigProxy {
 
     // --- CommissionManager-targeted operations ---
 
-    /// @notice Propose a permitted generic call into the CommissionManager.
-    /// @dev Used for rare configuration: setCommissionRule, setGlobalDefaults,
-    ///      setMockTokenToNativeRate, setBridgeAddress, … Withdrawal and
-    ///      ownership-transfer selectors are reserved for typed operations.
-    /// @dev opData = raw ABI-encoded CommissionManager callData (selector + args).
+    /// @notice Proposes a permitted call to the current CommissionManager.
+    /// @dev Used for fee rules, defaults, oracle configuration and ownership acceptance.
+    ///      Generic selector restrictions apply. `opData` is the raw ABI-encoded call.
     function proposeAdminExecuteCommissionManager(
         bytes calldata callData,
         uint256 nonce,
@@ -341,7 +342,7 @@ interface IMultisigProxy {
 
     // --- RouteRegistry-targeted operations ---
 
-    /// @notice Propose an arbitrary permitted call into the RouteRegistry
+    /// @notice Proposes a permitted call to the current RouteRegistry
     ///         (resolved from Bridge), alongside the dedicated `SetRoute` op.
     ///         `acceptOwnership` remains available here; `transferOwnership`
     ///         must use `proposeTransferManagedOwnership`.
@@ -354,7 +355,9 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose an ERC-20 commission withdrawal from the CommissionManager.
+    // --- CommissionManager withdrawals and rotation ---
+
+    /// @notice Proposes an ERC-20 commission withdrawal from the CommissionManager.
     ///         The CM pays its immutable `commissionRecipient`.
     /// @dev opData = abi.encode(address token, uint256 amount)
     function proposeWithdrawTokenCommissionCM(
@@ -366,7 +369,7 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose a native commission withdrawal from the CommissionManager.
+    /// @notice Proposes a native commission withdrawal from the CommissionManager.
     ///         The CM pays its immutable `commissionRecipient`.
     /// @dev opData = abi.encode(uint256 amount)
     function proposeWithdrawNativeCommissionCM(
@@ -377,7 +380,7 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose migrating Bridge and this proxy to a new
+    /// @notice Proposes migrating Bridge and this proxy to a new
     ///         CommissionManager address atomically.
     /// @dev opData = abi.encode(address newCommissionManager)
     function proposeUpdateCommissionManager(
@@ -390,11 +393,9 @@ interface IMultisigProxy {
 
     // --- LZAdapter-targeted operations ---
 
-    /// @notice Propose an arbitrary call into the LZAdapter (routes through the
-    ///         stored `lzAdapter` address). Federation typically uses this for
-    ///         `setTrustedEntrypoint`, `refundStuckFunds`, and any other
-    ///         `onlyMultisigProxy`-gated adapter admin.
-    /// @dev opData = raw ABI-encoded LZAdapter callData (selector + args).
+    /// @notice Proposes a permitted call to the current LayerZero adapter.
+    /// @dev Generic selector restrictions apply. A nonzero adapter must be configured.
+    ///      `opData` is the raw ABI-encoded adapter call.
     function proposeAdminExecuteAdapter(
         bytes calldata callData,
         uint256 nonce,
@@ -403,9 +404,9 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose rotating the LZAdapter routing target stored on this proxy.
-    /// @dev opData = abi.encode(address newLZAdapter). Reverts `InvalidLZAdapter`
-    ///      on `address(0)` — use `proposeDisableLZAdapter` to close the path.
+    /// @notice Proposes rotating the LZAdapter routing target stored on this proxy.
+    /// @dev opData = abi.encode(address newLZAdapter). A zero address is rejected
+    ///      at execution, not proposal creation; use `proposeDisableLZAdapter` to disable.
     function proposeUpdateLZAdapter(
         address newLZAdapter,
         uint256 nonce,
@@ -414,7 +415,7 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose clearing the LZAdapter routing target stored on this proxy
+    /// @notice Proposes clearing the LZAdapter routing target stored on this proxy
     ///         (explicit disable, emits `LZAdapterDisabled` — distinct from a
     ///         rotation via `proposeUpdateLZAdapter`).
     /// @dev opData is empty.
@@ -422,14 +423,16 @@ interface IMultisigProxy {
         external
         returns (bytes32);
 
-    /// @notice Propose registering or updating a route in the Bridge's
+    // --- RouteRegistry configuration ---
+
+    /// @notice Proposes registering or updating a route in the Bridge's
     ///         RouteRegistry.
     /// @dev opData = abi.encode(uint256 sourceChainId, uint256 destChainId,
     ///      bool enabled, address finalityVerifier, address settlementModule).
     ///      The proxy forwards the call to
     ///      `IRouteRegistry(bridge.routeRegistry()).setRoute(...)`.
-    ///      Both plugin addresses MUST be non-zero — registry rejects
-    ///      `address(0)`; routes that need no proof/settlement use the
+    ///      At execution the registry requires deployed code at both plugin addresses.
+    ///      Proposal creation does not validate them. Routes omitting a layer use the
     ///      explicit `NullVerifier` / `NullSettlementModule` deployments.
     function proposeSetRoute(
         uint256 sourceChainId,
@@ -443,9 +446,9 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose rotating the RouteRegistry pointer on Bridge.
+    /// @notice Proposes rotating the RouteRegistry pointer on Bridge.
     /// @dev opData = abi.encode(address newRouteRegistry). The new registry
-    ///      MUST be deployed with this Bridge's address as its `bridge_`
+    ///      MUST be deployed with this Bridge's address as its `bridge`
     ///      immutable — otherwise dispatcher calls from Bridge revert
     ///      `NotBridge` and inbound/outbound traffic on every route
     ///      simultaneously breaks.
@@ -457,7 +460,9 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose an Ownable2Step ownership transfer for a contract under
+    // --- Managed ownership and planned pauses ---
+
+    /// @notice Proposes an Ownable2Step ownership transfer for a contract under
     ///         this proxy's governance.
     /// @dev `target` must be the current Bridge, CommissionManager, LZAdapter,
     ///      or Bridge RouteRegistry both when proposed and when executed. The
@@ -472,7 +477,7 @@ interface IMultisigProxy {
         bytes[] calldata fedSigs
     ) external returns (bytes32);
 
-    /// @notice Propose a planned inflow-only pause on Bridge (`pauseInflow`).
+    /// @notice Proposes a planned inflow-only pause on Bridge (`pauseInflow`).
     /// @dev Freezes deposits while leaving withdrawals open — intended for a
     ///      bridge upgrade / liquidity migration. Runs through the timelocked
     ///      propose -> execute path. For an immediate freeze of BOTH paths use
@@ -481,7 +486,7 @@ interface IMultisigProxy {
         external
         returns (bytes32);
 
-    /// @notice Propose resuming the inflow path on Bridge (`unpauseInflow`).
+    /// @notice Proposes resuming the inflow path on Bridge (`unpauseInflow`).
     /// @dev Reverses `proposePauseInflow`. Timelocked. Carries no payload.
     function proposeUnpauseInflow(uint256 nonce, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs)
         external
@@ -491,23 +496,25 @@ interface IMultisigProxy {
     // Cancel & Execute
     // =========================================================================
 
-    /// @notice Cancel a pending proposal. Requires M-of-N federation signatures.
+    /// @notice Cancels a pending proposal. Requires M-of-N federation signatures.
     /// @dev Authorization is bound to `proposalId` and does not consume proposalNonce.
     ///      Deadline must be between the current timestamp and MAX_PROPOSAL_LIFETIME ahead.
     function cancelProposal(bytes32 proposalId, uint256 deadline, uint256 fedBitmap, bytes[] calldata fedSigs) external;
 
-    /// @notice Execute a proposal after the timelock has elapsed. Permissionless.
-    /// @dev Target callbacks cannot execute this or another proposal while an
-    ///      execution is active. Sequential calls are allowed after it returns.
-    /// @param proposalId             The proposal to execute.
-    /// @param opData                 The same operation data that was provided at propose time.
+    /// @notice Executes a pending federation proposal after its saved timelock.
+    /// @dev Anyone may submit execution. Reverts if status, signer-set version, timelock,
+    ///      deadline, data hash or bound target is invalid. Operation-specific guards and
+    ///      target failures also propagate; a revert restores proposal status and target state.
+    ///      Reentrant execution is rejected; sequential executions are allowed.
+    /// @param proposalId Proposal identifier.
+    /// @param opData Original operation data whose hash was stored at proposal creation.
     function executeProposal(bytes32 proposalId, bytes calldata opData) external;
 
     // =========================================================================
     // View
     // =========================================================================
 
-    /// @notice Verify that `signature` over `digest` was produced by the enclave
+    /// @notice Verifies that `signature` over `digest` was produced by the enclave
     ///         signer at `signerIndex` for the given `sourceChainId` set.
     function verifyEnclaveSignature(
         uint256 sourceChainId,

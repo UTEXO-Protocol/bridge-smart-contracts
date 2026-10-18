@@ -79,7 +79,7 @@ contract RgbRejectList is IRgbRejectList, Ownable2Step {
         _setAppender(newAppender);
     }
 
-    /// @notice Always reverts to preserve appender administration for the fixed registry.
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() public view override onlyOwner {
         revert RenounceOwnershipBlocked();
     }

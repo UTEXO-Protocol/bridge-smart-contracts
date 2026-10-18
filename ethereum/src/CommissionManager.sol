@@ -56,17 +56,15 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     /// @notice Default `currency` for routes without an override.
     CommissionCurrency public globalCurrency = CommissionCurrency.TOKEN;
 
-    /// @notice Absolute bound on the raw `stablePercent` numerator. Kept as a
-    ///         sanity bound (and as the overflow guard for the rate comparison
-    ///         in `_validateConfig`); the ceiling that actually governs what a
-    ///         route can charge is `_MAX_FEE_BPS`.
+    /// @dev Independent upper bound on the rate numerator, in addition to `_MAX_FEE_BPS`.
+    ///      For multipliers above 100, this bound can be stricter than the 90% rate cap.
     uint256 private constant _MAX_STABLE_PERCENT = 9000;
 
-    /// @notice Basis-point denominator for the effective-rate ceiling.
+    /// @dev Basis-point denominator for the effective-rate ceiling.
     uint256 private constant _BPS_DENOMINATOR = 10_000;
 
-    /// @notice Maximum effective proportional fee rate, in basis points.
-    /// @dev Applies to stablePercent / multiplier^2 for every allowed multiplier.
+    /// @dev Maximum effective proportional fee rate, in basis points.
+    ///      Applies to stablePercent / multiplier^2 for every allowed multiplier.
     uint256 private constant _MAX_FEE_BPS = 9_000;
 
     /// @notice Per-route overrides; key = `buildRouteKey(sourceChainId, destChainId, token)`.
@@ -77,29 +75,25 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     /// @notice Accrued native commission in wei.
     uint256 public nativeCommissionPool;
 
-    /// @notice Chainlink ETH/USD aggregator used to quote NATIVE commissions.
-    ///         `address(0)` (default after deploy) closes the NATIVE path until
-    ///         federation governance wires a real feed via `setEthUsdFeed`.
+    /// @notice Chainlink ETH/USD aggregator for nonzero native-fee conversions.
+    ///         The owner must configure a feed before those conversions are available.
     address public ethUsdFeed;
     /// @notice Maximum allowed staleness of `ethUsdFeed.latestRoundData().updatedAt`
     ///         in seconds. Quotes revert `StalePrice` when the answer is older.
     uint256 public ethUsdHeartbeat;
 
-    /// @notice Chainlink L2 Sequencer Uptime feed (Arbitrum). NATIVE quotes
-    ///         fail closed while this is `address(0)`.
+    /// @notice Chainlink L2 Sequencer Uptime feed for Arbitrum.
+    ///         Nonzero native-fee conversions revert while this is unset.
     address public sequencerUptimeFeed;
 
-    /// @notice Seconds after a sequencer restart during which NATIVE quotes are
-    ///         rejected — the L2-published price can lag the market right after
-    ///         recovery. Chainlink's recommended grace period is 3600s.
+    /// @notice Grace period after a sequencer restart, in seconds.
+    ///         Nonzero native-fee conversions require more than this interval to have elapsed.
     uint256 public constant SEQUENCER_GRACE_PERIOD = 3600;
 
-    /// @notice Mandatory [min, max] sanity band on the ETH/USD answer (in feed
-    ///         decimals). NATIVE quotes fail closed while the band is unset; an
-    ///         answer outside it (e.g. an aggregator floored/capped to
-    ///         `minAnswer`/`maxAnswer` during an extreme move) reverts
-    ///         `PriceOutOfBounds`.
+    /// @notice Minimum accepted ETH/USD answer, in feed decimals.
+    ///         Nonzero native-fee conversions require configured bounds and an in-range answer.
     uint256 public ethUsdMinPrice;
+    /// @notice Maximum accepted ETH/USD answer, in feed decimals.
     uint256 public ethUsdMaxPrice;
 
     // =========================================================================
@@ -126,8 +120,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         commissionRecipient = _commissionRecipient;
     }
 
-    /// @inheritdoc Ownable
-    /// @notice Always reverts. Use `transferOwnership` to change admin.
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() public view override(Ownable) onlyOwner {
         revert RenounceOwnershipBlocked();
     }
@@ -136,12 +129,10 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     // Core Calculation Functions
     // =========================================================================
 
-    /// @notice Quote commission for an inbound (`fundsIn`) transfer on this chain.
-    /// @param sourceChainId          Origin chain id (must match configured route keys).
-    ///                               EVM source uses `block.chainid`; non-EVM source uses
-    ///                               the backend's assigned numeric id.
-    /// @param destChainId            Destination chain id (EVM `block.chainid` or assigned
-    ///                               backend id for non-EVM targets).
+    /// @notice Quotes commission for an inbound (`fundsIn`) transfer on this chain.
+    /// @param sourceChainId          Source chain id used to resolve a route override or global
+    ///                               defaults.
+    /// @param destChainId            Destination chain id (EVM chain id, or 827166 for RGB).
     /// @param token                  ERC-20 token used for the transfer.
     /// @param amount                 Gross amount bridged (same units as token).
     /// @return tokenCommission Fee in token smallest units (0 if not `TOKEN` currency).
@@ -190,10 +181,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         }
     }
 
-    /// @notice Quote commission for an outbound (`fundsOut`) release on this chain.
-    /// @param sourceChainId          Origin chain id (must match configured route keys).
-    ///                               For RGB→EVM the source is the backend's assigned id
-    ///                               for the Bitcoin-side network.
+    /// @notice Quotes commission for an outbound (`fundsOut`) release on this chain.
+    /// @param sourceChainId          Source chain id used to resolve a route override or global
+    ///                               defaults (827166 for RGB→EVM releases).
     /// @param destChainId            Destination chain id (the EVM chain receiving the release).
     /// @param token                  ERC-20 token being released.
     /// @param amount                 Gross amount to release before fee.
@@ -280,8 +270,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     /// @dev Reads a non-zero Bridge amount floor or reverts with AmountFloorUnavailable.
     function _amountFloor(CommissionSide side) internal view returns (uint256 floor) {
         address bridge = bridgeAddress;
-        // Explicit code check first: Solidity's `extcodesize` guard on a
-        // high-level call to a codeless address reverts WITHOUT data.
+        // Report a domain-specific error before decoding a response from a code-less address.
         if (bridge.code.length == 0) revert AmountFloorUnavailable();
 
         if (side == CommissionSide.FUNDS_IN) {
@@ -318,12 +307,12 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     }
 
     /// @inheritdoc ICommissionManager
-    /// @dev Assumes the token is a USD-pegged stablecoin (1 token unit ≈ $1).
+    /// @dev Assumes the token is a USD-pegged stablecoin (1 whole token ≈ $1).
     ///      Math:
     ///         tokenFee  is in 10^tokenDecimals units (USD value 1:1)
     ///         price     = ETH/USD scaled by 10^feedDecimals
     ///         nativeFee = (tokenFee_usd / price_usd_per_eth) * 10^18
-    ///                   = tokenFee * 10^(18 - tokenDecimals + feedDecimals) / price
+    ///                  = tokenFee * 10^(18 - tokenDecimals + feedDecimals) / price
     function convertTokenFeeToNative(uint256 tokenFee, uint256 tokenDecimals) public view returns (uint256 nativeFee) {
         if (tokenFee == 0) return 0;
         if (tokenDecimals > 18) revert TokenDecimalsTooLarge();
@@ -367,10 +356,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) revert GracePeriodNotOver();
     }
 
-    /// @notice ERC-20 `decimals()` as `uint256` for exponent math.
-    /// @param token                  Token to query.
-    /// @return Token decimals (typically 6–18).
-    /// @dev Reverts `TokenDecimalsUnavailable` if the call fails (non-standard token).
+    /// @dev Reads token precision, reverting `TokenDecimalsUnavailable` if the call fails.
+    /// @param token Token to query.
+    /// @return Token decimals as `uint256` for exponent math.
     function _tokenDecimals(address token) internal view returns (uint256) {
         try IERC20Metadata(token).decimals() returns (uint8 d) {
             return uint256(d);
@@ -537,7 +525,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     // View Functions
     // =========================================================================
 
-    /// @notice Resolves stored rule or materializes global defaults with `isSet: true`.
+    /// @dev Resolves stored rule or materializes global defaults with `isSet: true`.
     /// @param ruleKey                `buildRouteKey` output.
     /// @return config Effective parameters for calculators.
     function getEffectiveConfig(bytes32 ruleKey) internal view returns (CommissionConfig memory) {
@@ -618,12 +606,10 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     /// @notice Credits `credited` token units to `tokenCommissionPool[token]`.
     /// @param token                  ERC-20 token (non-zero). Bridge must transfer tokens before
     ///                               this call.
-    /// @param credited               The Bridge-measured balance increase of THIS contract from
-    ///                               its `safeTransfer` (fee-on-transfer safe). Credited as-is
-    ///                               rather than
-    ///                               recomputed from `balanceOf - pool`, so a
-    ///                               pre-existing/unsolicited
-    ///                               direct transfer is never folded into the pool.
+    /// @param credited               Balance increase of this contract measured by Bridge around its
+    ///                               `safeTransfer` (fee-on-transfer safe). Credited as-is, not
+    ///                               recomputed from `balanceOf - pool`, so unsolicited transfers
+    ///                               are never folded into the pool.
     /// @dev Reverts if the resulting pool would exceed the on-chain balance —
     ///      guards against a caller crediting more than actually arrived.
     function receiveTokenCommission(address token, uint256 credited) external onlyBridge {

@@ -170,13 +170,11 @@ interface ICommissionManager {
     ///         release side.
     function releaseFloor() external view returns (uint256);
 
-    /// @notice Convert a USD-denominated token fee (stablecoin, 1 token ≈ $1) to
-    ///         native wei using the configured ETH/USD Chainlink feed. Reverts
-    ///         `EthUsdFeedNotSet` when the price feed is unconfigured,
-    ///         `ChainlinkHardeningNotConfigured` unless the sequencer feed and
-    ///         price band are both configured, `InvalidPrice` on non-positive
-    ///         answers, and `StalePrice` when `updatedAt` is older than the
-    ///         configured heartbeat.
+    /// @notice Converts a stablecoin-denominated fee to native wei using ETH/USD.
+    /// @dev Returns zero for a zero fee without reading oracle configuration.
+    /// @param tokenFee Fee in token smallest units, assuming one whole token is worth one USD.
+    /// @param tokenDecimals Token decimal precision.
+    /// @return nativeFee Native amount in wei, rounded down.
     function convertTokenFeeToNative(uint256 tokenFee, uint256 tokenDecimals) external view returns (uint256 nativeFee);
 
     // =========================================================================
@@ -191,20 +189,17 @@ interface ICommissionManager {
         CommissionCurrency currency
     ) external;
 
-    /// @notice Configure (or rotate) the ETH/USD Chainlink price feed used for
-    ///         NATIVE-currency commission quotes. `heartbeat` is the maximum
-    ///         allowed staleness in seconds before `calculate*Commission` reverts
-    ///         (Chainlink ETH/USD on Arbitrum heartbeats at 86400 s; a sensible
-    ///         setting is ~90000 with a safety buffer). Pass `address(0)` to
-    ///         disable NATIVE quoting until a new feed is set.
+    /// @notice Configures the ETH/USD feed and maximum answer age, in seconds.
+    /// @dev A nonzero feed requires a nonzero heartbeat. Clearing the feed disables
+    ///      nonzero native-fee conversions; zero-fee conversions still return zero.
     function setEthUsdFeed(address feed, uint256 heartbeat) external;
 
-    /// @notice Configure (or rotate) the Chainlink L2 Sequencer Uptime feed used
+    /// @notice Configures the Chainlink L2 Sequencer Uptime feed used
     ///         to gate NATIVE quotes on Arbitrum. Passing `address(0)` clears
     ///         the configuration and makes non-zero NATIVE quotes fail closed.
     function setSequencerUptimeFeed(address feed) external;
 
-    /// @notice Configure the mandatory [min, max] sanity band on the ETH/USD
+    /// @notice Configures the mandatory [min, max] sanity band on the ETH/USD
     ///         answer (feed decimals). Passing `(0, 0)` clears the configuration
     ///         and makes non-zero NATIVE quotes fail closed; otherwise
     ///         `0 < minPrice < maxPrice`.
@@ -251,27 +246,31 @@ interface ICommissionManager {
     ///         Callable only by the Bridge.
     function receiveTokenCommission(address token, uint256 credited) external;
 
-    /// @notice Native commission ingress; only `bridgeAddress` may call with non-zero value (see
-    ///         implementation).
+    /// @notice Credits native commission received from the Bridge.
+    /// @dev Every call requires `msg.sender == bridgeAddress` and nonzero `msg.value`.
     receive() external payable;
 
     // =========================================================================
     // Withdrawals (owner)
     // =========================================================================
 
-    /// @notice Withdraw accrued token commission to the immutable
+    /// @notice Withdraws accrued token commission to the immutable
     ///         `commissionRecipient`.
+    /// @dev Callable only by the CommissionManager owner.
     function withdrawTokenCommission(address token, uint256 amount) external;
 
-    /// @notice Withdraw accrued native commission to the immutable
+    /// @notice Withdraws accrued native commission to the immutable
     ///         `commissionRecipient`.
+    /// @dev Callable only by the CommissionManager owner.
     function withdrawNativeCommission(uint256 amount) external;
 
-    /// @notice Withdraw all accrued commission for `token` to the immutable
+    /// @notice Withdraws all accrued commission for `token` to the immutable
     ///         `commissionRecipient`.
+    /// @dev Callable only by the CommissionManager owner.
     function withdrawAllTokenCommission(address token) external;
 
-    /// @notice Withdraw all accrued native commission to the immutable
+    /// @notice Withdraws all accrued native commission to the immutable
     ///         `commissionRecipient`.
+    /// @dev Callable only by the CommissionManager owner.
     function withdrawAllNativeCommission() external;
 }
