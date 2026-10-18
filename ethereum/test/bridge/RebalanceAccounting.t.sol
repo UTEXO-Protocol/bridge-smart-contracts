@@ -30,7 +30,7 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         p.burnId = _deriveRebalanceBurnId(p);
     }
 
-    function test_rebalanceLiquidity_reverseRgbToLocalEvmRouteKeepsLegacyCreditId() public {
+    function test_rebalanceLiquidity_revertsLocalDestinationWithoutChangingAccounting() public {
         uint256 backingMint = RGB_OP_ID + 600;
         usdt0.mint(user, AMOUNT * 10);
         vm.prank(user);
@@ -40,10 +40,21 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         p.destinationChainId = SOURCE_CHAIN_ID;
         p.destinationAddress = "";
         p.settlementDataIn = abi.encode(RGB_OP_ID + 601);
-        bytes32 legacyId = _deriveRebalanceOpId(p);
-        assertTrue(legacyId != bridge.rgbMintDepositId(SOURCE_CHAIN_ID, RGB_OP_ID + 601, AMOUNT));
+        bytes32 operationId = _deriveRebalanceOpId(p);
+        uint256 sourceBefore = bridge.lockedLiquidity(p.sourceChainId);
+        uint256 destinationBefore = bridge.lockedLiquidity(p.destinationChainId);
+        uint256 totalBefore = bridge.totalLockedLiquidity();
+        uint256 bridgeBalanceBefore = usdt0.balanceOf(address(bridge));
+
+        vm.expectRevert(IBridge.InvalidDestinationChainId.selector);
         _rebalance(p);
-        assertEq(rgbModule.fundsInRecords(legacyId), AMOUNT, "reverse-route credit keeps its old identity");
+
+        assertEq(bridge.lockedLiquidity(p.sourceChainId), sourceBefore, "source bucket unchanged");
+        assertEq(bridge.lockedLiquidity(p.destinationChainId), destinationBefore, "local bucket unchanged");
+        assertEq(bridge.totalLockedLiquidity(), totalBefore, "total liquidity unchanged");
+        assertEq(usdt0.balanceOf(address(bridge)), bridgeBalanceBefore, "custody unchanged");
+        assertEq(rgbModule.fundsInRecords(operationId), 0, "no RGB credit record");
+        assertFalse(bridge.consumedBurnIds(p.burnId), "burn id remains unused");
     }
 
     function test_rebalanceLiquidity_archToRgbMovesBucketsAndWritesRecord() public {

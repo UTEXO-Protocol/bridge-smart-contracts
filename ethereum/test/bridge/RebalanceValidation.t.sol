@@ -69,6 +69,15 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         bridge.rebalanceLiquidity(p);
     }
 
+    function test_rebalanceLiquidity_revertsLocalDestinationOnArbitrum() public {
+        vm.chainId(42161);
+        IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        p.destinationChainId = block.chainid;
+        vm.prank(multisig);
+        vm.expectRevert(IBridge.InvalidDestinationChainId.selector);
+        bridge.rebalanceLiquidity(p);
+    }
+
     function test_rebalanceLiquidity_revertsSettlementDataOutTooLong() public {
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
         uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
@@ -127,11 +136,13 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_revertsRouteNotEnabled() public {
-        // (ARCH → SOURCE) was never registered as a route.
+        // (ARCH → SECONDARY_RGB) was never registered as a route.
         IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
-        p.destinationChainId = SOURCE_CHAIN_ID;
+        p.destinationChainId = SECONDARY_RGB_CHAIN_ID;
         vm.prank(multisig);
-        vm.expectRevert(abi.encodeWithSelector(IRouteRegistry.RouteNotEnabled.selector, ARCH_CHAIN_ID, SOURCE_CHAIN_ID));
+        vm.expectRevert(
+            abi.encodeWithSelector(IRouteRegistry.RouteNotEnabled.selector, ARCH_CHAIN_ID, SECONDARY_RGB_CHAIN_ID)
+        );
         bridge.rebalanceLiquidity(p);
     }
 
