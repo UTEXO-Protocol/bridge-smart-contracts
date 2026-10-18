@@ -6,33 +6,12 @@ import {FundsInContext, FundsOutContext} from "../interfaces/RouteTypes.sol";
 import {RgbSettlementModule} from "./RgbSettlementModule.sol";
 
 /// @title RgbOutboundSettlementModule
-/// @notice `ISettlementModule` for rebalance routes whose DEBIT side is an RGB
-///         network but whose CREDIT side is NOT an RGB network.
-///
-/// @dev The debit-side check must read the SAME `fundsInRecords` ledger the
-///      canonical `RgbSettlementModule` of that RGB network writes — a burn
-///      consignment references operation ids recorded there by past deposits
-///      and rebalances. A route slot holds exactly one module, so this module
-///      wraps the canonical one by reading its public ledger (view-only, no
-///      auth needed on the target) instead of duplicating storage.
-///
-///      Hook semantics:
-///        - `beforeFundsOut`: requires at least one pair and performs the same
-///          existence + exact-amount + same-network verification as
-///          `RgbSettlementModule.beforeFundsOut` (same `settlementData` layout,
-///          `abi.encode(bytes32[] operationIds, uint256[] amounts)`), evaluated
-///          against the wrapped module's ledger, including its
-///          `fundsInRecordChainIds` network tag vs `ctx.sourceChainId`. Pure
-///          reads — no consumption, matching the canonical release semantics
-///          (solvency is owned by `Bridge.lockedLiquidity`, replay by
-///          `Bridge.consumedBurnIds`).
-///        - `onFundsIn`: returns `0` and writes nothing. No record is created
-///          (nothing was minted with a new OpId on the credit side) and Bridge
-///          therefore emits no RGB-only `FundsIn` event for this leg.
-///
-///      Auth mirrors `RgbSettlementModule`: both hooks are gated on the
-///      immutable `routeRegistry` pairing, so a foreign registry cannot drive
-///      this module even though the hooks mutate nothing.
+/// @notice Checks RGB backing records for routes with a non-RGB credit leg.
+/// @dev A route has one module slot: this wrapper reads the canonical ledger instead
+///      of duplicating its history. Debit checks do not consume records.
+///      Debits require non-empty record references with exact amounts and network tags.
+///      Credits create no record or RGB event.
+///      Both hooks accept calls only from the paired registry.
 contract RgbOutboundSettlementModule is ISettlementModule {
     // =========================================================================
     // Errors
@@ -92,10 +71,10 @@ contract RgbOutboundSettlementModule is ISettlementModule {
     // Constructor
     // =========================================================================
 
-    /// @param routeRegistry_ The `RouteRegistry` deployment that will drive
-    ///                       this module. Must be non-zero.
-    /// @param rgbModule_     Canonical `RgbSettlementModule` whose ledger the
-    ///                       debit-side check reads. Must be non-zero.
+    /// @param routeRegistry_         The `RouteRegistry` deployment that will drive
+    ///                               this module. Must be non-zero.
+    /// @param rgbModule_             Canonical `RgbSettlementModule` whose ledger the
+    ///                               debit-side check reads. Must be non-zero.
     constructor(address routeRegistry_, address rgbModule_) {
         if (routeRegistry_ == address(0)) revert InvalidRouteRegistry();
         if (rgbModule_ == address(0)) revert InvalidRgbModule();

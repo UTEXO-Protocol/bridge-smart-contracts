@@ -1,16 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-/**
- * @title ICommissionManager types & interface
- * @notice Shared enums and struct for {CommissionManager}; see `ICommissionManager` for the external API.
- *
- *         Chain identifiers — both `sourceChainId` and `destChainId` — are uint256
- *         values. EVM chains use their native `block.chainid`. Non-EVM
- *         destinations (RGB, Bitcoin, …) are assigned numeric ids by the Utexo
- *         backend in a namespace reserved above the EVM range (see project
- *         README for the conventions).
- */
+// Shared fee configuration types.
 
 /// @notice Which bridge operation a route fee is tied to.
 enum CommissionSide {
@@ -24,13 +15,9 @@ enum CommissionCurrency {
     NATIVE
 }
 
-/// @notice Commission parameters for one directional route (keyed by `buildRouteKey`).
-/// @dev The effective fee is `amount * stablePercent / multiplier^2 + baseFee`:
-///      a proportional part plus a flat part. `baseFee` is denominated in the
-///      token's smallest units (the bridged token is a USD-pegged stablecoin, so
-///      it doubles as a USD figure) and exists to cover a per-operation cost that
-///      does not scale with the amount — notably the Bitcoin transaction fee on
-///      the RGB leg. Either part may be zero; both zero disables the route's fee.
+/// @notice Fee parameters for one directional route.
+/// @dev Fee in token smallest units is amount * stablePercent / multiplier^2 + baseFee.
+///      Both components may be zero to disable commission.
 struct CommissionConfig {
     uint256 stablePercent;
     uint256 baseFee;
@@ -40,12 +27,13 @@ struct CommissionConfig {
     bool isSet;
 }
 
-/**
- * @title ICommissionManager
- * @notice Commission quotes, owner configuration, and custody of bridge fees. `CommissionManager` is the reference implementation.
- */
+/// @title ICommissionManager
+/// @notice Commission quotes, owner configuration, and custody of bridge fees.
+/// @dev EVM routes use EVM chain ids; RGB uses the protocol-assigned id 827166.
 interface ICommissionManager {
-    // ============ Errors ============
+    // =========================================================================
+    // Errors
+    // =========================================================================
 
     error OnlyBridge();
     error InvalidBridgeAddress();
@@ -82,7 +70,9 @@ interface ICommissionManager {
     error ChainlinkHardeningNotConfigured();
     error InvalidSequencerRound(uint256 startedAt);
 
-    // ============ Events ============
+    // =========================================================================
+    // Events
+    // =========================================================================
 
     event BridgeAddressUpdated(address indexed newBridge);
 
@@ -110,7 +100,9 @@ interface ICommissionManager {
     event TokenCommissionWithdrawn(address indexed token, address indexed to, uint256 amount);
     event NativeCommissionWithdrawn(address indexed to, uint256 amount);
 
-    // ============ State getters ============
+    // =========================================================================
+    // State getters
+    // =========================================================================
 
     function bridgeAddress() external view returns (address);
 
@@ -142,7 +134,9 @@ interface ICommissionManager {
 
     function ethUsdMaxPrice() external view returns (uint256);
 
-    // ============ Core calculations ============
+    // =========================================================================
+    // Core calculations
+    // =========================================================================
 
     function calculateFundsInCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
         external
@@ -185,7 +179,9 @@ interface ICommissionManager {
     ///         configured heartbeat.
     function convertTokenFeeToNative(uint256 tokenFee, uint256 tokenDecimals) external view returns (uint256 nativeFee);
 
-    // ============ Admin / config ============
+    // =========================================================================
+    // Admin / config
+    // =========================================================================
 
     function setGlobalDefaults(
         uint256 stablePercent,
@@ -243,7 +239,9 @@ interface ICommissionManager {
 
     function buildRouteKey(uint256 sourceChainId, uint256 destChainId, address token) external pure returns (bytes32);
 
-    // ============ Commission ingress (bridge) ============
+    // =========================================================================
+    // Commission ingress (bridge)
+    // =========================================================================
 
     /// @notice Credit `credited` token units to the commission pool. The Bridge
     ///         measures `credited` as the actual balance increase of this
@@ -253,10 +251,13 @@ interface ICommissionManager {
     ///         Callable only by the Bridge.
     function receiveTokenCommission(address token, uint256 credited) external;
 
-    /// @notice Native commission ingress; only `bridgeAddress` may call with non-zero value (see implementation).
+    /// @notice Native commission ingress; only `bridgeAddress` may call with non-zero value (see
+    ///         implementation).
     receive() external payable;
 
-    // ============ Withdrawals (owner) ============
+    // =========================================================================
+    // Withdrawals (owner)
+    // =========================================================================
 
     /// @notice Withdraw accrued token commission to the immutable
     ///         `commissionRecipient`.

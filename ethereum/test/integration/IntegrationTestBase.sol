@@ -87,7 +87,8 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant USER_DEPOSIT = 1 ether; // one 18-decimal mock token gross
 
-    // FUNDS_IN route: 2% token commission (stablePercent = 200, multiplier = 100 → 200/100/100 = 2%).
+    // FUNDS_IN route: 2% token commission (stablePercent = 200, multiplier = 100 → 200/100/100 =
+    // 2%).
     uint256 internal constant FUNDS_IN_PERCENT = 200;
 
     uint8 internal constant FUNDS_IN_MULT = 100;

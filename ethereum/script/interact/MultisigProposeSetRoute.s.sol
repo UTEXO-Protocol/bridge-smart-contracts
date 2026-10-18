@@ -7,27 +7,13 @@ import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {MultisigHelper} from "../../test/helpers/MultisigHelper.sol";
 
 /// @title MultisigProposeSetRoute
-/// @notice Signs and submits a `proposeSetRoute(...)` federation proposal
-///         against MultisigProxy. The first federation-side step after
-///         DeployAll — registers or updates a route entry in the Bridge's
-///         RouteRegistry once the timelock elapses.
-///
-/// @dev    The matching `executeProposal(...)` call (which is permissionless)
-///         is intentionally NOT submitted by this script — operators run it
-///         manually with `cast send` after the timelock window passes. The
-///         `opData` payload required by `executeProposal` is printed below.
-///
-/// Env:
-///   PRIVATE_KEY              — tx submitter (anyone)
-///   PROXY_ADDRESS            — MultisigProxy address
-///   SOURCE_CHAIN_ID (uint)   — source chain id of the route key
-///   DEST_CHAIN_ID   (uint)   — destination chain id of the route key
-///   ROUTE_ENABLED   (bool)   — `true` to (re)enable, `false` to pause-in-place
-///   FINALITY_VERIFIER (addr) — verifier deployment (e.g. RGBVerifier)
-///   SETTLEMENT_MODULE (addr) — settlement module deployment
-///   FED_PKS                  — comma-separated federation private keys
-///   FED_BITMAP               — participating signer bitmap
-///   DEADLINE_OFFSET          — seconds from now (e.g. 7 days)
+/// @notice Locally signs and submits a route proposal, then prints execution data.
+/// @dev Reads DEST_CHAIN_ID, not DESTINATION_CHAIN_ID. Execute the printed opData after
+///      the timelock. DEADLINE_OFFSET must cover the delay plus an execution window,
+///      and must be at most 30 days.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `PROXY_ADDRESS`, `SOURCE_CHAIN_ID`, `DEST_CHAIN_ID`, `ROUTE_ENABLED`,
+///      `FINALITY_VERIFIER`, `SETTLEMENT_MODULE`, `FED_PKS`, `FED_BITMAP`, `DEADLINE_OFFSET`.
 contract MultisigProposeSetRoute is Script {
     function run() external returns (bytes32 proposalId) {
         uint256 pk = vm.envUint("PRIVATE_KEY");

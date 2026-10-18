@@ -7,7 +7,7 @@ import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol"
 
 /// @notice RGB settlement requires parallel operation IDs and exact recorded amounts.
 /// @dev Records remain permanent. Empty accounting-only settlements are valid;
-///      nonempty releases validate each pair without comparing their sum to
+///      non-empty releases validate each pair without comparing their sum to
 ///      the release amount. Bridge enforces solvency and burn replay protection.
 contract RgbSettlementModuleTest is Test {
     bytes32 internal constant SRC_BURN_TX_ID = keccak256("unit-burn-tx");

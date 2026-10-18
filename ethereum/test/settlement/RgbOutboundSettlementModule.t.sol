@@ -17,7 +17,7 @@ contract RgbOutboundSettlementModuleTest is BridgeRebalanceTestBase {
             amount: AMOUNT,
             burnId: 1,
             sourceChainId: RGB_CHAIN_ID,
-            destChainId: ARCH_CHAIN_ID,
+            destChainId: CHAIN_A_ID,
             sourceAddress: RGB_SRC_ADDR,
             isRebalance: true,
             sourceBurnTxId: SRC_BURN_TX_ID
@@ -30,7 +30,7 @@ contract RgbOutboundSettlementModuleTest is BridgeRebalanceTestBase {
 
     function test_outboundModule_revertsUnknownRecord() public {
         bytes32 bogus = keccak256("no-such-record");
-        IBridge.RebalanceParams memory p = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        IBridge.RebalanceParams memory p = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
         bytes32[] memory ids = new bytes32[](1);
         ids[0] = bogus;
         uint256[] memory amounts = new uint256[](1);
@@ -44,7 +44,7 @@ contract RgbOutboundSettlementModuleTest is BridgeRebalanceTestBase {
 
     function test_outboundModule_revertsAmountMismatch() public {
         uint256 recorded = rgbModule.fundsInRecords(rgbSeedOpId);
-        IBridge.RebalanceParams memory p = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        IBridge.RebalanceParams memory p = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
         bytes32[] memory ids = new bytes32[](1);
         ids[0] = rgbSeedOpId;
         uint256[] memory amounts = new uint256[](1);
@@ -61,7 +61,7 @@ contract RgbOutboundSettlementModuleTest is BridgeRebalanceTestBase {
     }
 
     function test_outboundModule_revertsLengthMismatch() public {
-        IBridge.RebalanceParams memory p = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        IBridge.RebalanceParams memory p = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
         p.settlementDataOut = abi.encode(new bytes32[](2), new uint256[](1));
         p.burnId = _deriveRebalanceBurnId(p);
         vm.prank(multisig);
@@ -78,7 +78,7 @@ contract RgbOutboundSettlementModuleTest is BridgeRebalanceTestBase {
                 amount: AMOUNT,
                 burnId: 1,
                 sourceChainId: RGB_CHAIN_ID,
-                destChainId: ARCH_CHAIN_ID,
+                destChainId: CHAIN_A_ID,
                 sourceAddress: RGB_SRC_ADDR,
                 isRebalance: true,
                 sourceBurnTxId: SRC_BURN_TX_ID
@@ -97,8 +97,8 @@ contract RgbOutboundSettlementModuleTest is BridgeRebalanceTestBase {
                 operationId: bytes32(0),
                 senderNonce: 0,
                 sourceChainId: RGB_CHAIN_ID,
-                destChainId: ARCH_CHAIN_ID,
-                destAddress: ARCH_DST_ADDR
+                destChainId: CHAIN_A_ID,
+                destAddress: CHAIN_A_DST_ADDR
             }),
             ""
         );

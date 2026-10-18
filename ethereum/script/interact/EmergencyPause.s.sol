@@ -6,14 +6,10 @@ import {MultisigProxy} from "../../src/MultisigProxy.sol";
 import {MultisigHelper} from "../../test/helpers/MultisigHelper.sol";
 
 /// @title EmergencyPause
-/// @notice Locally signs and submits MultisigProxy.emergencyPause().
-///
-/// Env:
-///   PRIVATE_KEY       — tx submitter
-///   PROXY_ADDRESS     — MultisigProxy address
-///   FED_PKS           — comma-separated federation private keys
-///   FED_BITMAP        — participating signer bitmap
-///   DEADLINE_OFFSET   — seconds from now, at most 86400
+/// @notice Locally signs and submits a federation emergency pause.
+/// @dev Uses emergencyNonce. DEADLINE_OFFSET must be at most 86400 seconds.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `PROXY_ADDRESS`, `FED_PKS`, `FED_BITMAP`, `DEADLINE_OFFSET`.
 contract EmergencyPause is Script {
     function run() external {
         uint256 pk = vm.envUint("PRIVATE_KEY");
@@ -34,9 +30,7 @@ contract EmergencyPause is Script {
         console2.log("emergencyPause submitted. New emergencyNonce:", proxy.emergencyNonce());
     }
 
-    /// @dev Emergency actions have an independent nonce lane. Keeping nonce
-    ///      lookup and digest construction together prevents the production
-    ///      script from accidentally signing with the regular proposal nonce.
+    /// @dev Uses emergencyNonce, independent of proposal and enclave nonces.
     function _prepareEmergencyPause(MultisigProxy proxy, uint256 deadline)
         internal
         view

@@ -20,9 +20,7 @@ interface ILZAdapterSendOut {
         payable;
 }
 
-/// @notice Minimal view of the Bridge's custodied-token getter. `Bridge`
-///         exposes `TOKEN` as a public immutable; this avoids adding it to
-///         `IBridge` (which would clash with the `BridgeBase` state variable).
+/// @notice Token getter used to measure delivery to the LayerZero adapter.
 interface IBridgeToken {
     function TOKEN() external view returns (address);
 }
@@ -47,13 +45,8 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     ///         until then (closes adapter-execute by default).
     address public lzAdapter;
 
-    /// @notice Per-source-chain enclave signer sets. Each source network (RGB,
-    ///         Concordium/Arch, …) is validated by its own TEE code and therefore
-    ///         has its own key set; a release for `sourceChainId` is authorised
-    ///         only by the set registered for that chain. Selected on the release
-    ///         path via `params.sourceChainId`, which is already committed to in
-    ///         the enclave EIP-712 digest — so a signature for one source chain
-    ///         cannot be replayed against another.
+    /// @notice Enclave signer sets indexed by source chain.
+    /// @dev The signed sourceChainId selects the set used to authorize the operation.
     mapping(uint256 sourceChainId => address[]) private _enclaveSigners;
 
     /// @notice Per-source-chain enclave quorum. `0` means the source chain is
@@ -72,11 +65,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     ///         snapshots this value and becomes unexecutable after a rotation.
     uint256 public federationSignerSetVersion;
 
-    /// @notice Per-source-chain nonce for the typed TEE methods (`fundsOutCall`
-    ///         / `lzFundsOutCall`). Each source chain has its own lane, so the
-    ///         TEE operating one network cannot invalidate another network's
-    ///         pre-signed release. Each successful call must match the current
-    ///         value for its `sourceChainId` and then increments it.
+    /// @notice Per-source-chain nonce shared by fundsOutCall, lzFundsOutCall and rebalanceCall.
     mapping(uint256 sourceChainId => uint256) public teeNonce;
 
     /// @notice Federation proposals.
@@ -339,15 +328,13 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     }
 
     /// @dev EIP-712 struct hash for `TeeFundsOut`. Isolated in its own frame to
-    ///      keep `fundsOutCall` within stack limits.
+    ///      keep `fundsOutCall` free of stack-too-deep errors.
     function _fundsOutStructHash(IBridge.FundsOutParams calldata params, uint256 nonce, uint256 deadline)
         private
         pure
         returns (bytes32)
     {
-        // Pre-hash the dynamic fields into locals first: each `bytes`/`string`
-        // argument otherwise keeps an (offset, length) pair live across the
-        // whole expression, which overflows the stack under via-ir.
+        // Hash dynamic fields into locals to avoid stack-too-deep errors.
         bytes32 sourceAddressHash = keccak256(bytes(params.sourceAddress));
         bytes32 proofHash = keccak256(params.proof);
         bytes32 settlementDataHash = keccak256(params.settlementData);
@@ -368,13 +355,8 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     }
 
     /// @inheritdoc IMultisigProxy
-    /// @dev Typed enclave rebalance: the only call this makes is
-    ///      `Bridge.rebalanceLiquidity`. Signer-set selection, nonce stream and
-    ///      timing rules mirror `fundsOutCall`: the SOURCE chain's enclave set
-    ///      authorises the operation (it attests the funds left that chain — a
-    ///      compromised set can migrate at most `lockedLiquidity[source]`, the
-    ///      same bound a rogue `fundsOut` has), and the shared per-source-chain
-    ///      `teeNonce` orders it against releases from the same chain.
+    /// @dev Uses the source chain's enclave set and shares its nonce with releases.
+    ///      Even a compromised set cannot debit more than `lockedLiquidity[sourceChainId]`.
     function rebalanceCall(
         IBridge.RebalanceParams calldata params,
         uint256 nonce,
@@ -410,9 +392,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         pure
         returns (bytes32)
     {
-        // Pre-hash the dynamic fields into locals first: each `bytes`/`string`
-        // argument otherwise keeps an (offset, length) pair live across the
-        // whole expression, which overflows the stack under via-ir.
+        // Hash dynamic fields into locals to avoid stack-too-deep errors.
         bytes32 sourceAddressHash = keccak256(bytes(params.sourceAddress));
         bytes32 destinationAddressHash = keccak256(bytes(params.destinationAddress));
         bytes32 proofHash = keccak256(params.proof);
@@ -443,11 +423,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     }
 
     /// @inheritdoc IMultisigProxy
-    /// @dev Typed Flow-4 release: releases to the LZ adapter and bridges onward
-    ///      in one signed operation. The Bridge recipient is forced to
-    ///      `lzAdapter`, and the amount sent out is the balance actually
-    ///      delivered to the adapter (measured here), so the two legs are bound
-    ///      on-chain and cannot be mismatched.
+    /// @dev Releases to the adapter and sends onward the measured token receipt.
     function lzFundsOutCall(
         LzFundsOutParams calldata params,
         uint256 nonce,
@@ -485,7 +461,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     }
 
     /// @dev Release leg of `lzFundsOutCall`, isolated in its own frame to keep
-    ///      the caller within stack limits. Forces the Bridge recipient to the
+    ///      the caller free of stack-too-deep errors. Forces the Bridge recipient to the
     ///      adapter (never taken from `params`) and returns the balance the
     ///      adapter ACTUALLY received, so the release and the onward send are
     ///      bound on-chain.
@@ -509,7 +485,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     }
 
     /// @dev EIP-712 struct hash for `TeeLzFundsOut`. Isolated in its own frame
-    ///      to keep `lzFundsOutCall` within stack limits.
+    ///      to keep `lzFundsOutCall` free of stack-too-deep errors.
     function _lzFundsOutStructHash(LzFundsOutParams calldata params, uint256 nonce, uint256 deadline)
         private
         pure
@@ -519,9 +495,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         // field is a 32-byte word (dynamic ones are pre-hashed), so the result
         // is byte-identical to encoding all fields at once, but each half is
         // shallow enough to compile without the optimizer (e.g. `forge coverage`).
-        // Pre-hash the dynamic fields into locals first: each `bytes`/`string`
-        // argument otherwise keeps an (offset, length) pair live across the
-        // whole expression, which overflows the stack under via-ir.
+        // Hash dynamic fields into locals to avoid stack-too-deep errors.
         bytes32 sourceAddressHash = keccak256(bytes(params.sourceAddress));
         bytes32 proofHash = keccak256(params.proof);
         bytes32 settlementDataHash = keccak256(params.settlementData);
@@ -1291,9 +1265,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     // Internal — execute router
     // =========================================================================
 
-    /// @dev External targets for the eleven governance lanes that previously
-    ///      resolved a mutable pointer only at execution. Local configuration,
-    ///      explicit ownership transfers and upgrades use their existing rules.
+    /// @dev Resolves the current target for address-bound governance operations.
     function _proposalTarget(OperationType opType) private view returns (address) {
         if (
             opType == OperationType.AdminExecute || opType == OperationType.UpdateCommissionManager
@@ -1439,10 +1411,8 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
             if (registry == address(0)) revert ZeroTarget();
             IRouteRegistry(registry).setRoute(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule);
         } else if (opType == OperationType.UpdateRouteRegistry) {
-            // Rotates Bridge's `routeRegistry` immutable-shaped slot. The new
-            // registry MUST be deployed with Bridge's address as its
-            // constructor `bridge_`; otherwise dispatcher calls revert
-            // `NotBridge` and the route plane goes dark.
+            // Deployment must bind the replacement registry to this Bridge; the setter
+            // checks code and non-zero address, not that binding.
             address newRegistry = abi.decode(opData, (address));
             IBridge(target).setRouteRegistry(newRegistry);
         } else if (opType == OperationType.PauseInflow) {
@@ -1542,16 +1512,8 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     // Internal — utility helpers
     // =========================================================================
 
-    /// @dev Validates no zero addresses and no duplicates. O(n^2), fine for <20 signers.
-    /// @dev Enforces the quorum policy shared by both signer sets (enclave and
-    ///      federation), in the constructor and the signer-update handlers:
-    ///        - at least 2 signers (no single-key set);
-    ///        - threshold of at least 2 (no single signer can authorise alone);
-    ///        - threshold a strict majority (`2 * threshold > n`), which rejects
-    ///          1-of-N and any sub-majority quorum;
-    ///        - threshold not exceeding the signer count.
-    ///      The smallest valid sets are 2-of-2 and 2-of-3. This upholds the
-    ///      spec invariant "one signer MUST NOT authorise fundsOut alone".
+    /// @dev Requires at least two signers and a strict-majority threshold in [2, n].
+    ///      `_validateSigners` checks addresses, uniqueness and the maximum set size.
     function _requireValidThreshold(uint256 threshold, uint256 n) private pure {
         if (n < 2 || threshold < 2 || threshold > n || 2 * threshold <= n) {
             revert InvalidThreshold();

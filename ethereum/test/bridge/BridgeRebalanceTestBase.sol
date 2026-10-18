@@ -16,14 +16,14 @@ import {BurnIdHelper} from "../helpers/BurnIdHelper.sol";
 import {MockBtcRelay} from "../mocks/MockBtcRelay.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
-/// @notice Shared Bridge fixture for accounting-only rebalances across RGB and Arch.
+/// @notice Shared Bridge fixture for accounting-only rebalances across RGB and chain A.
 /// @dev SOURCE -> RGB: RGBVerifier + RgbSettlementModule, creates a mint record.
-///      SOURCE -> Arch: NullVerifier + NullSettlementModule, credits liquidity.
-///      Arch -> RGB: NullVerifier + RgbSettlementModule, accepts empty debit
+///      SOURCE -> chain A: NullVerifier + NullSettlementModule, credits liquidity.
+///      chain A -> RGB: NullVerifier + RgbSettlementModule, accepts empty debit
 ///      records and creates a destination record plus FundsIn event.
-///      RGB -> Arch: RGBVerifier + RgbOutboundSettlementModule, verifies the
+///      RGB -> chain A: RGBVerifier + RgbOutboundSettlementModule, verifies the
 ///      burn and exact debit records; creates neither a mint nor FundsIn event.
-///      Secondary and production RGB routes share the canonical record ledger
+///      Secondary and mint/burn fixture routes share the canonical record ledger
 ///      and source-burn replay namespace.
 abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
     Bridge internal bridge;
@@ -56,19 +56,21 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant RGB_CHAIN_ID = 1_000_001; // primary RGB mint/burn network
 
-    uint256 internal constant ARCH_CHAIN_ID = 1_000_002; // backend-assigned for Arch
+    uint256 internal constant CHAIN_A_ID = 1_000_002; // synthetic chain A fixture
 
-    uint256 internal constant SECONDARY_RGB_CHAIN_ID = 1_000_003; // second RGB mint/burn network (shared canonical ledger)
+    // Secondary RGB fixture sharing the canonical ledger.
+    uint256 internal constant SECONDARY_RGB_CHAIN_ID = 1_000_003;
 
-    uint256 internal constant PRODUCTION_RGB_MINT_BURN_CHAIN_ID = 96;
+    // Synthetic fixture id; the production RGB network id is 827166.
+    uint256 internal constant MINT_BURN_FIXTURE_CHAIN_ID = 96;
 
     string internal constant RGB_DST_ADDR = "";
 
-    string internal constant ARCH_DST_ADDR = "arch:bridge-wallet";
+    string internal constant CHAIN_A_DST_ADDR = "chain-a:bridge-wallet";
 
-    string internal constant RGB_SRC_ADDR = ""; // RGB has no source-address concept
+    string internal constant RGB_SRC_ADDR = ""; // RGB sourceAddress is supplied as an empty string
 
-    string internal constant ARCH_SRC_ADDR = "arch:burner";
+    string internal constant CHAIN_A_SRC_ADDR = "chain-a:burner";
 
     uint256 internal constant AMOUNT = 1e18;
 
@@ -126,10 +128,10 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
 
         // Deposit routes.
         routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
-        routeRegistry.setRoute(SOURCE_CHAIN_ID, ARCH_CHAIN_ID, true, address(nullVerifier), address(nullModule));
+        routeRegistry.setRoute(SOURCE_CHAIN_ID, CHAIN_A_ID, true, address(nullVerifier), address(nullModule));
         // Rebalance routes (hub model).
-        routeRegistry.setRoute(ARCH_CHAIN_ID, RGB_CHAIN_ID, true, address(nullVerifier), address(rgbModule));
-        routeRegistry.setRoute(RGB_CHAIN_ID, ARCH_CHAIN_ID, true, address(rgbVerifier), address(outboundModule));
+        routeRegistry.setRoute(CHAIN_A_ID, RGB_CHAIN_ID, true, address(nullVerifier), address(rgbModule));
+        routeRegistry.setRoute(RGB_CHAIN_ID, CHAIN_A_ID, true, address(rgbVerifier), address(outboundModule));
 
         // A second mint/burn network shares the canonical ledger. Both
         // rebalance directions verify a burn against the source network tag.
@@ -137,16 +139,16 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
         routeRegistry.setRoute(SECONDARY_RGB_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
         routeRegistry.setRoute(RGB_CHAIN_ID, SECONDARY_RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
 
-        // Production mint/burn network: physical EVM releases and RGB -> Arch
+        // Mint/burn fixture: physical EVM releases and RGB -> chain A
         // rebalances share the same source burn namespace.
         routeRegistry.setRoute(
-            SOURCE_CHAIN_ID, PRODUCTION_RGB_MINT_BURN_CHAIN_ID, true, address(rgbVerifier), address(rgbModule)
+            SOURCE_CHAIN_ID, MINT_BURN_FIXTURE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule)
         );
         routeRegistry.setRoute(
-            PRODUCTION_RGB_MINT_BURN_CHAIN_ID, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule)
+            MINT_BURN_FIXTURE_CHAIN_ID, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule)
         );
         routeRegistry.setRoute(
-            PRODUCTION_RGB_MINT_BURN_CHAIN_ID, ARCH_CHAIN_ID, true, address(rgbVerifier), address(outboundModule)
+            MINT_BURN_FIXTURE_CHAIN_ID, CHAIN_A_ID, true, address(rgbVerifier), address(outboundModule)
         );
 
         bridge.transferOwnership(multisig);
@@ -160,20 +162,20 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
         // would. Nothing about the configuration depends on current TVL.
         vm.startPrank(multisig);
         bridge.setOutflowLimit(RGB_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
-        bridge.setOutflowLimit(ARCH_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
+        bridge.setOutflowLimit(CHAIN_A_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
         bridge.setOutflowLimit(SECONDARY_RGB_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
-        bridge.setOutflowLimit(PRODUCTION_RGB_MINT_BURN_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
+        bridge.setOutflowLimit(MINT_BURN_FIXTURE_CHAIN_ID, MAX_BURST_BPS, MAX_REFILL_BPS);
         bridge.setGlobalOutflowLimit(MAX_BURST_BPS, MAX_REFILL_BPS);
         vm.stopPrank();
 
-        // Fund the RGB, Arch and secondary RGB buckets with real deposits.
+        // Fund the RGB, chain A and secondary RGB buckets with real deposits.
         usdt0.mint(user, AMOUNT * 30);
         vm.prank(user);
         usdt0.approve(address(bridge), type(uint256).max);
         vm.prank(user);
         rgbSeedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT * 10, ARCH_CHAIN_ID, ARCH_DST_ADDR, "");
+        bridge.fundsIn(AMOUNT * 10, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
         vm.prank(user);
         secondaryRgbSeedOpId =
             bridge.fundsIn(AMOUNT * 10, SECONDARY_RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 100));
@@ -241,9 +243,9 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
         );
     }
 
-    /// @dev Arch → RGB rebalance params (credit-RGB: mint record + FundsIn),
+    /// @dev chain A → RGB rebalance params (credit-RGB: mint record + FundsIn),
     ///      canonical burnId filled in from the intent.
-    function _archToRgbParams(uint256 amount, uint256 rgbOpId)
+    function _chainAToRgbParams(uint256 amount, uint256 rgbOpId)
         internal
         view
         returns (IBridge.RebalanceParams memory p)
@@ -251,9 +253,9 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
         p = IBridge.RebalanceParams({
             amount: amount,
             burnId: 0,
-            sourceChainId: ARCH_CHAIN_ID,
+            sourceChainId: CHAIN_A_ID,
             destinationChainId: RGB_CHAIN_ID,
-            sourceAddress: ARCH_SRC_ADDR,
+            sourceAddress: CHAIN_A_SRC_ADDR,
             destinationAddress: RGB_DST_ADDR,
             proof: "",
             settlementDataOut: _emptySettlement(),
@@ -263,9 +265,9 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
         p.burnId = _deriveRebalanceBurnId(p);
     }
 
-    /// @dev RGB → Arch rebalance params (debit-RGB: burn-backed), canonical
+    /// @dev RGB → chain A rebalance params (debit-RGB: burn-backed), canonical
     ///      burnId filled in from the shared settlement replay fields.
-    function _rgbToArchParams(uint256 amount, bytes32 referencedOpId)
+    function _rgbToChainAParams(uint256 amount, bytes32 referencedOpId)
         internal
         view
         returns (IBridge.RebalanceParams memory p)
@@ -274,9 +276,9 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
             amount: amount,
             burnId: 0,
             sourceChainId: RGB_CHAIN_ID,
-            destinationChainId: ARCH_CHAIN_ID,
+            destinationChainId: CHAIN_A_ID,
             sourceAddress: RGB_SRC_ADDR,
-            destinationAddress: ARCH_DST_ADDR,
+            destinationAddress: CHAIN_A_DST_ADDR,
             proof: _proof(),
             settlementDataOut: _settlementFromRecord(referencedOpId),
             settlementDataIn: "",
@@ -290,7 +292,7 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
         bridge.rebalanceLiquidity(p);
     }
 
-    function _productionRgbToArchParams(uint256 amount, bytes32 referencedOpId)
+    function _mintBurnToChainAParams(uint256 amount, bytes32 referencedOpId)
         internal
         view
         returns (IBridge.RebalanceParams memory p)
@@ -298,10 +300,10 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
         p = IBridge.RebalanceParams({
             amount: amount,
             burnId: 0,
-            sourceChainId: PRODUCTION_RGB_MINT_BURN_CHAIN_ID,
-            destinationChainId: ARCH_CHAIN_ID,
+            sourceChainId: MINT_BURN_FIXTURE_CHAIN_ID,
+            destinationChainId: CHAIN_A_ID,
             sourceAddress: RGB_SRC_ADDR,
-            destinationAddress: ARCH_DST_ADDR,
+            destinationAddress: CHAIN_A_DST_ADDR,
             proof: _proof(),
             settlementDataOut: _settlementFromRecord(referencedOpId),
             settlementDataIn: "",

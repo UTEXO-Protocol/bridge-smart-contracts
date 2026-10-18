@@ -44,7 +44,7 @@ abstract contract CommissionManagerTestBase is Test {
     uint256 internal constant MAX_ETH_USD = 100_000e8;
 
     /// @dev Bridge dust floors the manager reads to bound a flat `baseFee` on
-    ///      each side, in token base units. Deliberately different values make
+    ///      each side, in token smallest units. Deliberately different values make
     ///      a test that reads the wrong one fail. This isolated getter fixture
     ///      intentionally inverts the Bridge ordering (inbound >= outbound);
     ///      real Bridge minimum-order validation is covered in bridge/AmountFloors.

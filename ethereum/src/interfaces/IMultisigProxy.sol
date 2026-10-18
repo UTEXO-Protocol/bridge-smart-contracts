@@ -4,40 +4,13 @@ pragma solidity 0.8.35;
 import {IBridge} from "./IBridge.sol";
 
 /// @title IMultisigProxy
-/// @notice Two-level ECDSA multisig proxy that owns the Bridge and the CommissionManager.
-///
-/// @dev ENCLAVE SIGNERS (TEE / Nitro Enclave)
-///      Authorise releases through two purpose-built, typed methods — there is
-///      no generic call dispatch, so the enclave path can never reach a
-///      privileged setter:
-///        - `fundsOutCall`   — a single `Bridge.fundsOut` (RGB → Arbitrum);
-///        - `lzFundsOutCall`  — `Bridge.fundsOut` to the LZ adapter then
-///          `adapter.sendOut`, with the two legs bound on-chain (RGB → non-Arbitrum).
-///      Each source chain has its own `teeNonce` lane, selected by the
-///      release's `sourceChainId`, for per-network replay protection.
-///
-///      FEDERATION SIGNERS (governance / admin nodes)
-///      All administrative operations go through a two-phase timelock:
-///        Phase 1 — PROPOSE: federation signs, contract stores hash, emits full data.
-///        Phase 2 — EXECUTE: after timelockDuration, anyone can call executeProposal().
-///      Exception: federation emergencyPause / emergencyUnpause are instant
-///      (no timelock). A separately configured emergency guardian can invoke
-///      pause directly without signatures; unpause requires federation authorization.
-///
-///      COMMISSION MANAGER
-///      This proxy is the owner of the CommissionManager. Federation can reach CM via:
-///        - typed `WithdrawTokenCommissionCM` / `WithdrawNativeCommissionCM`
-///          (CM always pays its immutable `commissionRecipient`).
-///        - generic `AdminExecuteCommissionManager` for rare config changes
-///          (route rules, global defaults, mock rates, ownership migration, …).
-///          Withdrawal selectors are reserved for the typed operations.
-///        - `UpdateCommissionManager` to migrate to a redeployed CM.
-///
-///      BITMAP ENCODING
-///      Bit i of bitmap corresponds to signers[i]. sigs[] in ascending bit order.
-///
-///      EIP-712 DOMAIN
-///      name: "MultisigProxy"  version: "1"  chainId  verifyingContract
+/// @notice Enclave authorization and federation governance for the bridge contracts.
+/// @dev Enclave signatures authorize typed releases and rebalances with per-source-chain
+///      nonces. Federation proposals execute after a timelock; emergency pause/unpause
+///      bypass it. The guardian can pause only. Signatures use the MultisigProxy v1
+///      EIP-712 domain; bitmap bit i selects signer i, with signatures in ascending order.
+///      Enclave entrypoints have no generic dispatch. Anyone may execute a valid
+///      proposal after its timelock. CM withdrawal selectors are reserved for typed operations.
 interface IMultisigProxy {
     // =========================================================================
     // Errors
@@ -125,7 +98,7 @@ interface IMultisigProxy {
     }
 
     /// @notice Business parameters for `lzFundsOut`, bundled to keep the call
-    ///         within stack limits. Signed as the EIP-712 `TeeLzFundsOut` struct
+    ///         free of stack-too-deep errors. Signed as the EIP-712 `TeeLzFundsOut` struct
     ///         (these fields plus `nonce` and `deadline`).
     struct LzFundsOutParams {
         uint256 amount;
@@ -234,11 +207,8 @@ interface IMultisigProxy {
         bytes[] calldata enclaveSigs
     ) external;
 
-    /// @notice Typed Flow-4 enclave release: release to the LZ adapter and bridge
-    ///         onward in one signed operation. The Bridge recipient is forced to
-    ///         `lzAdapter` and the amount sent out equals the balance the adapter
-    ///         actually received, so the release and the cross-chain send are
-    ///         bound on-chain. `msg.value` funds the LayerZero native fee.
+    /// @notice Releases to the LayerZero adapter and sends onward in one enclave-authorized call.
+    /// @dev Uses the adapter's measured token receipt; msg.value pays the native delivery fee.
     function lzFundsOutCall(
         LzFundsOutParams calldata params,
         uint256 nonce,
@@ -322,7 +292,7 @@ interface IMultisigProxy {
     ///      redirected if `bridge` changes before execution.
     ///      Initialization calldata is capped at 4096 bytes including its selector,
     ///      at both proposal creation and execution. Empty calldata is allowed;
-    ///      nonempty calldata must contain a full selector.
+    ///      non-empty calldata must contain a full selector.
     function proposeUpgradeBridgeImplementation(
         address bridgeProxy,
         address newImplementation,
@@ -529,8 +499,8 @@ interface IMultisigProxy {
     /// @notice Execute a proposal after the timelock has elapsed. Permissionless.
     /// @dev Target callbacks cannot execute this or another proposal while an
     ///      execution is active. Sequential calls are allowed after it returns.
-    /// @param proposalId The proposal to execute.
-    /// @param opData     The same operation data that was provided at propose time.
+    /// @param proposalId             The proposal to execute.
+    /// @param opData                 The same operation data that was provided at propose time.
     function executeProposal(bytes32 proposalId, bytes calldata opData) external;
 
     // =========================================================================

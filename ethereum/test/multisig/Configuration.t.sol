@@ -8,7 +8,7 @@ import {MultisigProxyTestBase} from "./MultisigProxyTestBase.sol";
 
 /// @notice Constructor bounds and proposed signer/timelock configuration.
 contract MultisigConfigurationTest is MultisigProxyTestBase {
-    /// @dev Deterministic, distinct nonzero signer addresses for quorum checks.
+    /// @dev Deterministic, distinct non-zero signer addresses for quorum checks.
     function _signers(uint256 n) private pure returns (address[] memory a) {
         a = new address[](n);
         for (uint256 i = 0; i < n; i++) {
@@ -168,7 +168,7 @@ contract MultisigConfigurationTest is MultisigProxyTestBase {
         );
     }
 
-    /// @dev The immutable minimum timelock must be nonzero.
+    /// @dev The immutable minimum timelock must be non-zero.
     function test_constructor_revertsOnZeroMinTimelock() public {
         vm.expectRevert(IMultisigProxy.InvalidMinTimelock.selector);
         new MultisigProxy(

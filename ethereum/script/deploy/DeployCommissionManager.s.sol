@@ -5,32 +5,12 @@ import {Script, console2} from "forge-std/Script.sol";
 import {CommissionManager} from "../../src/CommissionManager.sol";
 
 /// @title DeployCommissionManager
-/// @notice Deploys CommissionManager for an already-known Bridge address.
-///
-/// Env:
-///   PRIVATE_KEY       — deployer private key (becomes CM owner; transfer to multisig afterwards)
-///   BRIDGE_ADDRESS    — Bridge contract that will send commissions (non-zero)
-///   COMMISSION_RECIPIENT — immutable destination for every commission withdrawal
-///
-///   ETH_USD_FEED      — Optional Chainlink ETH/USD aggregator address. When
-///                       supplied (non-zero) the script also calls
-///                       `setEthUsdFeed(feed, ETH_USD_HEARTBEAT)` so the
-///                       NATIVE-currency commission path is live immediately.
-///                       Omit (or leave zero) to wire the feed later via
-///                       federation governance once ownership is transferred.
-///   ETH_USD_HEARTBEAT — Required when `ETH_USD_FEED` is set; seconds before
-///                       the feed answer is considered stale. Arbitrum One
-///                       ETH/USD heartbeats at 86400 s — use ~87000 with a
-///                       small buffer.
-///   SEQUENCER_UPTIME_FEED — Required whenever ETH_USD_FEED is set. Chainlink
-///                       Arbitrum L2 Sequencer Uptime feed used to reject NATIVE
-///                       quotes during downtime + the post-restart grace period.
-///   ETH_USD_MIN_PRICE / ETH_USD_MAX_PRICE — Required whenever ETH_USD_FEED is
-///                       set. ETH/USD sanity band in the price feed's decimals.
-///
-/// Usage:
-///   forge script script/deploy/DeployCommissionManager.s.sol \
-///     --rpc-url $RPC_URL --broadcast --verify
+/// @notice Deploys and optionally configures a CommissionManager owned by the deployer.
+/// @dev A non-zero ETH_USD_FEED requires heartbeat, sequencer feed and price bounds.
+///      Ownership handoff is separate; follow the CM migration order in docs/README.md.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `BRIDGE_ADDRESS`, `COMMISSION_RECIPIENT`, `ETH_USD_FEED`,
+///      `ETH_USD_HEARTBEAT`, `SEQUENCER_UPTIME_FEED`, `ETH_USD_MIN_PRICE`, `ETH_USD_MAX_PRICE`.
 contract DeployCommissionManager is Script {
     function run() external returns (CommissionManager cm) {
         uint256 pk = vm.envUint("PRIVATE_KEY");
@@ -42,9 +22,7 @@ contract DeployCommissionManager is Script {
         uint256 ethUsdMinPrice = vm.envOr("ETH_USD_MIN_PRICE", uint256(0));
         uint256 ethUsdMaxPrice = vm.envOr("ETH_USD_MAX_PRICE", uint256(0));
 
-        // Misconfiguration checks (fail-fast, before broadcast). Price band is
-        // all-or-nothing. Hardening is mandatory whenever the NATIVE
-        // oracle path is enabled; there is no production opt-out.
+        // Require complete oracle settings before broadcasting.
         require(
             (ethUsdMinPrice == 0) == (ethUsdMaxPrice == 0),
             "set both ETH_USD_MIN_PRICE and ETH_USD_MAX_PRICE, or neither"

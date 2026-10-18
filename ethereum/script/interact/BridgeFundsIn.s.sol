@@ -7,24 +7,13 @@ import {Bridge} from "../../src/Bridge.sol";
 import {ICommissionManager} from "../../src/interfaces/ICommissionManager.sol";
 
 /// @title BridgeFundsIn
-/// @notice Approves and calls the public `Bridge.fundsIn()` overload as the
-///         current signer. Quotes the native commission from CommissionManager
-///         and attaches the quote plus `NATIVE_BUFFER_BPS` of headroom to absorb
-///         limited ETH/USD drift between quoting and execution. The call still
-///         reverts if the fresh quote exceeds the attached value or the attached
-///         value falls outside the Bridge's immutable tolerance. Bridge charges
-///         exactly the quote it computes at execution and refunds the unused
-///         buffer. `sourceChainId` is filled with `block.chainid` by the Bridge —
-///         the script just reads it back to drive the quote.
-///
-///         The canonical `operationId` is derived on-chain by the Bridge and
-///         returned; this script logs it. The RGB route carries the RGB OpId
-///         in `settlementData` (`abi.encode(uint256 rgbOpId)`), sourced from
-///         `RGB_OP_ID`.
-///
-/// Env:
-///   PRIVATE_KEY, BRIDGE_ADDRESS, AMOUNT (wei),
-///   DESTINATION_CHAIN_ID, DESTINATION_ADDRESS, RGB_OP_ID
+/// @notice Approves tokens and submits a direct RGB deposit from PRIVATE_KEY.
+/// @dev Encodes the RGB mint OpId, quotes commission and attaches a native buffer.
+///      AMOUNT is in token smallest units; DESTINATION_ADDRESS is empty for RGB.
+///      Bridge refunds excess native value and returns the logged operationId.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `BRIDGE_ADDRESS`, `AMOUNT`, `DESTINATION_CHAIN_ID`, `DESTINATION_ADDRESS`,
+///      `RGB_OP_ID`.
 contract BridgeFundsIn is Script {
     /// @dev Drift headroom attached on top of the quote. Kept below the
     ///      Bridge's `NATIVE_COMMISSION_TOLERANCE_BPS` so a quote that is still
@@ -45,9 +34,7 @@ contract BridgeFundsIn is Script {
         ICommissionManager cm = bridge.commissionManager();
         (, uint256 nativeCommission,) = cm.calculateFundsInCommission(block.chainid, destChainId, token, amount);
 
-        // Attach the quote plus drift headroom. Bridge charges the quote it
-        // computes at execution and refunds the rest, so this is a ceiling on
-        // what may be spent, not the amount actually paid.
+        // Attach a buffer; Bridge refunds any excess over its execution-time quote.
         uint256 nativeValue = nativeCommission + (nativeCommission * NATIVE_BUFFER_BPS) / 10_000;
 
         console2.log("Native commission quote (wei):", nativeCommission);

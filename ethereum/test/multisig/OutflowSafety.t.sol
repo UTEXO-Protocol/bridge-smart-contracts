@@ -107,7 +107,8 @@ contract MultisigOutflowSafetyTest is MultisigProxyTestBase {
         bytes memory policy = abi.encodeCall(IBridge.setOutflowLimit, (RGB_CHAIN_ID, uint256(1_900), uint256(100)));
         _adminExecuteBridge(policy);
         _adminExecuteBridge(abi.encodeCall(IBridge.setGlobalOutflowLimit, (uint256(1_900), uint256(100))));
-        // Reconfiguration preserves available shares; allow the larger bucket to refill before spending.
+        // Reconfiguration preserves available shares; allow the larger bucket to refill before
+        // spending.
         vm.warp(vm.getBlockTimestamp() + 10 days);
         uint256 start = (vm.getBlockTimestamp() / 1 hours + 1) * 1 hours;
         vm.warp(start);

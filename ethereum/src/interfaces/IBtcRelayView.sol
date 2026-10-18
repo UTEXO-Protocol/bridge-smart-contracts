@@ -14,8 +14,8 @@ interface IBtcRelayView {
     function getBlockheight() external view returns (uint32);
 
     /// @notice Verify that a block header at the given height matches the commitment hash.
-    /// @param height          Bitcoin block height.
-    /// @param commitmentHash  keccak256 commitment of the StoredBlockHeader.
+    /// @param height                 Bitcoin block height.
+    /// @param commitmentHash         keccak256 commitment of the StoredBlockHeader.
     /// @return confirmations  Number of confirmations (tip - height + 1). Reverts if unknown.
     function verifyBlockheaderHash(uint256 height, bytes32 commitmentHash) external view returns (uint256 confirmations);
 

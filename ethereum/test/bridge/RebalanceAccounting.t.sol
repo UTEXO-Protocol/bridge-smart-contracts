@@ -34,9 +34,8 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         uint256 backingMint = RGB_OP_ID + 600;
         usdt0.mint(user, AMOUNT * 10);
         vm.prank(user);
-        bytes32 backing =
-            bridge.fundsIn(AMOUNT * 10, PRODUCTION_RGB_MINT_BURN_CHAIN_ID, RGB_DST_ADDR, abi.encode(backingMint));
-        IBridge.RebalanceParams memory p = _productionRgbToArchParams(AMOUNT, backing);
+        bytes32 backing = bridge.fundsIn(AMOUNT * 10, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(backingMint));
+        IBridge.RebalanceParams memory p = _mintBurnToChainAParams(AMOUNT, backing);
         p.destinationChainId = SOURCE_CHAIN_ID;
         p.destinationAddress = "";
         p.settlementDataIn = abi.encode(RGB_OP_ID + 601);
@@ -57,12 +56,12 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         assertFalse(bridge.consumedBurnIds(p.burnId), "burn id remains unused");
     }
 
-    function test_rebalanceLiquidity_archToRgbMovesBucketsAndWritesRecord() public {
-        uint256 srcBefore = bridge.lockedLiquidity(ARCH_CHAIN_ID);
+    function test_rebalanceLiquidity_chainAToRgbMovesBucketsAndWritesRecord() public {
+        uint256 srcBefore = bridge.lockedLiquidity(CHAIN_A_ID);
         uint256 dstBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
         uint256 mintOpId = RGB_OP_ID + 1;
 
-        IBridge.RebalanceParams memory p = _archToRgbParams(AMOUNT, mintOpId);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, mintOpId);
         bytes32 expectedOpId = _deriveRebalanceOpId(p);
 
         // Credit-RGB rebalance emits the standard FundsIn (the RGB side needs
@@ -73,10 +72,10 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         emit IBridge.BridgeRebalance(
             expectedOpId,
             p.burnId,
-            ARCH_CHAIN_ID,
+            CHAIN_A_ID,
             RGB_CHAIN_ID,
             AMOUNT,
-            ARCH_SRC_ADDR,
+            CHAIN_A_SRC_ADDR,
             RGB_DST_ADDR,
             p.settlementDataOut,
             p.settlementDataIn
@@ -84,7 +83,7 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
 
         _rebalance(p);
 
-        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), srcBefore - AMOUNT, "source bucket debited");
+        assertEq(bridge.lockedLiquidity(CHAIN_A_ID), srcBefore - AMOUNT, "source bucket debited");
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), dstBefore + AMOUNT, "destination bucket credited");
         assertEq(rgbModule.fundsInRecords(expectedOpId), AMOUNT, "mint record written for the credit leg");
         assertTrue(bridge.consumedBurnIds(p.burnId), "replay key consumed");
@@ -98,33 +97,33 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         // source liquidity and bucket capacity to reach the RGB event boundary.
         usdt0.mint(user, additionalLiquidity);
         vm.prank(user);
-        bridge.fundsIn(additionalLiquidity, ARCH_CHAIN_ID, ARCH_DST_ADDR, "");
+        bridge.fundsIn(additionalLiquidity, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
 
-        IBridge.RebalanceParams memory p = _archToRgbParams(amount, RGB_OP_ID + 9_000);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(amount, RGB_OP_ID + 9_000);
         bytes32 operationId = _deriveRebalanceOpId(p);
-        uint256 sourceBefore = bridge.lockedLiquidity(ARCH_CHAIN_ID);
+        uint256 sourceBefore = bridge.lockedLiquidity(CHAIN_A_ID);
         uint256 destinationBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
 
         vm.expectRevert(abi.encodeWithSelector(BridgeBaseUpgradeable.AmountExceedsUint64.selector, amount));
         _rebalance(p);
 
-        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), sourceBefore, "source debit rolled back");
+        assertEq(bridge.lockedLiquidity(CHAIN_A_ID), sourceBefore, "source debit rolled back");
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), destinationBefore, "destination credit rolled back");
         assertEq(rgbModule.fundsInRecords(operationId), 0, "RGB settlement write rolled back");
         assertFalse(bridge.consumedBurnIds(p.burnId), "burn id remains unused");
     }
 
-    function test_rebalanceLiquidity_rgbToArchBurnBackedNoFundsInEvent() public {
+    function test_rebalanceLiquidity_rgbToChainABurnBackedNoFundsInEvent() public {
         uint256 srcBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
-        uint256 dstBefore = bridge.lockedLiquidity(ARCH_CHAIN_ID);
+        uint256 dstBefore = bridge.lockedLiquidity(CHAIN_A_ID);
 
-        IBridge.RebalanceParams memory p = _rgbToArchParams(AMOUNT, rgbSeedOpId);
+        IBridge.RebalanceParams memory p = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
 
         vm.recordLogs();
         _rebalance(p);
 
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), srcBefore - AMOUNT, "source bucket debited");
-        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), dstBefore + AMOUNT, "destination bucket credited");
+        assertEq(bridge.lockedLiquidity(CHAIN_A_ID), dstBefore + AMOUNT, "destination bucket credited");
 
         // The credit leg wrote nothing and returned 0, so no RGB-only FundsIn
         // event may appear — only BridgeRebalance.
@@ -137,7 +136,7 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
 
     function test_rebalanceLiquidity_movesNoTokens() public {
         uint256 bridgeBalanceBefore = usdt0.balanceOf(address(bridge));
-        _rebalance(_archToRgbParams(AMOUNT, RGB_OP_ID + 1));
+        _rebalance(_chainAToRgbParams(AMOUNT, RGB_OP_ID + 1));
         assertEq(usdt0.balanceOf(address(bridge)), bridgeBalanceBefore, "custody unchanged");
     }
 
@@ -187,13 +186,13 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_preservesTotalLockedLiquidity() public {
-        uint256 totalBefore = bridge.lockedLiquidity(RGB_CHAIN_ID) + bridge.lockedLiquidity(ARCH_CHAIN_ID)
+        uint256 totalBefore = bridge.lockedLiquidity(RGB_CHAIN_ID) + bridge.lockedLiquidity(CHAIN_A_ID)
             + bridge.lockedLiquidity(SOURCE_CHAIN_ID) + bridge.lockedLiquidity(SECONDARY_RGB_CHAIN_ID);
         uint256 accountedTotalBefore = bridge.totalLockedLiquidity();
 
-        _rebalance(_archToRgbParams(AMOUNT, RGB_OP_ID + 1));
+        _rebalance(_chainAToRgbParams(AMOUNT, RGB_OP_ID + 1));
 
-        uint256 totalAfter = bridge.lockedLiquidity(RGB_CHAIN_ID) + bridge.lockedLiquidity(ARCH_CHAIN_ID)
+        uint256 totalAfter = bridge.lockedLiquidity(RGB_CHAIN_ID) + bridge.lockedLiquidity(CHAIN_A_ID)
             + bridge.lockedLiquidity(SOURCE_CHAIN_ID) + bridge.lockedLiquidity(SECONDARY_RGB_CHAIN_ID);
         assertEq(totalAfter, totalBefore, "sum(lockedLiquidity) preserved exactly");
         assertEq(bridge.totalLockedLiquidity(), accountedTotalBefore, "accounted global TVL preserved exactly");
@@ -201,12 +200,12 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_spendsChainBucketNotGlobal() public {
-        uint256 chainBefore = bridge.availableOutflow(ARCH_CHAIN_ID);
+        uint256 chainBefore = bridge.availableOutflow(CHAIN_A_ID);
         uint256 globalBefore = bridge.availableGlobalOutflow();
 
-        _rebalance(_archToRgbParams(AMOUNT, RGB_OP_ID + 1));
+        _rebalance(_chainAToRgbParams(AMOUNT, RGB_OP_ID + 1));
 
-        assertEq(bridge.availableOutflow(ARCH_CHAIN_ID), chainBefore - AMOUNT, "source chain bucket spent");
+        assertEq(bridge.availableOutflow(CHAIN_A_ID), chainBefore - AMOUNT, "source chain bucket spent");
         assertEq(bridge.availableGlobalOutflow(), globalBefore, "global bucket untouched (no token egress)");
     }
 
@@ -214,16 +213,16 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         vm.warp((vm.getBlockTimestamp() / 1 hours + 1) * 1 hours);
         uint256 startedAt = vm.getBlockTimestamp();
 
-        _rebalance(_archToRgbParams(AMOUNT, RGB_OP_ID + 1));
-        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), AMOUNT * 9, "actual source liquidity debited");
+        _rebalance(_chainAToRgbParams(AMOUNT, RGB_OP_ID + 1));
+        assertEq(bridge.lockedLiquidity(CHAIN_A_ID), AMOUNT * 9, "actual source liquidity debited");
 
         vm.warp(startedAt + 24 hours + 1 minutes);
-        assertEq(bridge.chainOutflowReference(ARCH_CHAIN_ID), AMOUNT * 9, "pre-expiry bucket reference");
-        assertEq(bridge.availableOutflow(ARCH_CHAIN_ID), AMOUNT * 9 / 10, "pre-expiry full bucket");
+        assertEq(bridge.chainOutflowReference(CHAIN_A_ID), AMOUNT * 9, "pre-expiry bucket reference");
+        assertEq(bridge.availableOutflow(CHAIN_A_ID), AMOUNT * 9 / 10, "pre-expiry full bucket");
 
         // AMOUNT exceeds capacity priced against the remaining 9 × AMOUNT
         // liquidity, so it is rejected before rolling usage expires.
-        IBridge.RebalanceParams memory oversized = _archToRgbParams(AMOUNT, RGB_OP_ID + 2);
+        IBridge.RebalanceParams memory oversized = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 2);
         uint256 capacityShares = MAX_BURST_BPS * bridge.SHARE_UNIT() / bridge.BPS_DENOMINATOR();
         uint256 requestedShares = (AMOUNT * bridge.SHARE_UNIT() + AMOUNT * 9 - 1) / (AMOUNT * 9);
         vm.prank(multisig);
@@ -236,22 +235,22 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
 
         vm.warp(startedAt + 25 hours);
         uint256 validAmount = AMOUNT * 9 / 10;
-        assertEq(bridge.chainOutflowReference(ARCH_CHAIN_ID), AMOUNT * 9, "post-expiry bucket reference");
-        assertEq(bridge.availableOutflow(ARCH_CHAIN_ID), validAmount, "post-expiry full bucket unchanged");
+        assertEq(bridge.chainOutflowReference(CHAIN_A_ID), AMOUNT * 9, "post-expiry bucket reference");
+        assertEq(bridge.availableOutflow(CHAIN_A_ID), validAmount, "post-expiry full bucket unchanged");
 
-        _rebalance(_archToRgbParams(validAmount, RGB_OP_ID + 3));
-        assertEq(bridge.lockedLiquidity(ARCH_CHAIN_ID), AMOUNT * 81 / 10, "valid tranche executes after expiry");
+        _rebalance(_chainAToRgbParams(validAmount, RGB_OP_ID + 3));
+        assertEq(bridge.lockedLiquidity(CHAIN_A_ID), AMOUNT * 81 / 10, "valid tranche executes after expiry");
     }
 
     function test_rebalanceLiquidity_distinctMintsDifferInDestinationOpId() public {
         // Legitimately distinct credit-side rebalances differ in the destination
         // RGB OpId (settlementDataIn), which makes their credit ids distinct.
         // The fixture also assigns distinct source burn ids. Both execute.
-        IBridge.RebalanceParams memory first = _archToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory first = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
         bytes32 firstOpId = _deriveRebalanceOpId(first);
         _rebalance(first);
 
-        IBridge.RebalanceParams memory second = _archToRgbParams(AMOUNT, RGB_OP_ID + 2);
+        IBridge.RebalanceParams memory second = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 2);
         bytes32 secondOpId = _deriveRebalanceOpId(second);
         assertTrue(first.burnId != second.burnId, "distinct burnId per destination OpId");
         assertTrue(firstOpId != secondOpId, "distinct operationId per destination OpId");
@@ -262,7 +261,7 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         // preserve a stale, higher reference.
         usdt0.mint(user, AMOUNT);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, ARCH_CHAIN_ID, ARCH_DST_ADDR, "");
+        bridge.fundsIn(AMOUNT, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
         vm.warp(vm.getBlockTimestamp() + bridge.BUCKET_REFILL_WINDOW() + 1);
         _rebalance(second);
 
@@ -276,7 +275,7 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         vm.prank(multisig);
         bridge.pauseInflow();
         uint256 destinationBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
-        _rebalance(_archToRgbParams(AMOUNT, RGB_OP_ID + 1));
+        _rebalance(_chainAToRgbParams(AMOUNT, RGB_OP_ID + 1));
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), destinationBefore + AMOUNT);
     }
 }

@@ -1,29 +1,13 @@
-# Bridge upgrade baseline
+# Bridge storage layout
 
-`Bridge.v1.json` is the frozen initial proxy storage baseline. It is currently
-the pre-release v1 layout; record the deployed proxy, chain and implementation
-in the release record when v1 ships. Do not regenerate this file to make CI pass.
+The frozen baseline used by CI is [`script/storage-layout/Bridge.v1.json`](../script/storage-layout/Bridge.v1.json).
+The copy under `storage-layout/Bridge.v1.json` is not the checker input.
 
-After `forge build`, run `python3 script/storage-layout/storage_layout.py`. It discovers
-every concrete production artifact under `src/` exposing the compatibility
-marker, regardless of contract name, and checks `BridgeV2Mock` as an append-only
-positive fixture. Deploy only artifacts included in this check.
+See [the upgrade baseline guide](../storage-layout/README.md) for commands and
+compatibility rules. The checker enforces unchanged existing fields and struct
+members, append-only new fields, and no collisions with proxy selectors.
 
-Existing fields and struct members must retain their layout. New top-level
-fields may be appended after the baseline's last occupied slot. This deliberately
-conservative policy rejects gap consumption and changes to existing structs.
-The script also compares actual four-byte selectors with the proxy ABI, including
-inherited implementation methods. Run on clean build artifacts in CI.
-
-For subsequent releases, preserve earlier baselines and add the newly deployed
-layout as a versioned baseline; extend the checker to validate against the latest
-deployed layout as well. Checking only v1 would not protect state added in v2.
-Baseline changes require explicit storage-migration review. The checker covers
-compiler-reported storage; OpenZeppelin namespaced storage and dependency upgrades
-still require separate review against the deployed dependency version.
-
-`BridgeProxy` reads the Ownable owner directly at byte offset zero of the
-ERC-7201 `openzeppelin.storage.Ownable` slot
+OpenZeppelin namespaced storage requires separate review. BridgeProxy reads the
+owner at byte offset zero in `openzeppelin.storage.Ownable`, slot
 `0x9016d09d72d40fdae2fd8ceac6b6234c7706214fd39c1cd1e609a0528c199300`.
-Every candidate and dependency upgrade must preserve this address field and
-namespace. The checker above does not verify this namespaced dependency layout.
+Candidate implementations and dependency changes must preserve this layout.
