@@ -272,6 +272,46 @@ ownership. `DeployMinimalBridge` reads USDT0_ADDRESS and creates a separate
 integrator bridge owned by the deployer. `DeployRgbRejectList` is standalone and
 requires different REJECT_LIST_OWNER and REJECT_LIST_APPENDER values.
 
+### MinimalBridge RGB mint records
+
+`MinimalBridge.fundsIn(amount, operationId, afterBlock)` accepts a funded RGB
+mint only from `afterBlock` through `afterBlock + MAX_LOCK_BLOCKS`, inclusive.
+It reads the child-chain height from the Arbitrum `ArbSys` precompile rather
+than Solidity's approximate L1 `block.number`.
+
+Each successful lock creates one permanent height record under the key returned
+by `rgbMintDepositId(operationId, amount, afterBlock)`. The key binds the bridge,
+EVM chain, token, RGB operation, amount and lower block bound. Records are never
+deleted by `fundsOut`. A stored value of zero therefore means that the claim was
+not recorded; otherwise the value is the actual L2 block plus one.
+
+An RGB resolver can check one external anchor without scanning historical logs:
+
+```javascript
+const abi = [
+  "function getFundsInBlock(uint256 operationId,uint256 amount,uint64 afterBlock) view returns (uint64 l2BlockPlusOne)"
+];
+const bridge = new ethers.Contract(bridgeAddress, abi, provider);
+const l2BlockPlusOne = await bridge.getFundsInBlock(operationId, amount, afterBlock, {
+  blockTag: "finalized"
+});
+```
+
+The equivalent direct `eth_call` with Foundry's `cast` is:
+
+```bash
+cast call "$MINIMAL_BRIDGE" \
+  "getFundsInBlock(uint256,uint256,uint64)(uint64)" \
+  "$OPERATION_ID" "$AMOUNT" "$AFTER_BLOCK" \
+  --rpc-url "$ARBITRUM_RPC_URL" \
+  --block finalized
+```
+
+The resolver supplies the operation id, amount and lower block bound from
+validated RGB history. It requires a nonzero result and decodes the creation
+height as `l2BlockPlusOne - 1`. The legacy `FundsIn` event remains unchanged for
+compatibility.
+
 ### LayerZero adapter wiring
 
 Bridge and MultisigProxy have separate adapter fields. `DeployAll` leaves both
