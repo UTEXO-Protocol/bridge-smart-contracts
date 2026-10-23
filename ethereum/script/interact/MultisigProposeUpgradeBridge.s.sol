@@ -6,12 +6,13 @@ import {MultisigProxy} from "../../src/MultisigProxy.sol";
 import {MultisigHelper} from "../../test/helpers/MultisigHelper.sol";
 
 /// @title MultisigProposeUpgradeBridge
-/// @notice Signs and submits a timelocked Bridge implementation upgrade.
-/// @dev UPGRADE_CALLDATA is delegatecalled on the new implementation in the
-///      same transaction as the upgrade. Use `0x` when no reinitializer is needed.
-///      The candidate must differ from the current implementation; nonempty
-///      data must have a full selector. UPGRADE_CALLDATA is limited to 4096 bytes
-///      including that selector; the outer execution opData is not part of this limit.
+/// @notice Locally signs and submits a Bridge implementation upgrade proposal.
+/// @dev Prints opData for execution after the timelock. UPGRADE_CALLDATA is 0x or reviewed
+///      reinitializer data, with a selector and at most 4096 bytes when non-empty.
+///      DEADLINE_OFFSET must cover the timelock plus execution, and be at most 30 days.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `PROXY_ADDRESS`, `NEW_BRIDGE_IMPLEMENTATION`, `UPGRADE_CALLDATA`,
+///      `FED_PKS`, `FED_BITMAP`, `DEADLINE_OFFSET`.
 contract MultisigProposeUpgradeBridge is Script {
     function run() external returns (bytes32 proposalId) {
         uint256 submitterPk = vm.envUint("PRIVATE_KEY");

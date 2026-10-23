@@ -6,18 +6,13 @@ import {MultisigProxy} from "../../src/MultisigProxy.sol";
 import {MultisigHelper} from "../../test/helpers/MultisigHelper.sol";
 
 /// @title MultisigProposeSetEmergencyGuardian
-/// @notice Signs and submits a timelocked federation proposal to rotate or
-///         disable the direct emergency guardian.
-/// @dev NEW_EMERGENCY_GUARDIAN may be address(0) to disable guardian access.
-///      Execution is intentionally left to operators after the timelock.
-///
-/// Env:
-///   PRIVATE_KEY             — tx submitter
-///   PROXY_ADDRESS           — MultisigProxy address
-///   NEW_EMERGENCY_GUARDIAN  — replacement guardian or address(0) to disable
-///   FED_PKS                 — comma-separated federation private keys
-///   FED_BITMAP              — participating signer bitmap
-///   DEADLINE_OFFSET         — seconds from now (e.g. 7 days)
+/// @notice Locally signs and submits a guardian replacement or disabling proposal.
+/// @dev A zero NEW_EMERGENCY_GUARDIAN disables direct guardian access. Execute separately
+///      after the timelock. DEADLINE_OFFSET must cover the delay plus an execution window,
+///      and must be at most 30 days.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `PROXY_ADDRESS`, `NEW_EMERGENCY_GUARDIAN`, `FED_PKS`, `FED_BITMAP`,
+///      `DEADLINE_OFFSET`.
 contract MultisigProposeSetEmergencyGuardian is Script {
     function run() external returns (bytes32 proposalId) {
         uint256 submitterPk = vm.envUint("PRIVATE_KEY");

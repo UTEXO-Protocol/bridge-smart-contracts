@@ -87,7 +87,7 @@ contract IntegrationGovernanceTest is IntegrationTestBase {
         assertEq(token.balanceOf(address(replacement)), 0);
         assertEq(replacement.tokenCommissionPool(address(token)), 0);
 
-        // Restore the production quote and retry the same enclave authorization.
+        // Restore the configured quote and retry the same enclave authorization.
         vm.clearMockedCalls();
         proxy.fundsOutCall(params, nonce, deadline, 3, sigs);
         uint256 fee = amount * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;

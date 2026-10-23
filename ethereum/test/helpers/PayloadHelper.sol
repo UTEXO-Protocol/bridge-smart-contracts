@@ -3,7 +3,7 @@ pragma solidity 0.8.35;
 
 /// @notice Nonzero payloads for address, proof and settlement-data length tests.
 library PayloadHelper {
-    /// @dev Repeated ASCII 'a' bytes keep any complete ABI word nonzero.
+    /// @dev Repeated ASCII 'a' bytes keep any complete ABI word non-zero.
     function filledBytes(uint256 length) internal pure returns (bytes memory payload) {
         payload = new bytes(length);
         for (uint256 i; i < length; ++i) {

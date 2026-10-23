@@ -6,7 +6,9 @@ import {Bridge} from "../../src/Bridge.sol";
 
 /// @title DeployBridgeImplementation
 /// @notice Deploys a locked Bridge implementation for a later proxy upgrade.
-/// @dev This script never deploys or changes the canonical Bridge proxy.
+/// @dev Does not deploy or modify the canonical Bridge proxy.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`.
 contract DeployBridgeImplementation is Script {
     function run() external returns (Bridge implementation) {
         uint256 pk = vm.envUint("PRIVATE_KEY");

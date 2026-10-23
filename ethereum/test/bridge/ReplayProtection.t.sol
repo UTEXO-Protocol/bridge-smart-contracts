@@ -22,8 +22,6 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
         _fundsOut(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData, SRC_BURN_TX_ID);
         assertTrue(bridge.consumedBurnIds(burnId), "burnId recorded");
 
-        // Second fundsOut with the same burnId — must revert before any
-        // module mutation, leaving the second record untouched.
         vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, burnId));
         vm.prank(multisig);
         _fundsOut(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData, SRC_BURN_TX_ID);
@@ -80,10 +78,9 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
         assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "backing record remains permanent");
     }
 
-    /// @dev Route-agnostic guard: every chain supplies a burn id, and on routes
-    ///      whose `settlementData` is empty it is the only field keeping the key
-    ///      distinct. Enforced in Bridge rather than a route plugin so a route
-    ///      registering `NullSettlementModule` is covered too.
+    /// @dev Requires an explicit source-burn id on every route. Settlement data is
+    ///      excluded from `burnId`, so different burns with otherwise equal fields
+    ///      need distinct sourceBurnTxId values, regardless of payload contents.
     function test_fundsOut_revertsOnZeroSourceBurnTxId() public {
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());

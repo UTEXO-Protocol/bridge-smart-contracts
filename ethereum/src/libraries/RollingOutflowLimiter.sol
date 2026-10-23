@@ -20,7 +20,7 @@ library RollingOutflowLimiter {
         uint256[SLOT_COUNT] slots;
     }
 
-    /// @notice Record `amount` in the current rolling window.
+    /// @dev Records `amount` in the current rolling window.
     /// @return updatedSpent Total non-expired usage after recording `amount`.
     function consume(Window storage window, uint256 amount) internal returns (uint256 updatedSpent) {
         _roll(window);
@@ -31,7 +31,7 @@ library RollingOutflowLimiter {
         window.spent = updatedSpent;
     }
 
-    /// @notice Return the currently counted usage without modifying storage.
+    /// @dev Returns the currently counted usage without modifying storage.
     function current(Window storage window) internal view returns (uint256 currentSpent) {
         if (!window.initialized) return 0;
 

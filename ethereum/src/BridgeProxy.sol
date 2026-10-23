@@ -8,17 +8,13 @@ import {IBridge} from "./interfaces/IBridge.sol";
 import {IBridgeProxy} from "./interfaces/IBridgeProxy.sol";
 
 /// @title BridgeProxy
-/// @notice Owner-controlled ERC-1967 proxy for the canonical Bridge.
-/// @dev Upgrade authorization lives exclusively here; Bridge implementations
-///      do not expose UUPS upgrade functions. The stored OpenZeppelin Ownable
-///      owner is the sole upgrade authority. Future implementations must preserve
-///      the Ownable namespace and owner field at offset zero; upgrade checks read
-///      this slot directly and do not depend on the implementation's owner() getter.
-///      implementation() and upgradeToAndCall(address,bytes) selectors are
-///      reserved by this proxy and must not appear in an implementation ABI.
+/// @notice ERC-1967 Bridge proxy controlled by the stored Bridge owner.
+/// @dev Reads the OpenZeppelin Ownable namespace directly for upgrade authorization.
+///      Implementations must preserve that owner field and namespace. Proxy selectors
+///      `implementation()` and `upgradeToAndCall(address,bytes)` must not be exposed
+///      by implementations. Implementations must not expose UUPS upgrade entrypoints.
 contract BridgeProxy is ERC1967Proxy, IBridgeProxy {
     /// @dev Maximum upgrade initialization bytes, including the selector.
-    ///      Keep aligned with MultisigProxy's proposal/execution limit.
     uint256 private constant _MAX_UPGRADE_CALLDATA_LENGTH = 4096;
 
     /// @dev ERC-7201 openzeppelin.storage.Ownable namespace, with address _owner
@@ -70,8 +66,8 @@ contract BridgeProxy is ERC1967Proxy, IBridgeProxy {
     }
 
     function _requireCompatibleImplementation(address candidate) private view {
-        // Pointing the implementation slot at this proxy would make every
-        // fallback recurse into itself and permanently brick the Bridge.
+        // A self-reference would make delegated calls recurse into this proxy.
+        // Direct proxy upgrade calls would still remain available to the stored owner.
         if (candidate == address(this)) revert IncompatibleBridgeImplementation(candidate);
 
         // Implementations must expose a direct-call-only compatibility marker.

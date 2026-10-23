@@ -162,8 +162,7 @@ contract RgbRejectListTest is Test {
         list.append(b);
     }
 
-    /// @notice The owner is a cold administrative key and cannot append; that
-    ///         keeps the two roles genuinely separate.
+    /// @notice With distinct owner and appender roles, the owner cannot append.
     function test_append_revertsForOwner() public {
         IRgbRejectList.Entry[] memory b = _batch(0, 1);
 
@@ -189,10 +188,8 @@ contract RgbRejectListTest is Test {
         list.append(b);
     }
 
-    /// @notice The use case the latest-wins rule exists for: a rejected
-    ///         operation id is allowed again by a later entry. Both entries
-    ///         stay in the log; the current decision is the latest one.
-    function test_append_laterEntryReallowsRejectedOpId() public {
+    /// @notice A later decision re-allows the same opout without removing its history.
+    function test_append_laterEntryReallowsRejectedOpout() public {
         bytes32 opId = _opId(0);
         _appendOne(opId, true);
         _assertDecision(opId, true, "rejected");
@@ -278,10 +275,10 @@ contract RgbRejectListTest is Test {
     /// @notice A batch is recorded entirely or not at all: entries before the
     ///         offending one are rolled back too.
     function test_append_isAtomic() public {
-        _append(0, 1); // id 0 is a reject
+        _append(0, 1); // fixture opout 0 is rejected
         IRgbRejectList.Entry[] memory b = new IRgbRejectList.Entry[](3);
         b[0] = _entry(1);
-        b[1] = _opout(_opId(0), _ty(0), _no(0), false); // would re-allow id 0
+        b[1] = _opout(_opId(0), _ty(0), _no(0), false); // would re-allow fixture opout 0
         b[2] = _opout(bytes32(0), 0, 0, true); // invalid
 
         vm.expectRevert(IRgbRejectList.InvalidOpId.selector);

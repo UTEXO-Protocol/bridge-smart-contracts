@@ -1,90 +1,73 @@
-# Utexo Bridge — Smart Contracts
+# Utexo Bridge contracts
 
-Smart contracts for the Utexo cross-chain bridge. Each supported network has its own directory with chain-specific contract implementations, tests, and deployment scripts.
+Solidity contracts for the Arbitrum side of the Utexo bridge between USDT0 and RGB.
+The EVM project, tests and deployment scripts are in [`ethereum/`](ethereum/).
+See the [EVM documentation](ethereum/docs/README.md) for setup and operation.
 
-## Repository structure
+## Networks
 
-```
-ethereum/   — EVM contracts (Solidity, Foundry)
-```
+| Network | Chain identifier |
+| --- | --- |
+| Arbitrum One | `42161` |
+| Ethereum mainnet | `1` |
+| RGB | `827166` (protocol-assigned) |
 
-See the README in each directory for setup and deployment instructions.
+The Bridge runs on Arbitrum. Deposits from other EVM networks arrive through an
+external LayerZero adapter. The adapter authenticates the original source chain
+and sender before calling Bridge; direct Arbitrum deposits use `block.chainid`.
+Adapter contracts are maintained in the USDT0 repository.
 
-## Architecture overview
+RGB addresses are carried in consignments. The EVM RGB deposit API therefore
+requires an empty `destinationAddress` instead of duplicating that value.
 
-The bridge transfers assets between the EVM side and Bitcoin-anchored networks (RGB, and other Bitcoin L2s in the future). A transfer consists of two on-chain operations: `FundsIn` on the source network (user deposit) and `FundsOut` on the destination network (bridge releases funds to the recipient).
+## Contracts
 
-### Deployment topology
+| Contract | Responsibility |
+| --- | --- |
+| `BridgeProxy` / `Bridge` | Token custody, liquidity by destination network, replay protection and outflow limits |
+| `RouteRegistry` | Dispatch to the verifier and settlement module configured for a route |
+| `RGBVerifier` | Bitcoin block commitment and confirmation checks through BtcRelay |
+| `RgbSettlementModule` | Permanent RGB backing records for deposits and rebalance credits |
+| `RgbOutboundSettlementModule` | Read the RGB ledger for a route without an RGB credit leg |
+| `CommissionManager` | Fee quotes, fee custody and withdrawals to a fixed recipient |
+| `MultisigProxy` | Enclave-authorized operations and federation governance |
+| `RgbRejectList` | Standalone append-only decisions consumed by RGB clients |
+| `MinimalBridge` | Separate custody contract for integrations without route or commission modules |
 
-The EVM-side contracts in this repository are deployed on Arbitrum. Cross-chain delivery from other EVM networks is implemented by an external delivery layer that lives outside this repository — from the perspective of the contracts here, every deposit lands on Arbitrum and is treated identically regardless of where the user originated from.
+The proxy is the Bridge address used by tokens, users, the registry and CM.
+Implementation upgrades preserve that address and require federation governance.
 
-```
-        ┌──────────────────────────────── Arbitrum ─────────────────────────────────┐
-        │                                                                           │
-        │                       ┌─────────── RouteRegistry ────────────┐            │
-        │                       │  per-route (srcChainId, dstChainId): │            │
-        │                       │      FinalityVerifier + SettlementModule          │
-        │                       └──────────────────┬───────────────────┘            │
-        │                                          │                                │
-        │                                  BridgeProxy                              │
-        │                               (Bridge implementation)                     │
-        │                                          │                                │
-        │                              CommissionManager                            │
-        │                                          ▲                                │
-        │                                          │                                │
-        │                                   MultisigProxy                           │
-        │                              (TEE + Federation)                           │
-        └───────────────────────────────────────────────────────────────────────────┘
-```
+## Authorization
 
-**Arbitrum — main contracts:**
+- Direct `fundsIn` is public. The adapter overload accepts only the configured adapter.
+- `fundsOut`, `lzFundsOutCall` and `rebalanceCall` require the registered source
+  chain's enclave quorum. Enclaves validate RGB consignments; the EVM verifier
+  checks the supplied Bitcoin block commitments and confirmation depths.
+- Federation configures routes, fees, signer sets and upgrades through proposals
+  and a timelock. Its signer addresses must be disjoint from enclave addresses.
+- Federation emergency pause/unpause bypasses the timelock. The guardian can
+  pause directly, but cannot unpause.
 
-- **`BridgeProxy` + `Bridge` implementation** — the canonical value-holding address is a custom ERC-1967 proxy. It locks the bridged ERC-20 on `fundsIn` and releases it on `fundsOut`, while federation-approved implementation upgrades preserve its address and state. Upgrade control is restricted to typed, timelocked `MultisigProxy` operations. Route additions still use plugins and normally require no Bridge upgrade.
+`rebalanceLiquidity` changes network liquidity accounting without moving tokens.
+Its destination cannot be the local EVM chain; local token payouts use `fundsOut`.
+Releases and rebalances share a source-burn replay key. MultisigProxy also enforces
+an operation nonce per source chain.
 
-- **`RouteRegistry`** — the routing brain. For every supported `(sourceChainId, destChainId)` pair it stores two addresses: a `FinalityVerifier` and a `SettlementModule`. The `Bridge` calls into the registry on every transfer; the registry forwards to the right plugins. Routes are registered, paused, and rotated through federation governance (granular `SetRoute` proposals on `MultisigProxy`). Owned by `MultisigProxy`; `bridge` is immutable, so rotating the registry itself means redeploy + `UpdateRouteRegistry`.
+## Fees and records
 
-- **`FinalityVerifier`** — a per-route plugin consulted by `Bridge.fundsOut` to confirm that the source-side event justifying the release is final on its origin chain. The current production verifier is `RGBVerifier`, a wrapper around Atomiq's on-chain Bitcoin SPV light client (`BtcRelay`) — it stores Bitcoin block headers and validates proof-of-work continuity and the difficulty-retarget rules. This removes the need to trust any single oracle or off-chain attestation for Bitcoin finality: the EVM-side release is gated by Bitcoin's own consensus, observed on-chain. Routes that don't need finality verification (e.g. trusted-bridge EVM legs) use `NullVerifier`.
+Directional fee rules override global defaults. Fees combine a proportional part
+and a flat amount. Deposits support token or native payment; releases support token
+payment only. CM holds commissions separately and pays withdrawals to its immutable
+recipient. Both Bridge amount floors must be positive, with inbound >= outbound.
+Rules with a flat fee must pass the live-floor check for either payment currency.
 
-- **`SettlementModule`** — a per-route plugin that owns route-specific state. `RgbSettlementModule` is the permanent proof-of-mint ledger for RGB mint/burn routes. RGB backing ids are reproducible from the mint OpId, minted amount and pinned bridge configuration; deposits and rebalances into RGB share the same formula. `RgbOutboundSettlementModule` reads that ledger for RGB mint/burn rebalances to non-RGB destinations, without creating an RGB record on the destination side. Routes whose settlement is handled entirely by an external delivery layer use `NullSettlementModule`.
-
-- **`CommissionManager`** — a dedicated fee-accounting contract that holds the protocol's commissions strictly separated from bridge liquidity. The `Bridge` consults it on every transfer to determine the per-route commission (token vs. native; charged on `FundsIn` vs. `FundsOut`) and forwards the fee to it. Withdrawal is gated by federation governance through `MultisigProxy`. Owned by `MultisigProxy`.
-
-- **`MultisigProxy`** — the authorization layer. Owns `Bridge`, `RouteRegistry`, and `CommissionManager`. It has two independent signer sets plus a direct emergency path: TEE-authorized routine operations (`FundsOut`) execute immediately on M-of-N enclave signatures; federation-authorized administrative operations (signer rotation, configuration changes, commission withdrawal, route registration, contract address updates) go through a two-phase propose → timelock → execute flow. Proposals that call a mutable external target sign and store its address, and reject execution if it changes. Federation emergency pause/unpause is instant, and a separately configured emergency guardian may pause directly without multisig signatures. Unpause requires federation authorization.
-
-### Signing model
-
-The bridge uses a federated M-of-N signing model. Multiple independent signer nodes run inside Enclaves (TEE). Each node validates transfer data independently and produces a signature only after its own checks pass. A `FundsOut` transaction executes only after the required threshold of valid signatures is collected.
-
-There are two independent signer sets:
-
-**Enclave signers (TEE)** — authorize routine value-transfer operations. For `FundsOut`, M-of-N signatures are required. In turn, `FundsIn` does not perform any TEE signature verification, so anyone can call it.
-
-**Federation signers (governance)** — authorize administrative operations: signer rotation, configuration changes, commission withdrawal, and updates to the addresses of `Bridge` / `CommissionManager`. All federation operations go through a two-phase timelock (propose → wait → execute), except emergency pause/unpause which are instant.
-
-**Emergency guardian** — a single address initialized when `MultisigProxy` is deployed. It may immediately pause both bridge directions without signatures. Every successful guardian pause advances the emergency nonce and invalidates older emergency authorizations. Unpause requires federation authorization. Federation can rotate it or set it to `address(0)` through timelocked governance.
-
-Private keys are held inside Enclaves and cannot be extracted. Key persistence is handled through attested enclave-to-enclave cloning.
-
-### Signing scope by direction
-
-| Direction | FundsIn (source side) | FundsOut (destination side) |
-| :---- | :---- | :---- |
-| EVM → RGB | Anyone can call FundsIn and lock funds in the EVM contract | Single-signature signing inside a TEE enclave |
-| RGB → EVM |  | M-of-N ECDSA verified on the EVM contract via `MultisigProxy` |
-
-### Commission
-
-Each transfer may deduct a per-route service commission consisting of a proportional component plus an optional flat `baseFee`: `fee = amount × percentageFee + baseFee`. `FundsIn` commission may be paid in the bridged token or native currency; `FundsOut` commission is token-only. The Bridge independently requires the token commission and net payout to sum to the gross release amount, with a positive net payout, including after a commission-manager rotation. The Bridge enforces non-zero `minFundsInAmount` and `minFundsOutAmount` floors with `minFundsInAmount >= minFundsOutAmount`; the two values may differ. These are gross minima, so token commission can still leave a minimum deposit below the withdrawal floor. A configured flat fee must leave a positive net amount at the applicable floor. On EVM the commission is held by the `CommissionManager` contract — kept separate from bridge liquidity — and withdrawal is controlled by federation governance through the timelock.
-
-### Replay protection
-
-Each network enforces replay protection at the smart-contract level. On EVM, `fundsOut` and `rebalanceLiquidity` derive `burnId` with one shared formula from the canonical debit fields plus the enclave-validated `sourceBurnTxId`, then consume it in the same on-chain namespace. The moving finality proof, the destination chain id and rebalance credit-leg fields are intentionally excluded. `MultisigProxy` separately enforces a sequential `teeNonce` for each source chain's typed enclave operations, while route-specific bookkeeping lives in the per-route `SettlementModule`.
+RGB backing records store the net token amount and destination network. They are
+not consumed during release. The enclave validates how a consignment uses those
+records; Bridge independently enforces source liquidity and burn replay protection.
 
 ## Third-party code
 
-The Bitcoin SPV light client consulted on the RGB route lives under `ethereum/src/btc_relay/`. This code is vendored from the upstream Atomiq project:
-
-- **Source:** [atomiqlabs/atomiq-contracts-evm](https://github.com/atomiqlabs/atomiq-contracts-evm)
-- **License:** Apache License 2.0 — preserved in the SPDX headers of the vendored files.
-
-`RGBVerifier` does not import the vendored `BtcRelay` directly — it talks to a deployed relay through the minimal local `IBtcRelayView` interface (`ethereum/src/interfaces/IBtcRelayView.sol`), which mirrors only the read methods the verifier relies on.
+`ethereum/src/btc_relay/` is vendored from
+[atomiqlabs/atomiq-contracts-evm](https://github.com/atomiqlabs/atomiq-contracts-evm).
+RGBVerifier accesses a deployed relay through the local `IBtcRelayView` interface.
+Third-party files and dependencies are kept separate from project comment conventions.

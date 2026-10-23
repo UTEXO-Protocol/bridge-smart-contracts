@@ -17,51 +17,24 @@ import {
     ICommissionManager
 } from "./interfaces/ICommissionManager.sol";
 
-/// @notice Minimal view of the Bridge's per-side dust floors. Declared locally
-///         rather than importing the full `IBridge` so the commission layer
-///         depends on exactly the two values it needs.
+/// @notice Bridge amount floors used to validate fee rules.
 interface IBridgeAmountFloors {
     function minFundsInAmount() external view returns (uint256);
     function minFundsOutAmount() external view returns (uint256);
 }
 
-/**
- * @title CommissionManager
- * @author UTEXO bridge stack
- * @notice On-chain commission quotes, owner configuration, and custody of bridge fees (ERC-20 and native).
- * @dev Blueprint v3-style design: **global defaults** plus optional **per-route overrides** keyed by
- *      `keccak256(abi.encode(sourceChainId, destChainId, token))`. Chain ids are `uint256` values: EVM
- *      chains use their native `block.chainid`; non-EVM endpoints (RGB, Bitcoin, …) are assigned
- *      numeric ids by the Utexo backend in a namespace reserved above the EVM range (see README).
- *      Routes are **directional** (swapping source and destination yields a different key), so
- *      independent rules can apply to each leg of a round trip (e.g. ETH→RGB vs RGB→ETH).
- *
- *      **Fee shape:** `fee = amount * stablePercent / multiplier^2 + baseFee` — a proportional part
- *      plus a flat part, both per-route configurable and either optionally zero. `baseFee` covers a
- *      per-operation cost that does not scale with the amount (the Bitcoin transaction fee on the RGB
- *      leg). It is expressed in the token's smallest units and is bounded by its side's Bridge dust
- *      floor — `minFundsInAmount` for `FUNDS_IN`, `minFundsOutAmount` for `FUNDS_OUT`: every
- *      configured rule must leave a positive net for an operation sitting exactly on that floor,
- *      re-verified against the live floor on every quote (see `_requireFeeFitsAmountFloor`).
- *
- *      **Side (`CommissionSide`):** For a given route config, commission applies only to **either**
- *      `FUNDS_IN` **or** `FUNDS_OUT`, matching `calculateFundsInCommission` vs `calculateFundsOutCommission`.
- *      **Currency (`CommissionCurrency`):** `TOKEN` deducts fee from the bridged amount; `NATIVE` expresses
- *      fee in native wei. NATIVE quoting reads ETH/USD from a Chainlink price feed (`ethUsdFeed`) and
- *      assumes the bridged token is a USD-pegged stablecoin (1 token unit ≈ $1) — the bridge currently
- *      only supports USDT0, so a single ETH/USD feed is sufficient and we avoid trusting a USDT/USD feed
- *      whose error margin would be negligible against the fee itself. Stale answers (older than
- *      `ethUsdHeartbeat`) and non-positive answers revert the call.
- *
- *      **Roles:** `bridgeAddress` may call `receiveTokenCommission` and `receive()` to credit fees;
- *      `owner` configures rules and withdraws accumulated pools. Every withdrawal pays the immutable
- *      `commissionRecipient`, regardless of the caller or call path. `renounceOwnership` is disabled.
- *      Withdrawals use `nonReentrant` against reentrancy via ERC-20 hooks or the native recipient.
- */
+/// @title CommissionManager
+/// @notice Quotes and holds bridge commissions separately from principal liquidity.
+/// @dev Directional route rules override global defaults. Fees combine
+///      amount * stablePercent / multiplier^2 with a flat fee in token smallest units.
+///      TOKEN fees reduce the bridged amount; NATIVE fees are converted using ETH/USD.
+///      Only Bridge credits pools. Owner withdrawals pay the immutable recipient.
 contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager {
     using SafeERC20 for IERC20;
 
-    // ============ State Variables ============
+    // =========================================================================
+    // State Variables
+    // =========================================================================
 
     /// @notice Address allowed to credit token and native commission.
     address public bridgeAddress;
@@ -71,7 +44,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     ///         or alternate proxy call path can redirect accrued commission.
     address public immutable commissionRecipient;
 
-    /// @notice Default `stablePercent` when no per-route rule exists (×100; 0 = no % fee until configured).
+    /// @notice Default rate numerator; zero disables the proportional fee.
     uint256 public globalStablePercent = 0;
     /// @notice Default flat `baseFee` in token smallest units (0 = no flat fee
     ///         until configured). Added on top of the proportional part.
@@ -83,24 +56,15 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     /// @notice Default `currency` for routes without an override.
     CommissionCurrency public globalCurrency = CommissionCurrency.TOKEN;
 
-    /// @notice Absolute bound on the raw `stablePercent` numerator. Kept as a
-    ///         sanity bound (and as the overflow guard for the rate comparison
-    ///         in `_validateConfig`); the ceiling that actually governs what a
-    ///         route can charge is `_MAX_FEE_BPS`.
+    /// @dev Independent upper bound on the rate numerator, in addition to `_MAX_FEE_BPS`.
+    ///      For multipliers above 100, this bound can be stricter than the 90% rate cap.
     uint256 private constant _MAX_STABLE_PERCENT = 9000;
 
-    /// @notice Basis-point denominator for the effective-rate ceiling.
+    /// @dev Basis-point denominator for the effective-rate ceiling.
     uint256 private constant _BPS_DENOMINATOR = 10_000;
 
-    /// @notice Hard ceiling on the EFFECTIVE proportional rate: 9000 bps = 90%.
-    /// @dev `stablePercent` alone does not express the rate — the charged
-    ///      fraction is `stablePercent / multiplier^2`. Bounding the numerator
-    ///      therefore caps the rate only at the conventional `multiplier == 100`;
-    ///      with any smaller multiplier the same numerator buys a far larger
-    ///      rate (`stablePercent = 99, multiplier = 10` is 99%, and
-    ///      `8999 / 95^2` is 99.7%), leaving only the `InvalidFeeShape` "below
-    ///      100%" bound in force. The ceiling is enforced on the rate itself so
-    ///      it holds for every representable `multiplier`.
+    /// @dev Maximum effective proportional fee rate, in basis points.
+    ///      Applies to stablePercent / multiplier^2 for every allowed multiplier.
     uint256 private constant _MAX_FEE_BPS = 9_000;
 
     /// @notice Per-route overrides; key = `buildRouteKey(sourceChainId, destChainId, token)`.
@@ -111,32 +75,30 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     /// @notice Accrued native commission in wei.
     uint256 public nativeCommissionPool;
 
-    /// @notice Chainlink ETH/USD aggregator used to quote NATIVE commissions.
-    ///         `address(0)` (default after deploy) closes the NATIVE path until
-    ///         federation governance wires a real feed via `setEthUsdFeed`.
+    /// @notice Chainlink ETH/USD aggregator for nonzero native-fee conversions.
+    ///         The owner must configure a feed before those conversions are available.
     address public ethUsdFeed;
     /// @notice Maximum allowed staleness of `ethUsdFeed.latestRoundData().updatedAt`
     ///         in seconds. Quotes revert `StalePrice` when the answer is older.
     uint256 public ethUsdHeartbeat;
 
-    /// @notice Chainlink L2 Sequencer Uptime feed (Arbitrum). NATIVE quotes
-    ///         fail closed while this is `address(0)`.
+    /// @notice Chainlink L2 Sequencer Uptime feed for Arbitrum.
+    ///         Nonzero native-fee conversions revert while this is unset.
     address public sequencerUptimeFeed;
 
-    /// @notice Seconds after a sequencer restart during which NATIVE quotes are
-    ///         rejected — the L2-published price can lag the market right after
-    ///         recovery. Chainlink's recommended grace period is 3600s.
+    /// @notice Grace period after a sequencer restart, in seconds.
+    ///         Nonzero native-fee conversions require more than this interval to have elapsed.
     uint256 public constant SEQUENCER_GRACE_PERIOD = 3600;
 
-    /// @notice Mandatory [min, max] sanity band on the ETH/USD answer (in feed
-    ///         decimals). NATIVE quotes fail closed while the band is unset; an
-    ///         answer outside it (e.g. an aggregator floored/capped to
-    ///         `minAnswer`/`maxAnswer` during an extreme move) reverts
-    ///         `PriceOutOfBounds`.
+    /// @notice Minimum accepted ETH/USD answer, in feed decimals.
+    ///         Nonzero native-fee conversions require configured bounds and an in-range answer.
     uint256 public ethUsdMinPrice;
+    /// @notice Maximum accepted ETH/USD answer, in feed decimals.
     uint256 public ethUsdMaxPrice;
 
-    // ============ Modifiers ============
+    // =========================================================================
+    // Modifiers
+    // =========================================================================
 
     /// @dev Restricts call to `bridgeAddress`.
     modifier onlyBridge() {
@@ -144,13 +106,13 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         _;
     }
 
-    // ============ Constructor ============
+    // =========================================================================
+    // Constructor
+    // =========================================================================
 
-    /**
-     * @notice Deploys the manager; `msg.sender` is owner.
-     * @param _bridgeAddress Bridge that will send commissions (non-zero).
-     * @param _commissionRecipient Immutable destination for all withdrawals (non-zero).
-     */
+    /// @notice Deploys the manager; `msg.sender` is owner.
+    /// @param _bridgeAddress         Bridge that will send commissions (non-zero).
+    /// @param _commissionRecipient   Immutable destination for all withdrawals (non-zero).
     constructor(address _bridgeAddress, address _commissionRecipient) Ownable(msg.sender) {
         if (_bridgeAddress == address(0)) revert InvalidBridgeAddress();
         if (_commissionRecipient == address(0)) revert InvalidRecipient();
@@ -158,29 +120,27 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         commissionRecipient = _commissionRecipient;
     }
 
-    /// @inheritdoc Ownable
-    /// @notice Always reverts. Use `transferOwnership` to change admin.
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() public view override(Ownable) onlyOwner {
         revert RenounceOwnershipBlocked();
     }
 
-    // ============ Core Calculation Functions ============
+    // =========================================================================
+    // Core Calculation Functions
+    // =========================================================================
 
-    /**
-     * @notice Quote commission for an inbound (`fundsIn`) transfer on this chain.
-     * @param sourceChainId Origin chain id (must match configured route keys).
-     *                      EVM source uses `block.chainid`; non-EVM source uses
-     *                      the backend's assigned numeric id.
-     * @param destChainId Destination chain id (EVM `block.chainid` or assigned
-     *                    backend id for non-EVM targets).
-     * @param token ERC-20 token used for the transfer.
-     * @param amount Gross amount bridged (same units as token).
-     * @return tokenCommission Fee in token smallest units (0 if not `TOKEN` currency).
-     * @return nativeCommission Fee in wei (0 if not `NATIVE` currency).
-     * @return netAmount Amount after fee if `TOKEN`; full `amount` if `NATIVE` (fee paid separately in native).
-     * @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_IN`. NATIVE path uses
-     *      `convertTokenFeeToNative` (Chainlink ETH/USD) and `IERC20Metadata(token).decimals()`.
-     */
+    /// @notice Quotes commission for an inbound (`fundsIn`) transfer on this chain.
+    /// @param sourceChainId          Source chain id used to resolve a route override or global
+    ///                               defaults.
+    /// @param destChainId            Destination chain id (EVM chain id, or 827166 for RGB).
+    /// @param token                  ERC-20 token used for the transfer.
+    /// @param amount                 Gross amount bridged (same units as token).
+    /// @return tokenCommission Fee in token smallest units (0 if not `TOKEN` currency).
+    /// @return nativeCommission Fee in wei (0 if not `NATIVE` currency).
+    /// @return netAmount Amount after fee if `TOKEN`; full `amount` if `NATIVE` (fee paid
+    ///         separately in native).
+    /// @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_IN`. NATIVE path uses
+    ///      `convertTokenFeeToNative` (Chainlink ETH/USD) and `IERC20Metadata(token).decimals()`.
     function calculateFundsInCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
         external
         view
@@ -197,11 +157,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         // Total fee in token units: proportional part plus the flat `baseFee`.
         uint256 totalFee = calculateStableFee(amount, config.stablePercent, config.multiplier) + config.baseFee;
         _requireNonZeroConfiguredCommission(amount, totalFee, config);
-        // Live floor check. `baseFee` does not shrink with the amount, so a rule
-        // is only sound while it still leaves a positive net at the Bridge's
-        // current `minFundsInAmount`. Re-read on every quote rather than trusted
-        // from configuration time, because `Bridge.setMinFundsInAmount` can lower
-        // the floor after a rule was validated against a higher one.
+        // Recheck the current floor: it may have changed since this rule was configured.
         _requireFeeFitsAmountFloor(config);
 
         if (config.currency == CommissionCurrency.TOKEN) {
@@ -211,7 +167,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             nativeCommission = 0;
             netAmount = amount - tokenCommission;
         } else {
-            // NATIVE commission: user pays in ETH/BNB via msg.value
+            // NATIVE commission: fee is paid separately in native currency
             tokenCommission = 0;
             if (totalFee == 0) {
                 nativeCommission = 0;
@@ -225,19 +181,18 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         }
     }
 
-    /**
-     * @notice Quote commission for an outbound (`fundsOut`) release on this chain.
-     * @param sourceChainId Origin chain id (must match configured route keys).
-     *                      For RGB→EVM the source is the backend's assigned id
-     *                      for the Bitcoin-side network.
-     * @param destChainId Destination chain id (the EVM chain receiving the release).
-     * @param token ERC-20 token being released.
-     * @param amount Gross amount to release before fee.
-     * @return tokenCommission Fee in token units (0 if not `TOKEN` currency).
-     * @return nativeCommission Fee in wei (0 if not `NATIVE`).
-     * @return netAmount User receives `amount - tokenCommission` for `TOKEN`; `amount` for `NATIVE` (fee separate).
-     * @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_OUT`. See `calculateFundsInCommission` for rates/decimals.
-     */
+    /// @notice Quotes commission for an outbound (`fundsOut`) release on this chain.
+    /// @param sourceChainId          Source chain id used to resolve a route override or global
+    ///                               defaults (827166 for RGB→EVM releases).
+    /// @param destChainId            Destination chain id (the EVM chain receiving the release).
+    /// @param token                  ERC-20 token being released.
+    /// @param amount                 Gross amount to release before fee.
+    /// @return tokenCommission Fee in token units (0 if not `TOKEN` currency).
+    /// @return nativeCommission Fee in wei (0 if not `NATIVE`).
+    /// @return netAmount User receives `amount - tokenCommission` for `TOKEN`; `amount` for
+    ///         `NATIVE` (fee separate).
+    /// @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_OUT`. See
+    ///      `calculateFundsInCommission` for rates/decimals.
     function calculateFundsOutCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
         external
         view
@@ -251,11 +206,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             return (0, 0, amount);
         }
 
-        // Total fee: proportional part plus the flat `baseFee`, symmetric with
-        // the inbound path. The flat term is bounded here by
-        // `Bridge.minFundsOutAmount`, the release-side mirror of the deposit
-        // floor, and re-verified against the live value on every quote for the
-        // same reason: the floor can be lowered after a rule was accepted.
+        // Calculate in token smallest units before selecting the payment currency.
         uint256 totalFee = calculateStableFee(amount, config.stablePercent, config.multiplier) + config.baseFee;
         _requireNonZeroConfiguredCommission(amount, totalFee, config);
         _requireFeeFitsAmountFloor(config);
@@ -266,7 +217,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             nativeCommission = 0;
             netAmount = amount - tokenCommission;
         } else {
-            // NATIVE commission for fundsOut: user pays in native (per blueprint)
+            // Unreachable for valid configurations: NATIVE fees on FUNDS_OUT are rejected.
             tokenCommission = 0;
             if (totalFee == 0) {
                 nativeCommission = 0;
@@ -280,13 +231,11 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         }
     }
 
-    /**
-     * @notice Stable fee: `(amount * stablePercent) / multiplier / multiplier`.
-     * @param amount Token amount in smallest units.
-     * @param stablePercent Percent × 100 (e.g. 400 = 4%).
-     * @param multiplier Typically 100.
-     * @return Fee in token smallest units.
-     */
+    /// @notice Stable fee: `(amount * stablePercent) / multiplier / multiplier`.
+    /// @param amount                 Token amount in smallest units.
+    /// @param stablePercent          Rate numerator (400 = 4% when multiplier is 100).
+    /// @param multiplier             Typically 100.
+    /// @return Fee in token smallest units.
     function calculateStableFee(uint256 amount, uint256 stablePercent, uint256 multiplier)
         public
         pure
@@ -318,12 +267,10 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         return _amountFloor(CommissionSide.FUNDS_OUT);
     }
 
-    /// @dev Reads the Bridge dust floor governing `side`. Fails closed: a
-    ///      `bridgeAddress` that is not a live Bridge, or a zero floor .
+    /// @dev Reads a non-zero Bridge amount floor or reverts with AmountFloorUnavailable.
     function _amountFloor(CommissionSide side) internal view returns (uint256 floor) {
         address bridge = bridgeAddress;
-        // Explicit code check first: Solidity's `extcodesize` guard on a
-        // high-level call to a codeless address reverts WITHOUT data.
+        // Report a domain-specific error before decoding a response from a code-less address.
         if (bridge.code.length == 0) revert AmountFloorUnavailable();
 
         if (side == CommissionSide.FUNDS_IN) {
@@ -343,17 +290,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (floor == 0) revert AmountFloorUnavailable();
     }
 
-    /// @dev Enforces that the effective rule still leaves a positive net for an
-    ///      operation sitting exactly on its side's floor — `minFundsInAmount`
-    ///      for a deposit, `minFundsOutAmount` for a release.
-    ///
-    ///      Checking at the floor is both necessary and sufficient: net is
-    ///      `amount * (1 - stablePercent/multiplier^2) - baseFee`, which is
-    ///      strictly increasing in `amount` because the configured proportional
-    ///      rate is below 100% (`InvalidFeeShape`). So if the floor clears, every
-    ///      larger operation clears too — and `baseFee < floor` alone would NOT
-    ///      be sufficient, since the proportional part also consumes part of that
-    ///      floor.
+    /// @dev For flat-fee rules, requires total fee below the current side's floor.
+    ///      With a proportional rate below 100%, positive TOKEN net at the floor
+    ///      implies positive net at every larger amount. Also applied to NATIVE rules.
     function _requireFeeFitsAmountFloor(CommissionConfig memory config) private view {
         // Only a FLAT fee needs this bound. A purely proportional fee is already
         // held below 100% by `InvalidFeeShape`, so it leaves a positive net at
@@ -368,12 +307,12 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     }
 
     /// @inheritdoc ICommissionManager
-    /// @dev Assumes the token is a USD-pegged stablecoin (1 token unit ≈ $1).
+    /// @dev Assumes the token is a USD-pegged stablecoin (1 whole token ≈ $1).
     ///      Math:
     ///         tokenFee  is in 10^tokenDecimals units (USD value 1:1)
     ///         price     = ETH/USD scaled by 10^feedDecimals
     ///         nativeFee = (tokenFee_usd / price_usd_per_eth) * 10^18
-    ///                   = tokenFee * 10^(18 - tokenDecimals + feedDecimals) / price
+    ///                  = tokenFee * 10^(18 - tokenDecimals + feedDecimals) / price
     function convertTokenFeeToNative(uint256 tokenFee, uint256 tokenDecimals) public view returns (uint256 nativeFee) {
         if (tokenFee == 0) return 0;
         if (tokenDecimals > 18) revert TokenDecimalsTooLarge();
@@ -381,10 +320,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         address feedAddr = ethUsdFeed;
         if (feedAddr == address(0)) revert EthUsdFeedNotSet();
 
-        // never consume an ETH/USD answer unless both Arbitrum
-        // hardening layers are configured. Setters may be executed in separate
-        // governance proposals, but the quote path remains fail-closed
-        // throughout any partially configured state.
+        // Require complete oracle configuration before converting a non-zero fee.
         if (sequencerUptimeFeed == address(0) || ethUsdMinPrice == 0 || ethUsdMaxPrice == 0) {
             revert ChainlinkHardeningNotConfigured();
         }
@@ -420,12 +356,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) revert GracePeriodNotOver();
     }
 
-    /**
-     * @notice ERC-20 `decimals()` as `uint256` for exponent math.
-     * @param token Token to query.
-     * @return Token decimals (typically 6–18).
-     * @dev Reverts `TokenDecimalsUnavailable` if the call fails (non-standard token).
-     */
+    /// @dev Reads token precision, reverting `TokenDecimalsUnavailable` if the call fails.
+    /// @param token Token to query.
+    /// @return Token decimals as `uint256` for exponent math.
     function _tokenDecimals(address token) internal view returns (uint256) {
         try IERC20Metadata(token).decimals() returns (uint8 d) {
             return uint256(d);
@@ -434,15 +367,16 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         }
     }
 
-    // ============ Configuration Functions ============
+    // =========================================================================
+    // Configuration Functions
+    // =========================================================================
 
-    /**
-     * @notice Sets defaults used when no per-route rule exists for a key.
-     * @param stablePercent Percent × 100 (0 = no stable % fee); must be ≤ 9000.
-     * @param multiplier Default multiplier (typically 100).
-     * @param side Default `FUNDS_IN` vs `FUNDS_OUT`.
-     * @param currency Default `TOKEN` vs `NATIVE`.
-     */
+    /// @notice Sets defaults used when no per-route rule exists for a key.
+    /// @param stablePercent          Rate numerator, bounded by the effective-rate ceiling.
+    /// @param baseFee                Flat fee in token smallest units.
+    /// @param multiplier             Default multiplier (typically 100).
+    /// @param side                   Default `FUNDS_IN` vs `FUNDS_OUT`.
+    /// @param currency               Default `TOKEN` vs `NATIVE`.
     function setGlobalDefaults(
         uint256 stablePercent,
         uint256 baseFee,
@@ -461,12 +395,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         emit GlobalDefaultsUpdated(stablePercent, baseFee, multiplier, side, currency);
     }
 
-    /// @dev Shared shape validation for both the global defaults and a per-route
-    ///      override. Fails fast at configuration time so a malformed rule
-    ///      reverts for governance here instead of silently bricking every quote
-    ///      on the route later. The deposit-floor part is re-checked on every
-    ///      quote (`_requireFeeFitsDepositFloor`), because the floor can move
-    ///      after a rule was accepted.
+    /// @dev Validates rate, currency and floor bounds for global and per-route rules.
     function _validateConfig(
         uint256 stablePercent,
         uint256 baseFee,
@@ -476,26 +405,11 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     ) private view {
         if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
         if (multiplier == 0) revert MultiplierZero();
-        // Joint invariant: the fee fraction is `stablePercent / multiplier^2`.
-        // The configured fee must be strictly below 100%. Equality would make
-        // TOKEN commission consume the entire amount and create a zero-net
-        // settlement; greater values would underflow. Widen to uint256 before
-        // squaring — `multiplier` is uint8 and the common `100 * 100` would
-        // itself overflow uint8.
+        // Widen before squaring and require a rate below 100%.
         if (stablePercent >= uint256(multiplier) * uint256(multiplier)) {
             revert InvalidFeeShape(stablePercent, multiplier);
         }
-        // Protocol ceiling on the EFFECTIVE rate, checked after the "below 100%"
-        // shape bound so that an over-100% configuration keeps reporting
-        // `InvalidFeeShape` rather than being reclassified here.
-        //
-        // Cross-multiplied instead of computing `stablePercent * 10_000 /
-        // multiplier^2`, so a rate just above the ceiling cannot be truncated
-        // down onto it. Overflow-free: `stablePercent` is already bounded by
-        // `_MAX_STABLE_PERCENT`, and `multiplier` is uint8.
-        //
-        // At the conventional `multiplier == 100` this reduces to exactly
-        // `stablePercent <= 9000`, so no existing rule shape changes meaning.
+        // Compare the effective rate without division to avoid rounding below the cap.
         if (stablePercent * _BPS_DENOMINATOR > _MAX_FEE_BPS * uint256(multiplier) * uint256(multiplier)) {
             revert FeeRateTooHigh(stablePercent, multiplier);
         }
@@ -504,12 +418,8 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         if (currency == CommissionCurrency.NATIVE && side == CommissionSide.FUNDS_OUT) {
             revert NativeCommissionNotAllowedOnFundsOut();
         }
-        // A flat fee is bounded by its side's Bridge floor — `minFundsInAmount`
-        // for deposits, `minFundsOutAmount` for releases — each of which
-        // guarantees a minimum amount to charge it against. Without that bound a
-        // `baseFee` exceeding a small operation would revert its quote, and on
-        // the release side, because `burnId` is derived from the release intent,
-        // that exact release could then never execute.
+        // Reject rules that cannot settle a minimum-size operation. A signed release
+        // cannot adjust its amount without changing the canonical burn intent.
         _requireFeeFitsAmountFloor(
             CommissionConfig({
                 stablePercent: stablePercent,
@@ -523,10 +433,8 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     }
 
     /// @inheritdoc ICommissionManager
-    /// @dev Set `feed == address(0)` to disable the NATIVE path entirely
-    ///      (all subsequent NATIVE quotes revert `EthUsdFeedNotSet`). When a
-    ///      non-zero `feed` is supplied `heartbeat` must be non-zero; a sensible
-    ///      value is the feed's published heartbeat plus a small buffer.
+    /// @dev A zero feed disables non-zero native fee conversion. A non-zero feed
+    ///      requires a non-zero heartbeat in seconds.
     function setEthUsdFeed(address feed, uint256 heartbeat) external onlyOwner {
         if (feed == address(0)) {
             // Closing the path — ignore any provided heartbeat to keep the
@@ -553,7 +461,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
     /// @inheritdoc ICommissionManager
     /// @dev Pass `(0, 0)` to clear the band during staged governance changes or
-    ///      oracle teardown; NATIVE quotes then fail closed. Otherwise require
+    ///      oracle teardown; non-zero NATIVE quotes then revert. Otherwise require
     ///      `0 < minPrice < maxPrice` (values in the feed's decimals, e.g.
     ///      `100e8` / `100_000e8` for an 8-decimal ETH/USD feed).
     function setEthUsdPriceBounds(uint256 minPrice, uint256 maxPrice) external onlyOwner {
@@ -569,13 +477,12 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         emit EthUsdPriceBoundsUpdated(minPrice, maxPrice);
     }
 
-    /**
-     * @notice Writes or replaces the override for `buildRouteKey(sourceChainId, destChainId, token)`.
-     * @param sourceChainId Route source id (directional; paired with `destChainId`).
-     * @param destChainId Route destination id.
-     * @param token ERC-20 token (non-zero).
-     * @param config Rule parameters; `isSet` is forced true on store.
-     */
+    /// @notice Writes or replaces the override for `buildRouteKey(sourceChainId, destChainId,
+    ///         token)`.
+    /// @param sourceChainId          Route source id (directional; paired with `destChainId`).
+    /// @param destChainId            Route destination id.
+    /// @param token                  ERC-20 token (non-zero).
+    /// @param config                 Rule parameters; `isSet` is forced true on store.
     function setCommissionRule(
         uint256 sourceChainId,
         uint256 destChainId,
@@ -591,18 +498,14 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         commissionRules[key] = config;
         commissionRules[key].isSet = true;
 
-        // Emit what was STORED, not the caller's struct: `isSet` is forced true
-        // above, so echoing the argument would let a rule written with
-        // `isSet: false` be logged as unset while storage says otherwise.
+        // Emit the stored rule, including its forced isSet flag.
         emit CommissionRuleUpdated(sourceChainId, destChainId, token, commissionRules[key]);
     }
 
-    /**
-     * @notice Deletes the override for this route key; `getEffectiveConfig` will use globals.
-     * @param sourceChainId Route source id.
-     * @param destChainId Route destination id.
-     * @param token ERC-20 token (non-zero).
-     */
+    /// @notice Deletes the override for this route key; `getEffectiveConfig` will use globals.
+    /// @param sourceChainId          Route source id.
+    /// @param destChainId            Route destination id.
+    /// @param token                  ERC-20 token (non-zero).
     function clearCommissionRule(uint256 sourceChainId, uint256 destChainId, address token) external onlyOwner {
         if (token == address(0)) revert InvalidToken();
         bytes32 key = buildRouteKey(sourceChainId, destChainId, token);
@@ -610,23 +513,21 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         emit CommissionRuleCleared(sourceChainId, destChainId, token);
     }
 
-    /**
-     * @notice Updates `bridgeAddress` (only that address may credit commissions).
-     * @param newBridge Non-zero bridge contract.
-     */
+    /// @notice Updates `bridgeAddress` (only that address may credit commissions).
+    /// @param newBridge              Non-zero bridge contract.
     function setBridgeAddress(address newBridge) external onlyOwner {
         if (newBridge == address(0)) revert InvalidBridgeAddress();
         bridgeAddress = newBridge;
         emit BridgeAddressUpdated(newBridge);
     }
 
-    // ============ View Functions ============
+    // =========================================================================
+    // View Functions
+    // =========================================================================
 
-    /**
-     * @notice Resolves stored rule or materializes global defaults with `isSet: true`.
-     * @param ruleKey `buildRouteKey` output.
-     * @return config Effective parameters for calculators.
-     */
+    /// @dev Resolves stored rule or materializes global defaults with `isSet: true`.
+    /// @param ruleKey                `buildRouteKey` output.
+    /// @return config Effective parameters for calculators.
     function getEffectiveConfig(bytes32 ruleKey) internal view returns (CommissionConfig memory) {
         CommissionConfig memory config = commissionRules[ruleKey];
 
@@ -645,13 +546,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         });
     }
 
-    /// @dev A deliberately disabled fee (`stablePercent == 0 && baseFee == 0`) is
-    ///      valid. Once governance enables a fee, however, every operation
-    ///      governed by that rule must pay at least one smallest unit. This
-    ///      runtime check couples the effective per-route/global rule to the
-    ///      actual transfer amount, so later configuration changes cannot reopen
-    ///      commission-free dust. A non-zero `baseFee` satisfies it by
-    ///      construction — the flat term never rounds away.
+    /// @dev A configured fee must not round to zero; an explicitly zero-fee rule is allowed.
     function _requireNonZeroConfiguredCommission(uint256 amount, uint256 totalFee, CommissionConfig memory config)
         private
         pure
@@ -661,14 +556,12 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         }
     }
 
-    /**
-     * @notice Returns current global defaults (used when no per-route override exists).
-     * @return stablePercent Global percent × 100.
-     * @return baseFee Global flat fee in token smallest units.
-     * @return multiplier Global multiplier.
-     * @return side Global `CommissionSide`.
-     * @return currency Global `CommissionCurrency`.
-     */
+    /// @notice Returns current global defaults (used when no per-route override exists).
+    /// @return stablePercent Global rate numerator.
+    /// @return baseFee Global flat fee in token smallest units.
+    /// @return multiplier Global multiplier.
+    /// @return side Global `CommissionSide`.
+    /// @return currency Global `CommissionCurrency`.
     function getGlobalDefaults()
         external
         view
@@ -683,13 +576,11 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         return (globalStablePercent, globalBaseFee, globalMultiplier, globalSide, globalCurrency);
     }
 
-    /**
-     * @notice Raw storage read for a route (may be unset; check `config.isSet`).
-     * @param sourceChainId Route source id.
-     * @param destChainId Route destination id.
-     * @param token ERC-20 token.
-     * @return config Stored override or empty struct if never set.
-     */
+    /// @notice Raw storage read for a route (may be unset; check `config.isSet`).
+    /// @param sourceChainId          Route source id.
+    /// @param destChainId            Route destination id.
+    /// @param token                  ERC-20 token.
+    /// @return config Stored override or empty struct if never set.
     function getCommissionRule(uint256 sourceChainId, uint256 destChainId, address token)
         external
         view
@@ -699,29 +590,28 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         return commissionRules[ruleKey];
     }
 
-    /**
-     * @notice Deterministic route id for commission rules.
-     * @param sourceChainId Route source id.
-     * @param destChainId Route destination id.
-     * @param token ERC-20 token address.
-     * @return key `keccak256(abi.encode(sourceChainId, destChainId, token))`.
-     */
+    /// @notice Deterministic route id for commission rules.
+    /// @param sourceChainId          Route source id.
+    /// @param destChainId            Route destination id.
+    /// @param token                  ERC-20 token address.
+    /// @return key `keccak256(abi.encode(sourceChainId, destChainId, token))`.
     function buildRouteKey(uint256 sourceChainId, uint256 destChainId, address token) public pure returns (bytes32) {
         return keccak256(abi.encode(sourceChainId, destChainId, token));
     }
 
-    // ============ Commission Collection Functions ============
+    // =========================================================================
+    // Commission Collection Functions
+    // =========================================================================
 
-    /**
-     * @notice Credits `credited` token units to `tokenCommissionPool[token]`.
-     * @param token ERC-20 token (non-zero). Bridge must transfer tokens before this call.
-     * @param credited The Bridge-measured balance increase of THIS contract from
-     *        its `safeTransfer` (fee-on-transfer safe). Credited as-is rather than
-     *        recomputed from `balanceOf - pool`, so a pre-existing/unsolicited
-     *        direct transfer is never folded into the pool.
-     * @dev Reverts if the resulting pool would exceed the on-chain balance —
-     *      guards against a caller crediting more than actually arrived.
-     */
+    /// @notice Credits `credited` token units to `tokenCommissionPool[token]`.
+    /// @param token                  ERC-20 token (non-zero). Bridge must transfer tokens before
+    ///                               this call.
+    /// @param credited               Balance increase of this contract measured by Bridge around its
+    ///                               `safeTransfer` (fee-on-transfer safe). Credited as-is, not
+    ///                               recomputed from `balanceOf - pool`, so unsolicited transfers
+    ///                               are never folded into the pool.
+    /// @dev Reverts if the resulting pool would exceed the on-chain balance —
+    ///      guards against a caller crediting more than actually arrived.
     function receiveTokenCommission(address token, uint256 credited) external onlyBridge {
         if (token == address(0)) revert InvalidToken();
         if (credited == 0) revert NothingReceived();
@@ -731,25 +621,23 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         emit TokenCommissionReceived(token, credited);
     }
 
-    /**
-     * @notice Accepts native commission from the bridge; increases `nativeCommissionPool`.
-     * @dev Callable only by `bridgeAddress`; `msg.value` must be non-zero.
-     */
+    /// @notice Accepts native commission from the bridge; increases `nativeCommissionPool`.
+    /// @dev Callable only by `bridgeAddress`; `msg.value` must be non-zero.
     receive() external payable onlyBridge {
         if (msg.value == 0) revert ZeroNativeAmount();
         nativeCommissionPool += msg.value;
         emit NativeCommissionReceived(msg.value);
     }
 
-    // ============ Withdrawal Functions ============
+    // =========================================================================
+    // Withdrawal Functions
+    // =========================================================================
 
-    /**
-     * @notice Owner withdraws `amount` of accrued `token` commission.
-     * @param token ERC-20 token (non-zero).
-     * @param amount Amount to send (≤ pool).
-     * @dev Always pays immutable `commissionRecipient`. `nonReentrant`; updates
-     *      pool before `safeTransfer`.
-     */
+    /// @notice Owner withdraws `amount` of accrued `token` commission.
+    /// @param token                  ERC-20 token (non-zero).
+    /// @param amount                 Amount to send (≤ pool).
+    /// @dev Always pays immutable `commissionRecipient`. `nonReentrant`; updates
+    ///      pool before `safeTransfer`.
     function withdrawTokenCommission(address token, uint256 amount) external onlyOwner nonReentrant {
         if (token == address(0)) revert InvalidToken();
         if (tokenCommissionPool[token] < amount) revert InsufficientBalance();
@@ -760,12 +648,10 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         emit TokenCommissionWithdrawn(token, commissionRecipient, amount);
     }
 
-    /**
-     * @notice Owner withdraws `amount` wei of native commission.
-     * @param amount Wei to send (≤ pool).
-     * @dev Always pays immutable `commissionRecipient`. `nonReentrant`; updates
-     *      pool before native transfer.
-     */
+    /// @notice Owner withdraws `amount` wei of native commission.
+    /// @param amount                 Wei to send (≤ pool).
+    /// @dev Always pays immutable `commissionRecipient`. `nonReentrant`; updates
+    ///      pool before native transfer.
     function withdrawNativeCommission(uint256 amount) external onlyOwner nonReentrant {
         if (nativeCommissionPool < amount) revert InsufficientBalance();
 
@@ -776,12 +662,10 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         emit NativeCommissionWithdrawn(commissionRecipient, amount);
     }
 
-    /**
-     * @notice Owner withdraws the full accrued balance for `token`.
-     * @param token ERC-20 token (non-zero).
-     * @dev Always pays immutable `commissionRecipient`. `nonReentrant`.
-     *      Reverts `NoBalance` if pool is zero.
-     */
+    /// @notice Owner withdraws the full accrued balance for `token`.
+    /// @param token                  ERC-20 token (non-zero).
+    /// @dev Always pays immutable `commissionRecipient`. `nonReentrant`.
+    ///      Reverts `NoBalance` if pool is zero.
     function withdrawAllTokenCommission(address token) external onlyOwner nonReentrant {
         if (token == address(0)) revert InvalidToken();
         uint256 balance = tokenCommissionPool[token];
@@ -793,11 +677,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         emit TokenCommissionWithdrawn(token, commissionRecipient, balance);
     }
 
-    /**
-     * @notice Owner withdraws the full `nativeCommissionPool`.
-     * @dev Always pays immutable `commissionRecipient`. `nonReentrant`.
-     *      Reverts `NoBalance` if pool is zero.
-     */
+    /// @notice Owner withdraws the full `nativeCommissionPool`.
+    /// @dev Always pays immutable `commissionRecipient`. `nonReentrant`.
+    ///      Reverts `NoBalance` if pool is zero.
     function withdrawAllNativeCommission() external onlyOwner nonReentrant {
         uint256 balance = nativeCommissionPool;
         if (balance == 0) revert NoBalance();

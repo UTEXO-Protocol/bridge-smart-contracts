@@ -18,45 +18,18 @@ import {Endianness} from "../../src/btc_relay/btc_utils/Endianness.sol";
 import {IBtcRelayView} from "../../src/interfaces/IBtcRelayView.sol";
 
 /// @title DeployBtcRelay
-/// @notice Deploys the Atomiq Bitcoin SPV header relay at a fixed, pre-reviewed
-///         initialisation checkpoint, then hands its address to
-///         `DeployRGBVerifier` / `DeployAll` via `BTC_RELAY_ADDRESS`.
-///
-///      Choose the checkpoint DEEP. Six blocks is not enough: a reorg deeper
-///      than the checkpoint is unrecoverable, because all three header-submit
-///      paths can only extend a height already committed in `_mainChain`, so
-///      the relay would stay pinned to the orphaned branch forever and the fix
-///      is a new relay + a new (immutable) RGBVerifier + a route rotation.
-///      Depth is nearly free: catch-up costs 48 bytes of calldata per block, so
-///      a full day of margin (~144 blocks) is ~7 KB — one transaction.
-///
-/// Env (required):
-///   PRIVATE_KEY                — deployer private key
-///   BTC_CHECKPOINT_HEADER      — the 160-byte `StoredBlockHeader` blob, hex:
-///                                  [0..79]    raw 80-byte Bitcoin block header
-///                                  [80..111]  cumulative chainWork (big-endian uint256)
-///                                  [112..115] block height (uint32)
-///                                  [116..119] lastDiffAdjustment (uint32)
-///                                  [120..159] uint32[10] previous block timestamps
-///   BTC_CHECKPOINT_HEIGHT      — expected height, asserted against the blob
-///   BTC_CHECKPOINT_BLOCKHASH   — expected block hash in DISPLAY order, i.e. exactly
-///                                as a block explorer or `getblockhash` shows it
-///   BTC_CHECKPOINT_CHAINWORK   — expected cumulative chainwork, as the 32-byte
-///                                `chainwork` field of `getblockheader`
-///
-/// Env (optional, defaults in parens):
-///   BTC_CLAMP_BLOCK_TARGET (true)  — enforce the maximum PoW target; immutable after deploy
-///   BTC_RELAY_TESTNET      (false) — deploy `BtcRelayTestnet` instead of `BtcRelay`
-///
-/// Usage:
-///   forge script script/deploy/DeployBtcRelay.s.sol \
-///     --rpc-url $RPC_URL --broadcast --verify
+/// @notice Deploys BtcRelay or BtcRelayTestnet from a reviewed Bitcoin checkpoint.
+/// @dev Choose a deep checkpoint (e.g. ~144 blocks of reorg margin, not a finality guarantee).
+///      A reorg below it requires relay replacement and verifier rotation. Independently
+///      validate difficulty-adjustment data and prior timestamps in the 160-byte header.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `BTC_CHECKPOINT_HEADER`, `BTC_CHECKPOINT_HEIGHT`,
+///      `BTC_CHECKPOINT_BLOCKHASH`, `BTC_CHECKPOINT_CHAINWORK`, `BTC_CLAMP_BLOCK_TARGET`,
+///      `BTC_RELAY_TESTNET`.
 contract DeployBtcRelay is Script {
     using MainnetHeaderImpl for MainnetHeader;
 
-    /// @dev Chainwork is masked to 224 bits by the relay constructor. Bitcoin is
-    ///      nowhere near this, so exceeding it means a malformed blob rather
-    ///      than a real chain — reject instead of silently truncating.
+    /// @dev Rejects chainwork that would be truncated by the relay's 224-bit storage.
     uint256 private constant MAX_CHAINWORK = type(uint224).max;
 
     function run() external returns (address relay) {
@@ -117,13 +90,8 @@ contract DeployBtcRelay is Script {
         }
     }
 
-    /// @dev Re-derive every field from the blob, print it for a final human
-    ///      read, and assert the three independently supplied expectations.
-    ///      The three fields NOT asserted here — `lastDiffAdjustment` and the
-    ///      ten previous timestamps — cannot be checked from the blob alone;
-    ///      they are printed instead, and are the fields most worth verifying
-    ///      by hand, because a mistake in them surfaces weeks later in the
-    ///      retarget and median-time-past rules rather than at deploy.
+    /// @dev Checks checkpoint height, display-order hash and cumulative chainwork.
+    ///      Prints difficulty-adjustment data and prior timestamps for independent review.
     function _reportAndVerifyHeader(
         MainnetHeader memory header,
         uint256 expectedHeight,
@@ -168,9 +136,7 @@ contract DeployBtcRelay is Script {
     // Post-deploy verification
     // =========================================================================
 
-    /// @dev Read the deployed relay back through the same interface `RGBVerifier`
-    ///      uses, so a mis-initialised relay fails here rather than silently
-    ///      serving a bogus chain.
+    /// @dev Checks the deployed checkpoint through the same interface used by RGBVerifier.
     function _verifyDeployment(address relay, uint256 expectedHeight, uint256 expectedChainwork) private view {
         IBtcRelayView view_ = IBtcRelayView(relay);
 
@@ -195,15 +161,14 @@ contract DeployBtcRelay is Script {
     function _reportNextSteps(address relay, uint256 expectedHeight) private pure {
         console2.log("");
         console2.log("=== Next steps ===");
-        console2.log("1. The relay sits at the checkpoint and is NOT usable yet. Submit headers");
-        console2.log("   from this height up to the Bitcoin tip via submitMainBlockheaders");
-        console2.log("   (160-byte stored header + 48 bytes per block, chunked across txs).");
-        console2.log("   RGBVerifier enforces maxLatestConfirmations, so it rejects everything");
-        console2.log("   until the relay reaches the chain head - and keeping it there is a");
-        console2.log("   standing operational duty, not a one-off.");
+        console2.log("1. Synchronize the relay from its checkpoint to the Bitcoin tip");
+        console2.log("   via submitMainBlockheaders (160-byte stored header + 48 bytes per block).");
+        console2.log("   Source/latest proof commitments must exist in the relay at valid depths.");
+        console2.log("   Missing headers or insufficient depths reject those proofs.");
+        console2.log("   The verifier does not detect an externally stale relay; keep headers current.");
         console2.log("2. Export BTC_RELAY_ADDRESS for DeployRGBVerifier / DeployAll:");
         console2.log("   BTC_RELAY_ADDRESS=", relay);
-        console2.log("3. Checkpoint height, now the immutable floor of the finality gate:");
+        console2.log("3. Checkpoint height, the immutable floor of the finality gate:");
         console2.log("   ", expectedHeight);
     }
 }

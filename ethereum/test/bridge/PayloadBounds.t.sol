@@ -129,9 +129,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
-        // Bridge accepts the exact generic address-length cap. The configured
-        // RGB verifier then rejects the non-empty value for the separate,
-        // route-specific reason that RGB has no source-address concept.
+        // At the length cap, validation reaches RGBVerifier's canonical-address check.
         uint256 max = bridge.MAX_ADDRESS_LENGTH();
         vm.expectRevert(RGBVerifier.UnexpectedSourceAddress.selector);
         vm.prank(multisig);
@@ -147,11 +145,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
         );
     }
 
-    /// @dev RGB has no source-address concept, so the RGB verifier rejects any
-    ///      non-empty value. This keeps `sourceAddress` canonical on RGB routes —
-    ///      it is hashed into `burnId`, so a free-form value would let the same
-    ///      burn derive a different replay key. Bridge's own length cap is still
-    ///      exercised by `test_fundsOut_revertsOnSourceAddressTooLong`.
+    /// @dev Non-empty RGB source addresses must not create alternate burn replay keys.
     function test_fundsOut_rgbRouteRejectsNonEmptySourceAddress() public {
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());

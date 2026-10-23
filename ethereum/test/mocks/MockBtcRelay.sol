@@ -6,7 +6,7 @@ import {IBtcRelayView} from "../../src/interfaces/IBtcRelayView.sol";
 /// @title MockBtcRelay
 /// @notice Minimal mock of the Atomiq BtcRelay for testing.
 ///         Stores (height, commitmentHash) => confirmations.
-/// @dev Enforces checkpoint, nonzero commitment and registered-block guards.
+/// @dev Enforces checkpoint, non-zero commitment and registered-block guards.
 ///      Confirmations are supplied by the fixture; this mock does not model
 ///      SPV validation, future-height rejection or Bitcoin chain evolution.
 contract MockBtcRelay is IBtcRelayView {
@@ -19,7 +19,7 @@ contract MockBtcRelay is IBtcRelayView {
     ///      default is zero; deployed-relay fixtures configure a checkpoint.
     uint256 public checkpointHeight;
 
-    /// @notice Set the initialisation checkpoint. Call it in `setUp` with the
+    /// @notice Set the initialization checkpoint. Call it in `setUp` with the
     ///         same height the suite registers its blocks at.
     function setCheckpointHeight(uint256 height) external {
         checkpointHeight = height;

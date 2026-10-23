@@ -49,7 +49,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
 
     string internal constant DST_ADDR = "";
 
-    string internal constant SRC_ADDR = ""; // RGB has no source-address concept
+    string internal constant SRC_ADDR = ""; // RGB sourceAddress is supplied as an empty string
 
     uint256 internal constant AMOUNT = 1e18;
 
@@ -249,7 +249,8 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     ///      each id exists with an EXACTLY matching amount (no consumption).
     ///
     ///      This convenience encodes `AMOUNT` for every id — the standard
-    ///      deposit size used across these tests. It is intentionally `pure`: it must NOT make an external
+    ///      deposit size used across these tests. It is intentionally `pure`: it must NOT make an
+    ///      external
     ///      call, because it is frequently passed inline as a `fundsOut`
     ///      argument right after `vm.prank`/`vm.expectRevert`, and a staticcall
     ///      there would consume the cheatcode. Tests whose records differ from

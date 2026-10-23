@@ -14,35 +14,15 @@ interface IBridgeFundsOutView {
 }
 
 /// @title MultisigExecuteFundsOut
-/// @notice Signs a Bridge.fundsOut() release locally with enclave private keys
-///         and submits it via MultisigProxy.fundsOutCall(). For manual
-///         end-to-end testing before the backend is wired up.
-///
-/// @dev RGB-route specific: `proof` and `settlementData` are packed for the
-///      Atomiq BtcRelay + RgbSettlementModule plugins. Other routes will
-///      need different blob layouts.
-///
-/// Env:
-///   PRIVATE_KEY              — tx submitter (anyone)
-///   PROXY_ADDRESS            — MultisigProxy address
-///   RECIPIENT                — release recipient on this chain
-///   AMOUNT (wei)             — gross amount to release (pre-commission)
-///   SOURCE_CHAIN_ID (uint)   — source chain id (RGB-side for inbound releases)
-///   DESTINATION_CHAIN_ID     — destination chain id (this chain)
-///   SOURCE_ADDRESS (string)  — source-side sender address; empty for RGB
-///   SOURCE_BURN_TX_ID        — unique source-chain burn transaction id; RGB OpId
-///   SOURCE_BLOCK_HEIGHT      — Bitcoin block containing the RGB burn/lock
-///   SOURCE_COMMITMENT_HASH   — source Bitcoin block commitment hash
-///   LATEST_BLOCK_HEIGHT      — fresh Bitcoin block at the relay head
-///   LATEST_COMMITMENT_HASH   — latest Bitcoin block commitment hash
-///   FUNDS_IN_IDS             — comma-separated bytes32 Bridge operation ids
-///                              referenced by the RGB burn consignment
-///   FUNDS_IN_AMOUNTS         — comma-separated exact mint amounts parallel to
-///                              FUNDS_IN_IDS
-///   ENCLAVE_PKS              — comma-separated hex private keys (ordered by
-///                              signer index)
-///   ENCLAVE_BITMAP           — bitmap of participating signers (hex/decimal)
-///   DEADLINE_OFFSET          — seconds from now (e.g. 3600)
+/// @notice Locally signs an RGB release and submits it through MultisigProxy.
+/// @dev Packs proof and settlement data for RGBVerifier and RgbSettlementModule.
+///      AMOUNT is in token smallest units; SOURCE_ADDRESS must be empty when source is RGB.
+///      DEADLINE_OFFSET is at most 86400 seconds. Use local signing keys only for testing.
+///      Inputs (see the matching .env example for values):
+///      `RECIPIENT`, `AMOUNT`, `SOURCE_CHAIN_ID`, `DESTINATION_CHAIN_ID`, `SOURCE_ADDRESS`,
+///      `SOURCE_BURN_TX_ID`, `SOURCE_BLOCK_HEIGHT`, `SOURCE_COMMITMENT_HASH`,
+///      `LATEST_BLOCK_HEIGHT`, `LATEST_COMMITMENT_HASH`, `FUNDS_IN_IDS`, `FUNDS_IN_AMOUNTS`,
+///      `PROXY_ADDRESS`, `DEADLINE_OFFSET`, `ENCLAVE_BITMAP`, `ENCLAVE_PKS`, `PRIVATE_KEY`.
 contract MultisigExecuteFundsOut is Script {
     function _loadParams(address bridgeAddress) internal view returns (IBridge.FundsOutParams memory p) {
         p.recipient = vm.envAddress("RECIPIENT");
@@ -52,8 +32,8 @@ contract MultisigExecuteFundsOut is Script {
         p.sourceAddress = vm.envString("SOURCE_ADDRESS");
         p.sourceBurnTxId = vm.envBytes32("SOURCE_BURN_TX_ID");
 
-        // RGBVerifier expects the confirmed source block plus a fresh block at
-        // the relay head: (sourceHeight, sourceCommit, latestHeight, latestCommit).
+        // RGBVerifier checks the source depth and latest-block depth relative to the relay tip.
+        // Proof layout: (sourceHeight, sourceCommit, latestHeight, latestCommit).
         p.proof = abi.encode(
             vm.envUint("SOURCE_BLOCK_HEIGHT"),
             vm.envBytes32("SOURCE_COMMITMENT_HASH"),

@@ -84,9 +84,11 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
 
+    uint256 internal constant SECONDARY_RGB_CHAIN_ID = 1_000_002; // remote rebalance destination
+
     string internal constant DST_ADDR = "";
 
-    string internal constant SRC_ADDR = ""; // RGB has no source-address concept
+    string internal constant SRC_ADDR = ""; // RGB sourceAddress is supplied as an empty string
 
     bytes32 internal constant SRC_BURN_TX_ID = keccak256("multisig-burn-tx-default");
 
@@ -173,6 +175,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
         // (RGB → SOURCE) runs the BtcRelay check.
         routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
         routeRegistry.setRoute(RGB_CHAIN_ID, SOURCE_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+        routeRegistry.setRoute(RGB_CHAIN_ID, SECONDARY_RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
 
         address[] memory enc = new address[](3);
         enc[0] = encA1;
@@ -352,7 +355,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
         proxy.executeProposal(id, abi.encode(adapter));
     }
 
-    /// @dev Rebalance params over the registered (RGB → SOURCE) route: debit
+    /// @dev Rebalance params over the registered (RGB → SECONDARY_RGB) route: debit
     ///      leg is burn-backed (BtcRelay proof + seed record check), credit leg
     ///      writes a record and threads a fresh RGB OpId. Canonical burnId is
     ///      derived purely from the intent (no nonce), mirroring the Bridge formula.
@@ -362,7 +365,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
             amount: AMOUNT,
             burnId: 0,
             sourceChainId: RGB_CHAIN_ID,
-            destinationChainId: SOURCE_CHAIN_ID,
+            destinationChainId: SECONDARY_RGB_CHAIN_ID,
             sourceAddress: SRC_ADDR,
             destinationAddress: DST_ADDR,
             proof: proof,

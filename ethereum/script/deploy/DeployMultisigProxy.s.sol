@@ -5,24 +5,12 @@ import {Script, console2} from "forge-std/Script.sol";
 import {MultisigProxy} from "../../src/MultisigProxy.sol";
 
 /// @title DeployMultisigProxy
-/// @notice Deploys MultisigProxy for an existing Bridge + CommissionManager and
-///         optionally transfers ownership of both (call from the current owner otherwise).
-///
-/// Env:
-///   PRIVATE_KEY           — deployer private key
-///   BRIDGE_ADDRESS        — existing Bridge deployment
-///   COMMISSION_MANAGER    — existing CommissionManager deployment
-///   EMERGENCY_GUARDIAN     — non-zero direct emergency pause-only operator
-///   ENCLAVE_SIGNERS       — comma-separated TEE signer addresses
-///   ENCLAVE_THRESHOLD     — M for enclave M-of-N
-///   INITIAL_ENCLAVE_SOURCE_CHAIN_ID — source chain id the initial enclave set authorises (non-zero)
-///   FEDERATION_SIGNERS    — comma-separated governance signer addresses
-///   FEDERATION_THRESHOLD  — M for federation M-of-N
-///   TIMELOCK_DURATION     — seconds between propose and execute (e.g. 3600)
-///
-/// Usage:
-///   forge script script/deploy/DeployMultisigProxy.s.sol \
-///     --rpc-url $RPC_URL --broadcast --verify
+/// @notice Deploys governance for an existing Bridge and CommissionManager.
+/// @dev Does not transfer or accept ownership of the managed contracts.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `BRIDGE_ADDRESS`, `COMMISSION_MANAGER`, `EMERGENCY_GUARDIAN`,
+///      `ENCLAVE_SIGNERS`, `ENCLAVE_THRESHOLD`, `INITIAL_ENCLAVE_SOURCE_CHAIN_ID`,
+///      `FEDERATION_SIGNERS`, `FEDERATION_THRESHOLD`, `TIMELOCK_DURATION`, `MIN_TIMELOCK`.
 contract DeployMultisigProxy is Script {
     function run() external returns (MultisigProxy proxy) {
         uint256 pk = vm.envUint("PRIVATE_KEY");
@@ -66,9 +54,11 @@ contract DeployMultisigProxy is Script {
         console2.log("lzAdapter (proxy):        ", proxy.lzAdapter());
         console2.log("");
         console2.log("Next steps:");
-        console2.log("  1) Transfer Bridge ownership to MultisigProxy.");
-        console2.log("  2) Transfer CommissionManager ownership to MultisigProxy.");
-        console2.log("  3) Once the LayerZero adapter is deployed:");
+        console2.log("  1) Start ownership transfers for Bridge, CommissionManager and RouteRegistry.");
+        console2.log("  2) Propose and execute acceptOwnership() through each matching governance lane.");
+        console2.log("     transferOwnership() alone only sets pendingOwner.");
+        console2.log("  3) Configure routes and verify their plugin addresses.");
+        console2.log("  4) Once the LayerZero adapter is deployed:");
         console2.log("     a) propose Bridge.setLZAdapter(adapter) via proposeAdminExecute");
         console2.log("     b) propose MultisigProxy.lzAdapter via proposeUpdateLZAdapter");
     }

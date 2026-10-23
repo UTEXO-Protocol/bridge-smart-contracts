@@ -211,18 +211,38 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
         bytes[] memory sigs = MultisigHelper.signAll(vm, digest, pks);
 
         uint256 srcBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
-        uint256 dstBefore = bridge.lockedLiquidity(SOURCE_CHAIN_ID);
+        uint256 dstBefore = bridge.lockedLiquidity(params.destinationChainId);
         uint256 custodyBefore = token.balanceOf(address(bridge));
 
         vm.expectEmit(true, true, false, true, address(proxy));
-        emit IMultisigProxy.RebalanceExecuted(RGB_CHAIN_ID, SOURCE_CHAIN_ID, nonce, bitmap);
+        emit IMultisigProxy.RebalanceExecuted(RGB_CHAIN_ID, params.destinationChainId, nonce, bitmap);
 
         proxy.rebalanceCall(params, nonce, deadline, bitmap, sigs);
 
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), srcBefore - AMOUNT, "source bucket debited");
-        assertEq(bridge.lockedLiquidity(SOURCE_CHAIN_ID), dstBefore + AMOUNT, "destination bucket credited");
+        assertEq(bridge.lockedLiquidity(params.destinationChainId), dstBefore + AMOUNT, "destination bucket credited");
         assertEq(token.balanceOf(address(bridge)), custodyBefore, "no tokens moved");
         assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce + 1, "shared teeNonce stream advanced");
+    }
+
+    function test_rebalanceCall_revertsLocalDestinationWithoutConsumingNonce() public {
+        IBridge.RebalanceParams memory params = _rebalanceParams();
+        params.destinationChainId = block.chainid;
+        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        bytes[] memory sigs =
+            MultisigHelper.signAll(vm, MultisigHelper.digestTeeRebalance(domainSep, params, nonce, deadline), pks);
+        uint256 sourceBefore = bridge.lockedLiquidity(params.sourceChainId);
+        uint256 destinationBefore = bridge.lockedLiquidity(params.destinationChainId);
+
+        vm.expectRevert(IBridge.InvalidDestinationChainId.selector);
+        proxy.rebalanceCall(params, nonce, deadline, bitmap, sigs);
+
+        assertEq(proxy.teeNonce(RGB_CHAIN_ID), nonce, "rejected rebalance preserves the TEE nonce");
+        assertEq(bridge.lockedLiquidity(params.sourceChainId), sourceBefore, "source bucket unchanged");
+        assertEq(bridge.lockedLiquidity(params.destinationChainId), destinationBefore, "local bucket unchanged");
+        assertFalse(bridge.consumedBurnIds(params.burnId), "burn id remains unused");
     }
 
     function test_rebalanceCall_revertsOnWrongNonce() public {
@@ -380,14 +400,16 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
         proxy.rebalanceCall(second, 0, deadline, bitmap, signatures);
         assertEq(proxy.teeNonce(RGB_CHAIN_ID), 1, "stale nonce rejection preserves the lane");
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT * 10 - AMOUNT / 4, "source has one debit");
-        assertEq(bridge.lockedLiquidity(SOURCE_CHAIN_ID), AMOUNT / 4, "destination has one credit");
+        assertEq(bridge.lockedLiquidity(first.destinationChainId), AMOUNT / 4, "destination has one credit");
         assertEq(token.balanceOf(address(bridge)), AMOUNT * 10, "custody unchanged by rebalances");
         assertFalse(bridge.consumedBurnIds(second.burnId), "second burn remains fresh");
 
         bytes[] memory fresh =
             MultisigHelper.signAll(vm, MultisigHelper.digestTeeRebalance(domainSep, second, 1, deadline), keys);
         proxy.rebalanceCall(second, 1, deadline, bitmap, fresh);
-        assertEq(bridge.lockedLiquidity(SOURCE_CHAIN_ID), AMOUNT / 2, "fresh nonce accepts the same second payload");
+        assertEq(
+            bridge.lockedLiquidity(second.destinationChainId), AMOUNT / 2, "fresh nonce accepts the same second payload"
+        );
         assertEq(proxy.teeNonce(RGB_CHAIN_ID), 2, "fresh nonce advances the lane");
     }
 

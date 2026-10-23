@@ -5,31 +5,19 @@ import {Script, console2} from "forge-std/Script.sol";
 import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
 
 /// @title DeployRGBVerifier
-/// @notice Deploys the RGB-route finality verifier (thin wrapper around the
-///         Atomiq `IBtcRelayView` SPV header relay). The verifier is
-///         stateless apart from its immutable config (`btcRelay` plus the
-///         confirmation-depth thresholds); retuning = redeploy + federation
-///         `proposeSetRoute` pointing the RGB route at the new verifier.
-///
-/// Env (required):
-///   PRIVATE_KEY        — deployer private key
-///   BTC_RELAY_ADDRESS  — deployed `IBtcRelayView` instance
-///
-/// Env (optional, confirmation-depth thresholds; defaults in parens):
-///   MIN_SOURCE_CONFIRMATIONS (6) — min depth of the source (RGB burn/lock) block
-///   MAX_LATEST_CONFIRMATIONS (1) — max depth of the latest (freshness) block; must be >= 1
-///   MIN_CONFIRMATION_GAP     (5) — min depth gap between source and latest
-///
-/// Usage:
-///   forge script script/deploy/DeployRGBVerifier.s.sol \
-///     --rpc-url $RPC_URL --broadcast --verify
+/// @notice Deploys an RGB verifier for BTC_RELAY_ADDRESS.
+/// @dev Thresholds default to 3/2/2 and accept environment overrides;
+///      route activation is a separate governance proposal.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `BTC_RELAY_ADDRESS`, `MIN_SOURCE_CONFIRMATIONS`,
+///      `MAX_LATEST_CONFIRMATIONS`, `MIN_CONFIRMATION_GAP`.
 contract DeployRGBVerifier is Script {
     function run() external returns (RGBVerifier verifier) {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address btcRelay = vm.envAddress("BTC_RELAY_ADDRESS");
-        uint256 minSource = vm.envOr("MIN_SOURCE_CONFIRMATIONS", uint256(6));
-        uint256 maxLatest = vm.envOr("MAX_LATEST_CONFIRMATIONS", uint256(1));
-        uint256 minGap = vm.envOr("MIN_CONFIRMATION_GAP", uint256(5));
+        uint256 minSource = vm.envOr("MIN_SOURCE_CONFIRMATIONS", uint256(3));
+        uint256 maxLatest = vm.envOr("MAX_LATEST_CONFIRMATIONS", uint256(2));
+        uint256 minGap = vm.envOr("MIN_CONFIRMATION_GAP", uint256(2));
 
         vm.startBroadcast(pk);
         verifier = new RGBVerifier(btcRelay, minSource, maxLatest, minGap);

@@ -170,7 +170,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
     function test_outflow_reconfigPreservesAvailableNoGift() public {
         _seedRGB(1000e6);
         _setRGBBucket(100e6, 100e6);
-        _releaseRGB(60e6, keccak256("carry-over-bucket-debit")); // 4,000 bps of shares remain
+        _releaseRGB(60e6, keccak256("carry-over-bucket-debit")); // 40 bps of shares remain
         uint256 availableBefore = bridge.availableOutflow(RGB_CHAIN_ID);
         assertEq(availableBefore, 39.76e6, "pre");
 
@@ -266,7 +266,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
 
     /// @dev The federation must not be able to configure a bucket that covers
     ///      TVL. `burstBps` is bounded by the immutable
-    ///      `MAX_CHAIN_OUTFLOW_BPS`, so no policy authorises more than 20% of
+    ///      `MAX_CHAIN_OUTFLOW_BPS`, so no policy authorizes more than 20% of
     ///      reference liquidity in one release — at any liquidity level.
     function test_setOutflowLimit_rejectsBurstAboveImmutableCeiling() public {
         uint256 maxBps = bridge.MAX_CHAIN_OUTFLOW_BPS();

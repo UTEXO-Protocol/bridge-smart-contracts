@@ -1,48 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-/// @title RouteTypes
-/// @notice Shared data shapes used by `IRouteRegistry`, `ISettlementModule`
-///         and `IFinalityVerifier`. Lives in one file so the three interfaces
-///         can import the same canonical definitions without circular deps.
-///
-/// @dev The structs are passed by value through `calldata` between Bridge and
-///      the route plugins. They carry every field a verifier or settlement
-///      module needs to do its work, so adding a new plugin in the future
-///      does not require touching Bridge's call sites.
-///
-///      Chain identifiers are `uint256` everywhere: real `block.chainid`.
+// Context and configuration types shared by Bridge and route plugins.
 
-/// @notice Canonical context for a `Bridge.fundsIn` call. Built by Bridge
-///         after commission has been computed and tokens have been pulled,
-///         then forwarded into `RouteRegistry.onFundsIn` → `ISettlementModule`.
-/// @param token              ERC-20 the Bridge accepts (the bridged asset).
-/// @param sender             EVM caller Bridge saw — the EOA on the public
-///                           overload, or the LZ adapter on the adapter-only
-///                           overload. This is who tokens are pulled from; it
-///                           is not necessarily the source-chain user.
-/// @param sourceSender       Original source-chain sender, left-padded to
-///                           `bytes32`. Equals `sender` for direct EVM
-///                           deposits; for LZ deposits it is the authenticated
-///                           user forwarded by the adapter. This is the
-///                           identity bound into non-RGB `operationId`.
-/// @param grossAmount        Gross amount the user supplied (pre-commission).
-/// @param netAmount          Amount actually bridged after token commission
-///                           has been taken.
-/// @param operationId        Canonical bridge-side operation id, derived
-///                           on-chain by Bridge (see `Bridge._deriveOperationId`).
-///                           RGB uses the mint OpId, net amount and network;
-///                           other routes use the sender/nonce deposit context.
-/// @param senderNonce        Per-`(sourceChainId, sourceSender)` nonce folded
-///                           into non-RGB `operationId`. Still recorded in RGB
-///                           deposit events but does not distinguish RGB ids.
-/// @param sourceChainId      `block.chainid` for direct EVM deposits, or the
-///                           non-spoofable chain id forwarded by the adapter.
-/// @param destChainId        Target chain id (backend-assigned for non-EVM
-///                           destinations).
-/// @param destAddress        Target address on the destination chain. May be
-///                           empty when the route has no destination-address
-///                           concept (including RGB).
+/// @notice Context for a deposit or rebalance credit, built by Bridge.
+/// @dev EVM ids identify EVM networks; RGB uses the protocol-assigned id 827166.
+/// @param token                  Bridged ERC-20 token.
+/// @param sender                 EVM caller: depositor, adapter or rebalance owner.
+/// @param sourceSender           Deposits use the source sender (EVM addresses padded to bytes32);
+///                               rebalances use `keccak256(bytes(sourceAddress))`.
+/// @param grossAmount            Requested amount before token commission.
+/// @param netAmount              Token amount credited after commission; grossAmount for
+///                               rebalances.
+/// @param operationId            Bridge-derived record id, using RGB mint identity or non-RGB
+///                               context.
+/// @param senderNonce            Deposit nonce for (sourceChainId, sourceSender); zero for
+///                               rebalances.
+/// @param sourceChainId          Local chain for direct deposits; authenticated origin otherwise.
+/// @param destChainId            Destination network id.
+/// @param destAddress            Route-specific address; empty for RGB because it is in the
+///                               consignment.
 struct FundsInContext {
     address token;
     address sender;
@@ -56,33 +33,18 @@ struct FundsInContext {
     string destAddress;
 }
 
-/// @notice Canonical context for a `Bridge.fundsOut` call. Built by Bridge
-///         after the common replay guard has been enforced, then forwarded
-///         into `RouteRegistry.beforeFundsOut` → `IFinalityVerifier` and
-///         `ISettlementModule`.
-/// @param token              ERC-20 the Bridge releases.
-/// @param recipient          Final recipient on this chain.
-/// @param amount             Gross amount being released from the pool
-///                           (pre-commission).
-/// @param burnId             Bridge-derived release replay key. Carried in the
-///                           context so verifiers and settlement modules can
-///                           reference the canonical key if they need to.
-/// @param sourceChainId      Source chain id.
-/// @param destChainId        Destination chain id (this chain, in practice).
-/// @param sourceAddress      Sender address on the source chain.
-/// @param isRebalance        `true` only for the accounting-only debit leg of
-///                           `Bridge.rebalanceLiquidity`; `false` for a
-///                           physical `Bridge.fundsOut` token release. The
-///                           Bridge constructs this value and RouteRegistry
-///                           authenticates the Bridge as its caller.
-/// @param sourceBurnTxId     Source-chain identifier of the burn this release
-///                           settles — the RGB OpId of the burn transition, or
-///                           the transaction id on other source chains. Unique
-///                           per burn event, and the only field that identifies
-///                           WHICH burn is being settled; `burnId` folds it in.
-///                           Attested by the enclave, not verified on-chain.
-///                           Bridge rejects zero globally; enclaves validate
-///                           its source-chain meaning and canonical derivation.
+/// @notice Context for a physical release or rebalance debit, built by Bridge.
+/// @param token                  Bridged ERC-20 token.
+/// @param recipient              Payout recipient; Bridge itself for a rebalance.
+/// @param amount                 Gross liquidity debit before commission.
+/// @param burnId                 Shared source-burn replay key.
+/// @param sourceChainId          Network whose liquidity is debited.
+/// @param destChainId            Destination network; remote for a rebalance.
+/// @param sourceAddress          Source identity; empty when the source network is RGB.
+/// @param isRebalance            Whether this is a rebalance debit rather than a physical payout.
+/// @param sourceBurnTxId         Enclave-attested source-burn id, hashed into `burnId`.
+///                               Bridge checks non-zero; enclaves validate its source-chain
+///                               meaning.
 struct FundsOutContext {
     address token;
     address recipient;
@@ -95,18 +57,11 @@ struct FundsOutContext {
     bytes32 sourceBurnTxId;
 }
 
-/// @notice Per-route configuration stored in `RouteRegistry`.
-/// @dev    A route is keyed by the pair `(sourceChainId, destChainId)`. The
-///         registry MUST reject `address(0)` for `finalityVerifier` or
-///         `settlementModule` — routes that intentionally need no proof or no
-///         per-route state register an explicit `NullVerifier` /
-///         `NullSettlementModule` so the trust model is auditable on-chain.
-/// @param enabled            Master switch. Disabled routes revert at the
-///                           registry's dispatcher methods.
-/// @param finalityVerifier   Contract that validates `bytes proof` for this
-///                           route. View-only.
-/// @param settlementModule   Contract that owns route-specific accounting
-///                           (e.g. RGB `fundsInRecords`). State-mutating.
+/// @notice Plugin configuration for a directional route.
+/// @dev Both plugins must contain code; use Null implementations to omit a layer.
+/// @param enabled                Whether Bridge can dispatch this route.
+/// @param finalityVerifier       Read-only finality verifier.
+/// @param settlementModule       Route settlement hook implementation.
 struct RouteConfig {
     bool enabled;
     address finalityVerifier;

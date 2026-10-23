@@ -15,78 +15,19 @@ import {RgbOutboundSettlementModule} from "../../src/settlement/RgbOutboundSettl
 import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.sol";
 
 /// @title DeployAll
-/// @notice Full production deploy flow.
-///
-/// Deployer tx order (nonce n):
-///   n      → CommissionManager  (uses predicted Bridge for its
-///                                 `bridgeAddress`)
-///   n + 1  → RouteRegistry      (uses predicted Bridge for its `bridge_`
-///                                 immutable; deployer keeps ownership for
-///                                 this transaction batch — ownership is
-///                                 transferred to MultisigProxy at the end)
-///   n + 2  → Bridge implementation
-///   n + 3  → BridgeProxy        (canonical Bridge address; initialized atomically)
-///   n + 4  → RGBVerifier        (wraps the BtcRelay)
-///   n + 5  → RgbSettlementModule (paired with RouteRegistry)
-///   n + 6  → NullVerifier       (explicit no-proof verifier for operational /
-///                                 non-RGB-source routes, e.g. Arch → RGB)
-///   n + 7  → RgbOutboundSettlementModule (debit-RGB / non-RGB-credit routes,
-///                                 e.g. RGB mint/burn → Arch; wraps
-///                                 RgbSettlementModule)
-///   n + 8  → NullSettlementModule (stateless routes such as EVM ↔ Concordium)
-///   n + 9  → MultisigProxy
-///          → Bridge.setOutflowLimit for INITIAL_ENCLAVE_SOURCE_CHAIN_ID
-///          → Bridge.setGlobalOutflowLimit
-///          → (optional) CommissionManager config txs, each present only when
-///            its env is set: setEthUsdFeed, setSequencerUptimeFeed,
-///            setEthUsdPriceBounds. These shift the transferOwnership nonces
-///            below by however many are emitted (0–3).
-///          → CommissionManager.transferOwnership (starts two-step handoff)
-///          → Bridge.transferOwnership (starts two-step handoff)
-///          → RouteRegistry.transferOwnership (starts two-step handoff)
-///
-/// Ownership is Ownable2Step: the transferOwnership calls only set
-/// pendingOwner = MultisigProxy. The federation MUST accept post-deploy via
-/// governance (acceptOwnership) — see the post-deploy reminder. Until then,
-/// `deployer` remains the owner.
-///
-/// Routes are NOT registered here. Federation configures them through
-/// `MultisigProxy.proposeSetRoute(...)` after deploy — this mirrors the
-/// permanent governance path and keeps the deploy script audit-clean.
-///
-/// Env (required):
-///   PRIVATE_KEY, USDT0_ADDRESS, BTC_RELAY_ADDRESS,
-///   ENCLAVE_SIGNERS, ENCLAVE_THRESHOLD, INITIAL_ENCLAVE_SOURCE_CHAIN_ID,
-///   FEDERATION_SIGNERS, FEDERATION_THRESHOLD,
-///   EMERGENCY_GUARDIAN,
-///   COMMISSION_RECIPIENT, TIMELOCK_DURATION, MIN_TIMELOCK,
-///   MIN_FUNDS_IN_AMOUNT, MIN_FUNDS_OUT_AMOUNT,
-///   INITIAL_CHAIN_BURST_BPS, INITIAL_CHAIN_REFILL_BPS_PER_WINDOW,
-///   GLOBAL_BURST_BPS, GLOBAL_REFILL_BPS_PER_WINDOW
-///   Amount floors must be non-zero with MIN_FUNDS_IN_AMOUNT >= MIN_FUNDS_OUT_AMOUNT.
-///
-/// Env (optional):
-///   ETH_USD_FEED      — Chainlink ETH/USD aggregator (wired in before CM
-///                       ownership transfer, so NATIVE commission quotes
-///                       are live the moment the proxy takes over).
-///   ETH_USD_HEARTBEAT — Seconds before the feed answer is considered stale.
-///                       Required when ETH_USD_FEED is provided.
-///   MIN_SOURCE_CONFIRMATIONS (6) — RGBVerifier: min depth of the source
-///                       (RGB burn/lock) block.
-///   MAX_LATEST_CONFIRMATIONS (1) — RGBVerifier: max depth of the latest
-///                       (freshness) block; must be >= 1.
-///   MIN_CONFIRMATION_GAP     (5) — RGBVerifier: min depth gap between the
-///                       source and latest blocks.
-///   SEQUENCER_UPTIME_FEED — Required whenever ETH_USD_FEED is set. Chainlink
-///                       Arbitrum L2 Sequencer Uptime feed used to reject NATIVE
-///                       quotes during downtime and the post-restart grace.
-///   ETH_USD_MIN_PRICE / ETH_USD_MAX_PRICE — Required whenever ETH_USD_FEED is
-///                       set. ETH/USD sanity band in feed decimals
-///                       (e.g. 100e8 / 100000e8).
-///
-/// Usage:
-///   forge script script/deploy/DeployAll.s.sol \
-///     --rpc-url $RPC_URL --broadcast --verify
+/// @notice Deploys the bridge stack and starts ownership handoffs to MultisigProxy.
+/// @dev Predicts BridgeProxy at deployer nonce + 3. Configures outflow policies and optional
+///      oracle settings before handoff. Federation accepts ownership and registers routes
+///      separately. Verifier thresholds default to 3/2/2 and accept environment overrides.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `USDT0_ADDRESS`, `BTC_RELAY_ADDRESS`, `ENCLAVE_SIGNERS`,
+///      `ENCLAVE_THRESHOLD`, `INITIAL_ENCLAVE_SOURCE_CHAIN_ID`, `FEDERATION_SIGNERS`,
+///      `FEDERATION_THRESHOLD`, `EMERGENCY_GUARDIAN`, `COMMISSION_RECIPIENT`, `TIMELOCK_DURATION`,
+///      `MIN_TIMELOCK`, `ETH_USD_FEED`, `ETH_USD_HEARTBEAT`, `MIN_FUNDS_IN_AMOUNT`,
+///      `MIN_FUNDS_OUT_AMOUNT`, `MIN_SOURCE_CONFIRMATIONS`, `MAX_LATEST_CONFIRMATIONS`,
+///      `MIN_CONFIRMATION_GAP`, `SEQUENCER_UPTIME_FEED`, `ETH_USD_MIN_PRICE`, `ETH_USD_MAX_PRICE`,
+///      `INITIAL_CHAIN_BURST_BPS`, `INITIAL_CHAIN_REFILL_BPS_PER_WINDOW`, `GLOBAL_BURST_BPS`,
+///      `GLOBAL_REFILL_BPS_PER_WINDOW`.
 contract DeployAll is Script {
     uint256 private constant MAX_OUTFLOW_POLICY_BPS = 2_000;
 
@@ -121,9 +62,9 @@ contract DeployAll is Script {
         uint256 ethUsdHb = vm.envOr("ETH_USD_HEARTBEAT", uint256(0));
         uint256 minFundsIn = vm.envUint("MIN_FUNDS_IN_AMOUNT");
         uint256 minFundsOut = vm.envUint("MIN_FUNDS_OUT_AMOUNT");
-        uint256 minSourceConf = vm.envOr("MIN_SOURCE_CONFIRMATIONS", uint256(6));
-        uint256 maxLatestConf = vm.envOr("MAX_LATEST_CONFIRMATIONS", uint256(1));
-        uint256 minConfGap = vm.envOr("MIN_CONFIRMATION_GAP", uint256(5));
+        uint256 minSourceConf = vm.envOr("MIN_SOURCE_CONFIRMATIONS", uint256(3));
+        uint256 maxLatestConf = vm.envOr("MAX_LATEST_CONFIRMATIONS", uint256(2));
+        uint256 minConfGap = vm.envOr("MIN_CONFIRMATION_GAP", uint256(2));
         address seqFeed = vm.envOr("SEQUENCER_UPTIME_FEED", address(0));
         uint256 ethUsdMinPrice = vm.envOr("ETH_USD_MIN_PRICE", uint256(0));
         uint256 ethUsdMaxPrice = vm.envOr("ETH_USD_MAX_PRICE", uint256(0));
@@ -140,8 +81,7 @@ contract DeployAll is Script {
             "set both ETH_USD_MIN_PRICE and ETH_USD_MAX_PRICE, or neither"
         );
         require(ethUsdMaxPrice == 0 || ethUsdMinPrice < ethUsdMaxPrice, "ETH_USD_MIN_PRICE must be below MAX");
-        // Enabling the NATIVE oracle path requires the full Arbitrum hardening
-        // configuration. There is no production opt-out.
+        // Native quotes require heartbeat, sequencer and price-bound configuration.
         if (ethUsdFeed != address(0)) {
             require(ethUsdHb != 0, "ETH_USD_HEARTBEAT must be set when ETH_USD_FEED is provided");
             require(seqFeed != address(0), "hardening: SEQUENCER_UPTIME_FEED must be set");
@@ -181,12 +121,9 @@ contract DeployAll is Script {
         // ---- 5. Route plugins (nonce n+4 .. n+8) -------------------------
         rgbVerifier = new RGBVerifier(btcRelay, minSourceConf, maxLatestConf, minConfGap);
         rgbModule = new RgbSettlementModule(address(routeRegistry));
-        // NullVerifier: explicit no-proof verifier for operational / non-RGB-
-        // source routes (e.g. Arch → RGB mint/burn). One instance serves
-        // every such route. Federation wires it per route via `proposeSetRoute`.
+        // Optional verifier for routes whose finality is checked upstream.
         nullVerifier = new NullVerifier();
-        // RGB mint/burn debits to non-RGB destinations (e.g. Arch) read
-        // the canonical ledger and write no RGB record on credit.
+        // Reads the RGB ledger for debits without creating records on non-RGB credits.
         outboundModule = new RgbOutboundSettlementModule(address(routeRegistry), address(rgbModule));
         // Stateless routes whose settlement/finality is handled by the TEE or
         // an external delivery layer still use an explicit non-zero module.
@@ -206,11 +143,7 @@ contract DeployAll is Script {
             minTimelock
         );
 
-        // ---- 7. Install initial outflow policies before ownership transfer -
-        // Percentage policies are valid at zero liquidity. Installing both
-        // buckets while the deployer still owns Bridge means the initial route
-        // is ready for fundsOut as soon as routes and ownership are activated;
-        // it cannot be stranded behind a fresh timelocked admin proposal.
+        // ---- 7. Configure outflow policies before ownership handoff --------
         bridge.setOutflowLimit(initialSrcChain, initialChainBurstBps, initialChainRefillBps);
         bridge.setGlobalOutflowLimit(globalBurstBps, globalRefillBps);
 
@@ -332,8 +265,8 @@ contract DeployAll is Script {
         console2.log("for each supported (sourceChainId, destChainId) pair");
         console2.log("before any fundsIn / fundsOut traffic is accepted.");
         console2.log("Production RGB settlement modules:");
-        console2.log("  42161 -> 96: RgbSettlementModule");
-        console2.log("  96 -> 42161: RgbSettlementModule");
+        console2.log("  42161 -> 827166: RgbSettlementModule");
+        console2.log("  827166 -> 42161: RgbSettlementModule");
         console2.log("For every additional fundsOut source chain, federation must also");
         console2.log("install setOutflowLimit(chainId, burstBps, refillBpsPerWindow)");
         console2.log("before enabling traffic for that chain.");
