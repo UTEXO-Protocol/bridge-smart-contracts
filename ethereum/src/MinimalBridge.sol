@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import {BridgeBase} from "./BridgeBase.sol";
+import {IArbSys} from "./interfaces/IArbSys.sol";
 
 /// @title MinimalBridge
 /// @notice Minimal single-token bridge for lock/unlock operations.
@@ -14,6 +15,41 @@ import {BridgeBase} from "./BridgeBase.sol";
 ///        similar access control contract on the integrator's side.
 contract MinimalBridge is BridgeBase {
     using SafeERC20 for IERC20;
+
+    // =========================================================================
+    // Types
+    // =========================================================================
+
+    /// @notice Permanent state recorded for one funded RGB mint claim.
+    /// @dev Both values fit in one storage slot. A zero `l2BlockPlusOne`
+    ///      means that no record exists for the claim key.
+    struct FundsInRecord {
+        uint64 amount;
+        uint64 l2BlockPlusOne;
+    }
+
+    // =========================================================================
+    // Constants
+    // =========================================================================
+
+    /// @notice Arbitrum system precompile exposing the child-chain block number.
+    IArbSys internal constant ARBSYS = IArbSys(address(100));
+
+    /// @notice Maximum number of Arbitrum L2 blocks after `afterBlock` in
+    ///         which an RGB mint may be funded.
+    uint64 public constant MAX_LOCK_BLOCKS = 400_000;
+
+    /// @notice Domain-separated type hash for permanent RGB mint records.
+    bytes32 public constant RGB_MINT_DEPOSIT_TYPEHASH = keccak256(
+        "UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbOpId,uint256 amount,uint64 afterBlock)"
+    );
+
+    // =========================================================================
+    // Storage
+    // =========================================================================
+
+    /// @notice Permanent funded RGB mint records, keyed by the complete claim.
+    mapping(bytes32 claimKey => FundsInRecord record) public fundsInRecords;
 
     // =========================================================================
     // Events
@@ -33,6 +69,25 @@ contract MinimalBridge is BridgeBase {
     event FundsOut(address indexed recipient, uint256 amount, uint256 indexed operationId, string sourceAddress);
 
     // =========================================================================
+    // Errors
+    // =========================================================================
+
+    /// @notice The RGB operation identifier is zero.
+    error InvalidOperationId();
+
+    /// @notice A record already exists for the complete RGB mint claim.
+    error DuplicateMintDeposit(bytes32 claimKey);
+
+    /// @notice The lock was submitted before its inclusive minimum L2 block.
+    error LockWindowNotStarted(uint256 l2Block, uint64 afterBlock);
+
+    /// @notice The lock was submitted after its allowed L2 block window.
+    error LockWindowExpired(uint256 l2Block, uint64 afterBlock);
+
+    /// @notice The Arbitrum L2 block number cannot be encoded in the record.
+    error L2BlockNumberExceedsUint64(uint256 l2Block);
+
+    // =========================================================================
     // Constructor
     // =========================================================================
 
@@ -45,14 +100,55 @@ contract MinimalBridge is BridgeBase {
 
     /// @notice Lock tokens in the bridge to initiate a transfer to the destination chain.
     /// @param amount                 Amount of tokens to lock.
-    /// @param operationId            Backend-assigned operation identifier included in the event.
-    function fundsIn(uint256 amount, uint256 operationId) external whenNotPaused {
+    /// @param operationId            RGB mint operation identifier included in the event.
+    /// @param afterBlock              Inclusive minimum Arbitrum L2 block for the lock.
+    function fundsIn(uint256 amount, uint256 operationId, uint64 afterBlock) external whenNotPaused {
         if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
+        if (operationId == 0) revert InvalidOperationId();
+
+        uint256 l2Block = ARBSYS.arbBlockNumber();
+        if (l2Block < afterBlock) revert LockWindowNotStarted(l2Block, afterBlock);
+        if (l2Block - afterBlock > MAX_LOCK_BLOCKS) revert LockWindowExpired(l2Block, afterBlock);
+        if (l2Block >= type(uint64).max) revert L2BlockNumberExceedsUint64(l2Block);
+
+        bytes32 claimKey = rgbMintDepositId(operationId, amount, afterBlock);
+        if (fundsInRecords[claimKey].l2BlockPlusOne != 0) revert DuplicateMintDeposit(claimKey);
+
+        // Safe after the explicit amount and block-number bounds above.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 recordedAmount = uint64(amount);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 recordedBlockPlusOne = uint64(l2Block + 1);
+
+        // Write before the token interaction so the same claim cannot be
+        // re-entered. A transfer failure reverts this write atomically.
+        fundsInRecords[claimKey] = FundsInRecord({amount: recordedAmount, l2BlockPlusOne: recordedBlockPlusOne});
 
         IERC20(TOKEN).safeTransferFrom(msg.sender, address(this), amount);
 
         // forge-lint: disable-next-line(unsafe-typecast)
         emit FundsIn(msg.sender, operationId, uint64(amount));
+    }
+
+    // =========================================================================
+    // Views
+    // =========================================================================
+
+    /// @notice Derives the permanent record key for an RGB mint claim.
+    function rgbMintDepositId(uint256 operationId, uint256 amount, uint64 afterBlock) public view returns (bytes32) {
+        return keccak256(
+            abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, address(this), block.chainid, TOKEN, operationId, amount, afterBlock)
+        );
+    }
+
+    /// @notice Returns permanent mint records for a batch of complete claim keys.
+    /// @dev Missing keys return records whose fields are both zero. Callers may
+    ///      split very large histories into chunks to stay below RPC gas caps.
+    function getFundsInRecords(bytes32[] calldata claimKeys) external view returns (FundsInRecord[] memory records) {
+        records = new FundsInRecord[](claimKeys.length);
+        for (uint256 i; i < claimKeys.length; ++i) {
+            records[i] = fundsInRecords[claimKeys[i]];
+        }
     }
 
     // =========================================================================
