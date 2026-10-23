@@ -279,20 +279,20 @@ mint only from `afterBlock` through `afterBlock + MAX_LOCK_BLOCKS`, inclusive.
 It reads the child-chain height from the Arbitrum `ArbSys` precompile rather
 than Solidity's approximate L1 `block.number`.
 
-Each successful lock creates one permanent packed record under the key returned
+Each successful lock creates one permanent height record under the key returned
 by `rgbMintDepositId(operationId, amount, afterBlock)`. The key binds the bridge,
 EVM chain, token, RGB operation, amount and lower block bound. Records are never
-deleted by `fundsOut`; `l2BlockPlusOne == 0` therefore unambiguously means that
-the claim was not recorded.
+deleted by `fundsOut`. A stored value of zero therefore means that the claim was
+not recorded; otherwise the value is the actual L2 block plus one.
 
-RGB clients can fetch records in batches without scanning historical logs:
+An RGB resolver can check one external anchor without scanning historical logs:
 
 ```javascript
 const abi = [
-  "function getFundsInRecords(bytes32[] claimKeys) view returns ((uint64 amount,uint64 l2BlockPlusOne)[])"
+  "function getFundsInBlock(uint256 operationId,uint256 amount,uint64 afterBlock) view returns (uint64 l2BlockPlusOne)"
 ];
 const bridge = new ethers.Contract(bridgeAddress, abi, provider);
-const records = await bridge.getFundsInRecords(claimKeys, {
+const l2BlockPlusOne = await bridge.getFundsInBlock(operationId, amount, afterBlock, {
   blockTag: "finalized"
 });
 ```
@@ -301,17 +301,16 @@ The equivalent direct `eth_call` with Foundry's `cast` is:
 
 ```bash
 cast call "$MINIMAL_BRIDGE" \
-  "getFundsInRecords(bytes32[])((uint64,uint64)[])" \
-  "[$CLAIM_KEY_1,$CLAIM_KEY_2]" \
+  "getFundsInBlock(uint256,uint256,uint64)(uint64)" \
+  "$OPERATION_ID" "$AMOUNT" "$AFTER_BLOCK" \
   --rpc-url "$ARBITRUM_RPC_URL" \
   --block finalized
 ```
 
-Clients derive each claim key from validated RGB history, require a nonzero
-`l2BlockPlusOne`, compare the recorded amount, and decode the creation height as
-`l2BlockPlusOne - 1`. Large histories may be split into multiple calls to stay
-within an RPC provider's `eth_call` gas cap. The legacy `FundsIn` event remains
-unchanged for compatibility.
+The resolver supplies the operation id, amount and lower block bound from
+validated RGB history. It requires a nonzero result and decodes the creation
+height as `l2BlockPlusOne - 1`. The legacy `FundsIn` event remains unchanged for
+compatibility.
 
 ### LayerZero adapter wiring
 

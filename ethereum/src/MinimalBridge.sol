@@ -17,18 +17,6 @@ contract MinimalBridge is BridgeBase {
     using SafeERC20 for IERC20;
 
     // =========================================================================
-    // Types
-    // =========================================================================
-
-    /// @notice Permanent state recorded for one funded RGB mint claim.
-    /// @dev Both values fit in one storage slot. A zero `l2BlockPlusOne`
-    ///      means that no record exists for the claim key.
-    struct FundsInRecord {
-        uint64 amount;
-        uint64 l2BlockPlusOne;
-    }
-
-    // =========================================================================
     // Constants
     // =========================================================================
 
@@ -48,8 +36,9 @@ contract MinimalBridge is BridgeBase {
     // Storage
     // =========================================================================
 
-    /// @notice Permanent funded RGB mint records, keyed by the complete claim.
-    mapping(bytes32 claimKey => FundsInRecord record) public fundsInRecords;
+    /// @notice Permanent funded RGB mint heights, keyed by the complete claim.
+    /// @dev Zero means absent; otherwise the value is the actual L2 block plus one.
+    mapping(bytes32 claimKey => uint64 l2BlockPlusOne) public fundsInRecords;
 
     // =========================================================================
     // Events
@@ -112,17 +101,15 @@ contract MinimalBridge is BridgeBase {
         if (l2Block >= type(uint64).max) revert L2BlockNumberExceedsUint64(l2Block);
 
         bytes32 claimKey = rgbMintDepositId(operationId, amount, afterBlock);
-        if (fundsInRecords[claimKey].l2BlockPlusOne != 0) revert DuplicateMintDeposit(claimKey);
+        if (fundsInRecords[claimKey] != 0) revert DuplicateMintDeposit(claimKey);
 
-        // Safe after the explicit amount and block-number bounds above.
-        // forge-lint: disable-next-line(unsafe-typecast)
-        uint64 recordedAmount = uint64(amount);
+        // Safe after the explicit block-number bound above.
         // forge-lint: disable-next-line(unsafe-typecast)
         uint64 recordedBlockPlusOne = uint64(l2Block + 1);
 
         // Write before the token interaction so the same claim cannot be
         // re-entered. A transfer failure reverts this write atomically.
-        fundsInRecords[claimKey] = FundsInRecord({amount: recordedAmount, l2BlockPlusOne: recordedBlockPlusOne});
+        fundsInRecords[claimKey] = recordedBlockPlusOne;
 
         IERC20(TOKEN).safeTransferFrom(msg.sender, address(this), amount);
 
@@ -141,14 +128,14 @@ contract MinimalBridge is BridgeBase {
         );
     }
 
-    /// @notice Returns permanent mint records for a batch of complete claim keys.
-    /// @dev Missing keys return records whose fields are both zero. Callers may
-    ///      split very large histories into chunks to stay below RPC gas caps.
-    function getFundsInRecords(bytes32[] calldata claimKeys) external view returns (FundsInRecord[] memory records) {
-        records = new FundsInRecord[](claimKeys.length);
-        for (uint256 i; i < claimKeys.length; ++i) {
-            records[i] = fundsInRecords[claimKeys[i]];
-        }
+    /// @notice Returns the funded L2 height for one RGB mint claim.
+    /// @dev Zero means absent; otherwise subtract one to recover the L2 block.
+    function getFundsInBlock(uint256 operationId, uint256 amount, uint64 afterBlock)
+        external
+        view
+        returns (uint64 l2BlockPlusOne)
+    {
+        return fundsInRecords[rgbMintDepositId(operationId, amount, afterBlock)];
     }
 
     // =========================================================================

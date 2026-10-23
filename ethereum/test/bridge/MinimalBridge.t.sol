@@ -78,14 +78,13 @@ contract MinimalBridgeTest is Test {
         assertEq(token.balanceOf(user), userBefore - AMOUNT);
     }
 
-    function test_fundsIn_recordsAmountAndL2Block() public {
+    function test_fundsIn_recordsL2Block() public {
         bytes32 claimKey = bridge.rgbMintDepositId(OPERATION_ID, AMOUNT, AFTER_BLOCK);
 
         vm.prank(user);
         bridge.fundsIn(AMOUNT, OPERATION_ID, AFTER_BLOCK);
 
-        (uint64 recordedAmount, uint64 l2BlockPlusOne) = bridge.fundsInRecords(claimKey);
-        assertEq(recordedAmount, AMOUNT);
+        uint64 l2BlockPlusOne = bridge.fundsInRecords(claimKey);
         assertEq(l2BlockPlusOne, L2_BLOCK + 1);
     }
 
@@ -122,8 +121,8 @@ contract MinimalBridgeTest is Test {
 
         bytes32 firstKey = bridge.rgbMintDepositId(OPERATION_ID, AMOUNT, AFTER_BLOCK);
         bytes32 secondKey = bridge.rgbMintDepositId(secondOperationId, AMOUNT, AFTER_BLOCK);
-        (, uint64 firstBlockPlusOne) = bridge.fundsInRecords(firstKey);
-        (, uint64 secondBlockPlusOne) = bridge.fundsInRecords(secondKey);
+        uint64 firstBlockPlusOne = bridge.fundsInRecords(firstKey);
+        uint64 secondBlockPlusOne = bridge.fundsInRecords(secondKey);
         assertEq(firstBlockPlusOne, uint256(AFTER_BLOCK) + 1);
         assertEq(secondBlockPlusOne, upperBoundary + 1);
     }
@@ -172,9 +171,7 @@ contract MinimalBridgeTest is Test {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, OPERATION_ID, AFTER_BLOCK);
 
-        (uint64 recordedAmount, uint64 l2BlockPlusOne) = bridge.fundsInRecords(claimKey);
-        assertEq(recordedAmount, 0);
-        assertEq(l2BlockPlusOne, 0);
+        assertEq(bridge.fundsInRecords(claimKey), 0);
     }
 
     function test_fundsIn_revertsWhenL2BlockCannotFitRecord() public {
@@ -193,33 +190,14 @@ contract MinimalBridgeTest is Test {
         bridge.fundsIn(AMOUNT, 0, AFTER_BLOCK);
     }
 
-    function test_getFundsInRecords_returnsExistingAndMissingRecords() public {
-        bytes32 existingKey = bridge.rgbMintDepositId(OPERATION_ID, AMOUNT, AFTER_BLOCK);
+    function test_getFundsInBlock_returnsExistingAndMissingClaims() public {
         vm.prank(user);
         bridge.fundsIn(AMOUNT, OPERATION_ID, AFTER_BLOCK);
 
-        bytes32[] memory claimKeys = new bytes32[](2);
-        claimKeys[0] = existingKey;
-        claimKeys[1] = keccak256("missing");
-
-        MinimalBridge.FundsInRecord[] memory records = bridge.getFundsInRecords(claimKeys);
-        assertEq(records.length, 2);
-        assertEq(records[0].amount, AMOUNT);
-        assertEq(records[0].l2BlockPlusOne, L2_BLOCK + 1);
-        assertEq(records[1].amount, 0);
-        assertEq(records[1].l2BlockPlusOne, 0);
-    }
-
-    function test_getFundsInRecords_handles1400Keys() public view {
-        bytes32[] memory claimKeys = new bytes32[](1_400);
-        for (uint256 i; i < claimKeys.length; ++i) {
-            claimKeys[i] = bytes32(i + 1);
-        }
-
-        MinimalBridge.FundsInRecord[] memory records = bridge.getFundsInRecords(claimKeys);
-        assertEq(records.length, claimKeys.length);
-        assertEq(records[0].l2BlockPlusOne, 0);
-        assertEq(records[records.length - 1].l2BlockPlusOne, 0);
+        assertEq(bridge.getFundsInBlock(OPERATION_ID, AMOUNT, AFTER_BLOCK), L2_BLOCK + 1);
+        assertEq(bridge.getFundsInBlock(OPERATION_ID + 1, AMOUNT, AFTER_BLOCK), 0);
+        assertEq(bridge.getFundsInBlock(OPERATION_ID, AMOUNT + 1, AFTER_BLOCK), 0);
+        assertEq(bridge.getFundsInBlock(OPERATION_ID, AMOUNT, AFTER_BLOCK + 1), 0);
     }
 
     function test_fundsIn_emitsFundsIn() public {
