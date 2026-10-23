@@ -6,27 +6,12 @@ import {FundsOutContext} from "../interfaces/RouteTypes.sol";
 import {IBtcRelayView} from "../interfaces/IBtcRelayView.sol";
 
 /// @title RGBVerifier
-/// @notice `IFinalityVerifier` for the RGB → Arbitrum route. Confirms that
-///         the source-side operation (RGB burn or lock) was packaged into a
-///         finalised Bitcoin block by delegating to the Atomiq `IBtcRelayView`
-///         SPV relay.
-///
-/// @dev Stateless apart from the immutable `btcRelay` reference. There is
-///      no admin, no pause, no upgrade. To repoint at a different BtcRelay
-///      deployment, deploy a fresh `RGBVerifier` and rotate the route via
-///      `RouteRegistry.setRoute(...)` under federation governance.
-///
-///      The `proof` blob layout is fixed by this verifier — two
-///      `(height, commitmentHash)` pairs:
-///        `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
-///                    uint256 latestHeight, bytes32 latestCommit)`
-///      The source pair identifies the block that packaged the RGB burn/lock;
-///      the latest pair identifies a block at the relay head. The TEE supplies
-///      both inside its signed call data; the verifier decodes them, queries
-///      the BtcRelay, and reverts on any failure (unknown height, mismatched
-///      commitment, ABI-decode error) or if the confirmation-depth invariants
-///      below fail. Depth thresholds are compile-time constants; retune by
-///      redeploying and rotating the route.
+/// @notice Checks Bitcoin commitments and confirmation depths for RGB releases and rebalances.
+/// @dev `proof` is `abi.encode(uint256 sourceHeight, bytes32 sourceCommit,
+///      uint256 latestHeight, bytes32 latestCommit)`. The source pair identifies the
+///      operation's anchoring block; latest bounds proof freshness relative to the relay tip.
+///      Both commitments are checked against `btcRelay`. Thresholds are immutable;
+///      enclaves validate the consignment and its relationship to these blocks.
 contract RGBVerifier is IFinalityVerifier {
     // =========================================================================
     // Errors
@@ -42,19 +27,17 @@ contract RGBVerifier is IFinalityVerifier {
     /// @notice The source block (RGB burn/lock) is not buried deeply enough.
     error InsufficientSourceConfirmations(uint256 confirmations, uint256 required);
 
-    /// @notice The latest block is not close enough to the relay head, so the
-    ///         relay's view of the chain may be stale.
+    /// @notice The proof's latest block exceeds the permitted depth relative to the relay tip.
+    /// @dev Does not establish whether the relay itself is synchronized with Bitcoin.
     error RelayNotFresh(uint256 confirmations, uint256 maxAllowed);
 
     /// @notice The source block is not buried far enough beneath the fresh
     ///         latest block.
     error InsufficientConfirmationGap(uint256 sourceConfirmations, uint256 latestConfirmations, uint256 requiredGap);
 
-    /// @notice The release carried a non-empty `sourceAddress`. RGB has no
-    ///         source-address concept, so the field MUST be the empty string on
-    ///         every RGB route. Enforced here rather than left to convention:
-    ///         `sourceAddress` is hashed into `burnId`, so a non-empty value
-    ///         would let the same burn derive a different replay key.
+    /// @notice The RGB release or rebalance supplied a non-empty `sourceAddress`.
+    /// @dev This bridge uses an empty sourceAddress for RGB so alternate strings cannot
+    ///      produce different replay keys for the same burn.
     error UnexpectedSourceAddress();
 
     // =========================================================================
@@ -64,29 +47,24 @@ contract RGBVerifier is IFinalityVerifier {
     /// @notice The Atomiq BtcRelay contract this verifier delegates to.
     address public immutable btcRelay;
 
-    /// @notice Minimum confirmations the source block (RGB burn/lock) must have
-    ///         (Bitcoin's high-value settlement convention, typically 6). Set at
-    ///         deploy; retune by redeploying the verifier and rotating the route.
+    /// @notice Minimum confirmation depth of the source block.
     uint256 public immutable minSourceConfirmations;
 
-    /// @notice Maximum confirmations the latest block may have (typically 1). A
-    ///         fresh latest block sits at the relay head, proving the relay is
-    ///         current. Set at deploy.
+    /// @notice Maximum permitted confirmation depth of the proof's latest block.
     uint256 public immutable maxLatestConfirmations;
 
-    /// @notice Minimum confirmation gap between the source block and the fresh
-    ///         latest block (typically 5). Set at deploy.
+    /// @notice Minimum depth difference between source and latest blocks.
     uint256 public immutable minConfirmationGap;
 
     // =========================================================================
     // Constructor
     // =========================================================================
 
-    /// @param btcRelay_               Address of the deployed `IBtcRelayView`
-    ///                                (Atomiq BtcRelay) on the same chain as Bridge.
+    /// @param btcRelay_              Address of the deployed `IBtcRelayView`
+    ///                               (Atomiq BtcRelay) on the same chain as Bridge.
     /// @param minSourceConfirmations_ Minimum depth of the source (burn/lock) block.
     /// @param maxLatestConfirmations_ Maximum depth of the latest (freshness) block; must be >= 1.
-    /// @param minConfirmationGap_     Minimum depth gap between source and latest.
+    /// @param minConfirmationGap_    Minimum depth gap between source and latest.
     constructor(
         address btcRelay_,
         uint256 minSourceConfirmations_,
@@ -106,23 +84,9 @@ contract RGBVerifier is IFinalityVerifier {
     // =========================================================================
 
     /// @inheritdoc IFinalityVerifier
-    /// @dev Rejects a non-empty `ctx.sourceAddress` (RGB has no such concept),
-    ///      then decodes `proof` as two `(height, commitmentHash)` pairs:
-    ///        `abi.encode(sourceHeight, sourceCommit, latestHeight, latestCommit)`
-    ///      - the source pair identifies the block that packaged the RGB
-    ///        burn/lock;
-    ///      - the latest pair identifies a block at the relay head (freshness).
-    ///      Both are checked against `IBtcRelayView.verifyBlockheaderHash`,
-    ///      which reverts on an unknown height or mismatched commitment and
-    ///      otherwise returns the block's confirmation depth. On top of that
-    ///      this verifier enforces, on-chain:
-    ///        - the source block is buried at least `minSourceConfirmations` deep;
-    ///        - the latest block is at most `maxLatestConfirmations` deep (fresh relay);
-    ///        - the source is buried at least `minConfirmationGap` blocks beneath
-    ///          the fresh latest block.
+    /// @dev Requires empty sourceAddress and enforces source depth, latest depth and gap.
     function verify(FundsOutContext calldata ctx, bytes calldata proof) external view override {
-        // RGB has no source-address concept; keep the field canonical so the
-        // same burn always derives the same `burnId`.
+        // Keep the replay-key address canonical; RGB details are validated in the consignment.
         if (bytes(ctx.sourceAddress).length != 0) revert UnexpectedSourceAddress();
 
         (uint256 sourceHeight, bytes32 sourceCommit, uint256 latestHeight, bytes32 latestCommit) =
@@ -137,7 +101,7 @@ contract RGBVerifier is IFinalityVerifier {
         if (sourceConfirmations < minSourceConfirmations) {
             revert InsufficientSourceConfirmations(sourceConfirmations, minSourceConfirmations);
         }
-        // Latest block near the relay head — the relay's chain view is current.
+        // Bound the age of the proof's latest block relative to the relay head.
         if (latestConfirmations > maxLatestConfirmations) {
             revert RelayNotFresh(latestConfirmations, maxLatestConfirmations);
         }

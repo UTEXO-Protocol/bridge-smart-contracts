@@ -5,67 +5,12 @@ import {ISettlementModule} from "../interfaces/ISettlementModule.sol";
 import {FundsInContext, FundsOutContext} from "../interfaces/RouteTypes.sol";
 
 /// @title RgbSettlementModule
-/// @notice `ISettlementModule` for the RGB → Arbitrum route. Records the
-///         on-chain RGB-mint ledger (`operationId → netAmount`) and, on
-///         release, verifies that the operation ids a burn consignment
-///         references were actually minted on-chain for the claimed amounts.
-///
-/// @dev Storage layout:
-///        `fundsInRecords[operationId] = netAmount` — the post-commission
-///        amount minted on the RGB side for that deposit. RGB binds an
-///        `operationId` to an exact mint amount, so the record is the
-///        canonical on-chain proof of "this mint happened, for this amount".
-///        `fundsInRecordChainIds[operationId] = destChainId` — the RGB network
-///        the mint was credited TO. One module instance can serve several RGB
-///        mint/burn networks from this one ledger,
-///        because every record is tagged with its network. Records are keyed by
-///        the globally-unique `operationId`, so no cross-network key collision
-///        is possible; the tag exists to enforce network SCOPE at release.
-///
-///      Release semantics (existence + exact-amount + same-network check, no
-///      consumption):
-///        On `beforeFundsOut` the TEE supplies the `(operationId, amount)`
-///        pairs extracted from the burn consignment. A physical `fundsOut`
-///        requires at least one pair. An accounting-only rebalance may supply
-///        empty arrays when its debit side deliberately has no RGB burn; its
-///        credit leg still writes the destination RGB record atomically. The
-///        operation type comes from authenticated Bridge context, not from
-///        caller-controlled `settlementData`.
-///
-///        For every supplied pair, the module checks that the operation id
-///        EXISTS in `fundsInRecords`, that its recorded amount EQUALS the
-///        supplied amount, and that its recorded network EQUALS the release's
-///        `sourceChainId` — so a burn on one RGB network cannot cross-satisfy
-///        its proof-of-mint with a record minted on a different RGB network. It
-///        does NOT consume/delete the records, does NOT sum them, and does NOT
-///        tie them to the `fundsOut` amount — it only proves the referenced
-///        mints are real and belong to the burning network. This delegates to
-///        the contract the check a TEE would otherwise need an ETH light node
-///        for ("does the EVM mint event exist?").
-///
-///        Solvency (no release beyond bridged liquidity) and replay protection
-///        are owned elsewhere: `Bridge.lockedLiquidity` caps total outflow per
-///        source chain, and `Bridge.consumedBurnIds` blocks burn replays. That
-///        is why per-record consumption is unnecessary here, and why duplicate
-///        operation ids in `settlementData` are harmless (the checks are pure
-///        reads).
-///
-///      Auth: `onFundsIn` / `beforeFundsOut` are gated on the immutable
-///      `routeRegistry` address. Re-pointing at a different registry =
-///      redeploy the module + rotate the route under federation governance.
-///
-///      `settlementData` layout:
-///        - `onFundsIn`:  `abi.encode(uint256 rgbOpId)` — the RGB OpId, decoded
-///                        and returned for Bridge's `FundsIn` event. The record
-///                        is keyed by the consignment-derived `ctx.operationId`,
-///                        which binds this OpId, net amount and RGB network.
-///        - `beforeFundsOut`: `abi.encode(bytes32[] operationIds, uint256[] amounts)`
-///                        (equal-length parallel arrays; non-empty for physical
-///                        releases).
-///
-///      This contract owns no tokens and mutates
-///      no state on release — `beforeFundsOut` is a pure validation. Reverts
-///      here roll back the surrounding `Bridge.fundsOut` call atomically.
+/// @notice Permanent RGB backing records for deposits and rebalance credits.
+/// @dev Only the paired registry may invoke hooks. Records store net amounts and
+///      destination network ids. Release checks match each reference without
+///      consuming records or equating their sum to the release amount.
+///      One instance may serve several RGB networks, distinguished by record tags.
+///      Bridge enforces liquidity and burn replay checks; enclaves validate consignments.
 contract RgbSettlementModule is ISettlementModule {
     // =========================================================================
     // Errors
@@ -86,9 +31,7 @@ contract RgbSettlementModule is ISettlementModule {
     ///         route requires a non-zero OpId (it is threaded to the RGB side).
     error InvalidRgbOpId();
 
-    /// @notice RGB has no destination-address concept. Requiring the canonical
-    ///         empty value prevents one deposit intent from being represented
-    ///         by multiple destination-address strings and operation ids.
+    /// @notice `ctx.destAddress` was non-empty; RGB destinations are carried in consignments.
     error UnexpectedDestinationAddress();
 
     /// @notice A `beforeFundsOut` call referenced an `operationId` that has no
@@ -120,21 +63,15 @@ contract RgbSettlementModule is ISettlementModule {
     // Storage
     // =========================================================================
 
-    /// @notice The `RouteRegistry` instance authorised to drive this module.
+    /// @notice The `RouteRegistry` instance authorized to drive this module.
     ///         The pairing is fixed at deploy time.
     address public immutable routeRegistry;
 
-    /// @notice `operationId → netAmount` ledger of on-chain RGB mints. A zero
-    ///         value means "never recorded under this id". Records are written
-    ///         once at `onFundsIn` and never cleared — they are a permanent
-    ///         proof-of-mint ledger, not a consumable balance.
+    /// @notice Net token amount backing each RGB mint id; zero means unrecorded.
+    /// @dev Records are permanent and are not consumed by release checks.
     mapping(bytes32 operationId => uint256 netAmount) public fundsInRecords;
 
-    /// @notice `operationId → RGB network id` the mint was credited to (the
-    ///         deposit's `destChainId`). Written alongside `fundsInRecords` and
-    ///         checked at release so a burn can only reference mints from its own
-    ///         RGB network. Zero for an unrecorded id (which fails the
-    ///         `fundsInRecords` existence check first).
+    /// @notice Destination RGB network for each recorded mint id.
     mapping(bytes32 operationId => uint256 chainId) public fundsInRecordChainIds;
 
     // =========================================================================
@@ -150,8 +87,8 @@ contract RgbSettlementModule is ISettlementModule {
     // Constructor
     // =========================================================================
 
-    /// @param routeRegistry_ The `RouteRegistry` deployment that will drive
-    ///                       this module. Must be non-zero.
+    /// @param routeRegistry_         The `RouteRegistry` deployment that will drive
+    ///                               this module. Must be non-zero.
     constructor(address routeRegistry_) {
         if (routeRegistry_ == address(0)) revert InvalidRouteRegistry();
         routeRegistry = routeRegistry_;
@@ -167,16 +104,12 @@ contract RgbSettlementModule is ISettlementModule {
     }
 
     /// @inheritdoc ISettlementModule
-    /// @dev Records the post-commission `netAmount` under the canonical
-    ///      `ctx.operationId` (Bridge.rgbMintDepositId for this mint). Reverts
-    ///      `DuplicateOperationId` if a non-zero record already exists under
-    ///      that key. `settlementData` carries the RGB OpId as `abi.encode(uint256
-    ///      rgbOpId)`; it is decoded and returned so Bridge can surface it in the
-    ///      RGB-only `FundsIn` event. Identity binds the network, OpId and actual
-    ///      net amount: deposits and rebalances cannot create a second backing
-    ///      record for the same mint tuple, regardless of sender or nonce.
-    ///      RGB has no destination-address concept, so `ctx.destAddress` must
-    ///      use its single canonical representation: the empty string.
+    /// @dev Records `netAmount` and the destination network once per `operationId`.
+    ///      Bridge ids bind (network, mint OpId, net amount), excluding sender and nonce;
+    ///      deposits and rebalance credits for the same tuple hit the duplicate guard.
+    ///      settlementData is abi.encode(uint256 rgbOpId). destAddress must be empty:
+    ///      the RGB destination is carried in the consignment, not this argument.
+    /// @return rgbOpId Mint OpId decoded from `settlementData`.
     function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
         external
         override

@@ -88,7 +88,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
 
     string internal constant DST_ADDR = "";
 
-    string internal constant SRC_ADDR = ""; // RGB has no source-address concept
+    string internal constant SRC_ADDR = ""; // RGB sourceAddress is supplied as an empty string
 
     bytes32 internal constant SRC_BURN_TX_ID = keccak256("multisig-burn-tx-default");
 

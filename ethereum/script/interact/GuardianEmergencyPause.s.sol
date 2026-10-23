@@ -5,12 +5,10 @@ import {Script, console2} from "forge-std/Script.sol";
 import {MultisigProxy} from "../../src/MultisigProxy.sol";
 
 /// @title GuardianEmergencyPause
-/// @notice Submits a direct guardian-authorized emergency pause without signatures.
-/// @dev Advances emergencyNonce, invalidating previously signed emergency commands.
-///
-/// Env:
-///   PRIVATE_KEY    — configured emergency guardian private key
-///   PROXY_ADDRESS  — MultisigProxy address
+/// @notice Submits a guardian pause without signatures.
+/// @dev PRIVATE_KEY must control the configured guardian. Advances emergencyNonce.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `PROXY_ADDRESS`.
 contract GuardianEmergencyPause is Script {
     function run() external {
         uint256 guardianPk = vm.envUint("PRIVATE_KEY");

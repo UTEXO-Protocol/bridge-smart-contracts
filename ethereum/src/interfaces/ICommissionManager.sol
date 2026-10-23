@@ -1,16 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-/**
- * @title ICommissionManager types & interface
- * @notice Shared enums and struct for {CommissionManager}; see `ICommissionManager` for the external API.
- *
- *         Chain identifiers — both `sourceChainId` and `destChainId` — are uint256
- *         values. EVM chains use their native `block.chainid`. Non-EVM
- *         destinations (RGB, Bitcoin, …) are assigned numeric ids by the Utexo
- *         backend in a namespace reserved above the EVM range (see project
- *         README for the conventions).
- */
+// Shared fee configuration types.
 
 /// @notice Which bridge operation a route fee is tied to.
 enum CommissionSide {
@@ -24,13 +15,9 @@ enum CommissionCurrency {
     NATIVE
 }
 
-/// @notice Commission parameters for one directional route (keyed by `buildRouteKey`).
-/// @dev The effective fee is `amount * stablePercent / multiplier^2 + baseFee`:
-///      a proportional part plus a flat part. `baseFee` is denominated in the
-///      token's smallest units (the bridged token is a USD-pegged stablecoin, so
-///      it doubles as a USD figure) and exists to cover a per-operation cost that
-///      does not scale with the amount — notably the Bitcoin transaction fee on
-///      the RGB leg. Either part may be zero; both zero disables the route's fee.
+/// @notice Fee parameters for one directional route.
+/// @dev Fee in token smallest units is amount * stablePercent / multiplier^2 + baseFee.
+///      Both components may be zero to disable commission.
 struct CommissionConfig {
     uint256 stablePercent;
     uint256 baseFee;
@@ -40,12 +27,13 @@ struct CommissionConfig {
     bool isSet;
 }
 
-/**
- * @title ICommissionManager
- * @notice Commission quotes, owner configuration, and custody of bridge fees. `CommissionManager` is the reference implementation.
- */
+/// @title ICommissionManager
+/// @notice Commission quotes, owner configuration, and custody of bridge fees.
+/// @dev EVM routes use EVM chain ids; RGB uses the protocol-assigned id 827166.
 interface ICommissionManager {
-    // ============ Errors ============
+    // =========================================================================
+    // Errors
+    // =========================================================================
 
     error OnlyBridge();
     error InvalidBridgeAddress();
@@ -82,7 +70,9 @@ interface ICommissionManager {
     error ChainlinkHardeningNotConfigured();
     error InvalidSequencerRound(uint256 startedAt);
 
-    // ============ Events ============
+    // =========================================================================
+    // Events
+    // =========================================================================
 
     event BridgeAddressUpdated(address indexed newBridge);
 
@@ -110,7 +100,9 @@ interface ICommissionManager {
     event TokenCommissionWithdrawn(address indexed token, address indexed to, uint256 amount);
     event NativeCommissionWithdrawn(address indexed to, uint256 amount);
 
-    // ============ State getters ============
+    // =========================================================================
+    // State getters
+    // =========================================================================
 
     function bridgeAddress() external view returns (address);
 
@@ -142,7 +134,9 @@ interface ICommissionManager {
 
     function ethUsdMaxPrice() external view returns (uint256);
 
-    // ============ Core calculations ============
+    // =========================================================================
+    // Core calculations
+    // =========================================================================
 
     function calculateFundsInCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
         external
@@ -176,16 +170,16 @@ interface ICommissionManager {
     ///         release side.
     function releaseFloor() external view returns (uint256);
 
-    /// @notice Convert a USD-denominated token fee (stablecoin, 1 token ≈ $1) to
-    ///         native wei using the configured ETH/USD Chainlink feed. Reverts
-    ///         `EthUsdFeedNotSet` when the price feed is unconfigured,
-    ///         `ChainlinkHardeningNotConfigured` unless the sequencer feed and
-    ///         price band are both configured, `InvalidPrice` on non-positive
-    ///         answers, and `StalePrice` when `updatedAt` is older than the
-    ///         configured heartbeat.
+    /// @notice Converts a stablecoin-denominated fee to native wei using ETH/USD.
+    /// @dev Returns zero for a zero fee without reading oracle configuration.
+    /// @param tokenFee Fee in token smallest units, assuming one whole token is worth one USD.
+    /// @param tokenDecimals Token decimal precision.
+    /// @return nativeFee Native amount in wei, rounded down.
     function convertTokenFeeToNative(uint256 tokenFee, uint256 tokenDecimals) external view returns (uint256 nativeFee);
 
-    // ============ Admin / config ============
+    // =========================================================================
+    // Admin / config
+    // =========================================================================
 
     function setGlobalDefaults(
         uint256 stablePercent,
@@ -195,20 +189,17 @@ interface ICommissionManager {
         CommissionCurrency currency
     ) external;
 
-    /// @notice Configure (or rotate) the ETH/USD Chainlink price feed used for
-    ///         NATIVE-currency commission quotes. `heartbeat` is the maximum
-    ///         allowed staleness in seconds before `calculate*Commission` reverts
-    ///         (Chainlink ETH/USD on Arbitrum heartbeats at 86400 s; a sensible
-    ///         setting is ~90000 with a safety buffer). Pass `address(0)` to
-    ///         disable NATIVE quoting until a new feed is set.
+    /// @notice Configures the ETH/USD feed and maximum answer age, in seconds.
+    /// @dev A nonzero feed requires a nonzero heartbeat. Clearing the feed disables
+    ///      nonzero native-fee conversions; zero-fee conversions still return zero.
     function setEthUsdFeed(address feed, uint256 heartbeat) external;
 
-    /// @notice Configure (or rotate) the Chainlink L2 Sequencer Uptime feed used
+    /// @notice Configures the Chainlink L2 Sequencer Uptime feed used
     ///         to gate NATIVE quotes on Arbitrum. Passing `address(0)` clears
     ///         the configuration and makes non-zero NATIVE quotes fail closed.
     function setSequencerUptimeFeed(address feed) external;
 
-    /// @notice Configure the mandatory [min, max] sanity band on the ETH/USD
+    /// @notice Configures the mandatory [min, max] sanity band on the ETH/USD
     ///         answer (feed decimals). Passing `(0, 0)` clears the configuration
     ///         and makes non-zero NATIVE quotes fail closed; otherwise
     ///         `0 < minPrice < maxPrice`.
@@ -243,7 +234,9 @@ interface ICommissionManager {
 
     function buildRouteKey(uint256 sourceChainId, uint256 destChainId, address token) external pure returns (bytes32);
 
-    // ============ Commission ingress (bridge) ============
+    // =========================================================================
+    // Commission ingress (bridge)
+    // =========================================================================
 
     /// @notice Credit `credited` token units to the commission pool. The Bridge
     ///         measures `credited` as the actual balance increase of this
@@ -253,24 +246,31 @@ interface ICommissionManager {
     ///         Callable only by the Bridge.
     function receiveTokenCommission(address token, uint256 credited) external;
 
-    /// @notice Native commission ingress; only `bridgeAddress` may call with non-zero value (see implementation).
+    /// @notice Credits native commission received from the Bridge.
+    /// @dev Every call requires `msg.sender == bridgeAddress` and nonzero `msg.value`.
     receive() external payable;
 
-    // ============ Withdrawals (owner) ============
+    // =========================================================================
+    // Withdrawals (owner)
+    // =========================================================================
 
-    /// @notice Withdraw accrued token commission to the immutable
+    /// @notice Withdraws accrued token commission to the immutable
     ///         `commissionRecipient`.
+    /// @dev Callable only by the CommissionManager owner.
     function withdrawTokenCommission(address token, uint256 amount) external;
 
-    /// @notice Withdraw accrued native commission to the immutable
+    /// @notice Withdraws accrued native commission to the immutable
     ///         `commissionRecipient`.
+    /// @dev Callable only by the CommissionManager owner.
     function withdrawNativeCommission(uint256 amount) external;
 
-    /// @notice Withdraw all accrued commission for `token` to the immutable
+    /// @notice Withdraws all accrued commission for `token` to the immutable
     ///         `commissionRecipient`.
+    /// @dev Callable only by the CommissionManager owner.
     function withdrawAllTokenCommission(address token) external;
 
-    /// @notice Withdraw all accrued native commission to the immutable
+    /// @notice Withdraws all accrued native commission to the immutable
     ///         `commissionRecipient`.
+    /// @dev Callable only by the CommissionManager owner.
     function withdrawAllNativeCommission() external;
 }

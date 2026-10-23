@@ -7,30 +7,18 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IRgbRejectList} from "./interfaces/IRgbRejectList.sol";
 
 /// @title RgbRejectList
-/// @notice Append-only on-chain reject list for RGB client-side validation.
-///         See `IRgbRejectList` for the read model clients are expected to use.
-///
-/// @dev    Standalone: no bridge contract reads or writes it. It is not
-///         upgradeable.
-///
-///         There is deliberately no function that edits or removes an entry,
-///         so append-only is a property of the contract rather than an
-///         operational convention — the incremental client sync relies on it.
-///         A decision is changed by appending a newer entry for the same
-///         opout; the latest entry wins.
-///
-///         Two roles. The owner — meant to be a cold key — only appoints and
-///         rotates the appender; the appender — the hot key of the publishing
-///         tool — is the only account that can append. Neither can be the zero
-///         address. Ownership uses a two-step transfer and cannot be renounced:
-///         the registry cannot be replaced, so losing the owner would freeze
-///         the list permanently.
+/// @notice Append-only reject list consumed by RGB clients.
+/// @dev Standalone and non-upgradeable. Only the appender adds entries; the owner
+///      rotates the appender. Corrective entries supersede earlier decisions.
+///      Use a cold owner and a hot appender. If the appender is compromised, the owner
+///      rotates it and the new appender publishes corrective entries. Ownership is
+///      two-step; renunciation is blocked to preserve administration of the fixed list.
 contract RgbRejectList is IRgbRejectList, Ownable2Step {
     // =========================================================================
     // Errors
     // =========================================================================
 
-    /// @notice `renounceOwnership` is blocked; see the contract notes.
+    /// @notice Ownership cannot be renounced, preserving the ability to rotate the appender.
     error RenounceOwnershipBlocked();
 
     // =========================================================================
@@ -47,10 +35,10 @@ contract RgbRejectList is IRgbRejectList, Ownable2Step {
     // Constructor
     // =========================================================================
 
-    /// @param owner_    Initial owner, who appoints and rotates the appender.
-    ///                  Must be non-zero (enforced by `Ownable`).
-    /// @param appender_ Initial appender, allowed to append entries. Must be
-    ///                  non-zero.
+    /// @param owner_                 Initial owner, who appoints and rotates the appender.
+    ///                               Must be non-zero (enforced by `Ownable`).
+    /// @param appender_              Initial appender, allowed to append entries. Must be
+    ///                               non-zero.
     constructor(address owner_, address appender_) Ownable(owner_) {
         _setAppender(appender_);
     }
@@ -91,7 +79,7 @@ contract RgbRejectList is IRgbRejectList, Ownable2Step {
         _setAppender(newAppender);
     }
 
-    /// @notice Permanently blocked; see the contract notes.
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() public view override onlyOwner {
         revert RenounceOwnershipBlocked();
     }

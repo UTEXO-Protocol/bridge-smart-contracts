@@ -201,7 +201,8 @@ contract BridgeRollbackTest is BridgeTestBase {
         assertEq(beforeState.recordAmount, AMOUNT, "pre rgb record");
 
         // fundsOut marks the burn id before verifier dispatch. This verifier
-        // failure rolls that mark back and short-circuits before the permanent RGB records are checked.
+        // failure rolls that mark back and short-circuits before the permanent RGB records are
+        // checked.
         vm.expectRevert("verify: block commitment");
         vm.prank(multisig);
         _fundsOut(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, badProof, settlementData, SRC_BURN_TX_ID);
@@ -293,7 +294,7 @@ contract BridgeRollbackTest is BridgeTestBase {
     // accounting unchanged. Feed failures are pre-pull; route/module/commission
     // failures exercise post-pull rollback.
     function testFuzz_fundsIn_failurePathsPreserveAccounting(uint128 amountSeed) public {
-        // Lower bound keeps commission/native fee nonzero so intended reverts fire.
+        // Lower bound keeps commission/native fee non-zero so intended reverts fire.
         uint256 amount = bound(uint256(amountSeed), 100, AMOUNT);
 
         for (uint8 failureMode = 0; failureMode < FAILURE_MODE_COUNT; failureMode++) {

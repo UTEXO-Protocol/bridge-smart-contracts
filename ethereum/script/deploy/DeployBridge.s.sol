@@ -6,52 +6,15 @@ import {Bridge} from "../../src/Bridge.sol";
 import {BridgeProxy} from "../../src/BridgeProxy.sol";
 
 /// @title DeployBridge
-/// @notice Deploys a new UTEXO Bridge implementation and canonical proxy.
-///         Deployer is the initial Bridge owner.
-///         Transfer ownership to MultisigProxy after deployment (see DeployAll.s.sol
-///         or call bridge.transferOwnership(proxy) from a follow-up script).
-///
-/// Env:
-///   PRIVATE_KEY               — deployer private key
-///   USDT0_ADDRESS             — accepted ERC-20 token
-///   ROUTE_REGISTRY_ADDRESS    — RouteRegistry contract paired with this Bridge.
-///                               For a fresh stack use `DeployAll.s.sol` — it
-///                               predicts Bridge's CREATE address and wires the
-///                               registry's `bridge_` immutable to it in the
-///                               same transaction batch. This script is for a
-///                               fresh proxy only; upgrades use
-///                               DeployBridgeImplementation + governance.
-///   COMMISSION_MANAGER        — CommissionManager contract (must already be deployed)
-///   LZ_ADAPTER                — Optional initial LayerZero adapter address;
-///                               omit or pass `0x0` if the adapter has not been
-///                               deployed yet. Once the adapter exists in
-///                               `utexo-usdt0-contracts`, wire it in via
-///                               federation governance: `proposeAdminExecute`
-///                               on MultisigProxy with calldata
-///                               `Bridge.setLZAdapter(adapter)`. The Bridge
-///                               accepts adapter-only `fundsInFromAdapter`
-///                               calls *only* from the configured adapter.
-///   MIN_FUNDS_IN_AMOUNT       — Minimum accepted `fundsIn` deposit in token
-///                               smallest units (USDT0 has 6 decimals, so e.g.
-///                               10000 = 0.01 USDT0). Required and must be
-///                               non-zero and >= MIN_FUNDS_OUT_AMOUNT;
-///                               retune later via federation
-///                               governance with
-///                               `Bridge.setMinFundsInAmount(newMinimum)`.
-///   MIN_FUNDS_OUT_AMOUNT      — Minimum accepted `fundsOut` release in token
-///                               smallest units. Required, non-zero and
-///                               <= MIN_FUNDS_IN_AMOUNT;
-///                               retune later with
-///                               `Bridge.setMinFundsOutAmount(newMinimum)`.
-///                               Set it above the per-release settlement cost
-///                               (source-chain fee plus this chain's gas), and
-///                               at least above any flat `baseFee` the
-///                               CommissionManager charges on a release route —
-///                               `setCommissionRule` validates against it.
-///
-/// Usage:
-///   forge script script/deploy/DeployBridge.s.sol \
-///     --rpc-url $RPC_URL --broadcast --verify
+/// @notice Deploys a Bridge implementation and initialized proxy owned by the deployer.
+/// @dev CM and registry must bind to the proxy's predicted CREATE address: use
+///      `cast compute-address <deployer> --nonce <N+1>`, where N is the deployer's
+///      next nonce before this script; it creates the implementation at N first.
+///      Keep that nonce unchanged between prediction and broadcast. Use DeployAll
+///      for a fresh stack; upgrades use DeployBridgeImplementation and governance.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `USDT0_ADDRESS`, `ROUTE_REGISTRY_ADDRESS`, `COMMISSION_MANAGER`,
+///      `LZ_ADAPTER`, `MIN_FUNDS_IN_AMOUNT`, `MIN_FUNDS_OUT_AMOUNT`.
 contract DeployBridge is Script {
     function run() external returns (Bridge bridge) {
         uint256 pk = vm.envUint("PRIVATE_KEY");

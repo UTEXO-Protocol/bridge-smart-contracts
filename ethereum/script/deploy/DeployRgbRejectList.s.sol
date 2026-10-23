@@ -5,28 +5,11 @@ import {Script, console2} from "forge-std/Script.sol";
 import {RgbRejectList} from "../../src/RgbRejectList.sol";
 
 /// @title DeployRgbRejectList
-/// @notice Deploys the standalone `RgbRejectList` read by RGB client-side
-///         validation. It is independent of the bridge stack: no bridge
-///         contract references it, so it is not part of `DeployAll`.
-///
-///         Deploy once per network. The RGB contract references this address at
-///         issuance and it cannot be changed afterwards, so record the deployed
-///         address before issuing, and choose a long-lived owner — ownership is
-///         two-step and cannot be renounced.
-///
-/// Env:
-///   PRIVATE_KEY          — deployer private key
-///   REJECT_LIST_OWNER    — initial owner: the cold key that appoints and
-///                          rotates the appender. A dedicated variable so a
-///                          shared `.env.deploy` cannot silently reuse the
-///                          bridge governance owner.
-///   REJECT_LIST_APPENDER — initial appender: the hot key of the tool that
-///                          publishes entries. Must differ from the owner, so a
-///                          leaked tool key cannot take over the registry.
-///
-/// Usage:
-///   forge script script/deploy/DeployRgbRejectList.s.sol \
-///     --rpc-url $RPC_URL --broadcast --verify
+/// @notice Deploys the standalone RGB reject list with separate owner and appender addresses.
+/// @dev Use a cold owner and a hot appender. Record the address before RGB asset issuance;
+///      the asset reference is fixed at issuance. Not included in DeployAll.
+///      Inputs (see the matching .env example for values):
+///      `PRIVATE_KEY`, `REJECT_LIST_OWNER`, `REJECT_LIST_APPENDER`.
 contract DeployRgbRejectList is Script {
     function run() external returns (RgbRejectList list) {
         uint256 pk = vm.envUint("PRIVATE_KEY");

@@ -10,26 +10,10 @@ import {ISettlementModule} from "./interfaces/ISettlementModule.sol";
 import {FundsInContext, FundsOutContext, RouteConfig} from "./interfaces/RouteTypes.sol";
 
 /// @title RouteRegistry
-/// @notice Bridge directory of routes and their plugin implementations.
-///         Bound to one Bridge at deploy time; owned by `MultisigProxy` in
-///         production so all route changes are timelocked federation ops.
-///
-/// @dev Storage layout: `_routes[keccak256(abi.encode(sourceChainId, destChainId))]`
-///      → `RouteConfig`. Unset routes default to the zero struct
-///      (`enabled == false`), so any dispatcher call against a never-configured
-///      route reverts cleanly with `RouteNotEnabled`.
-///
-///      Plugin call ordering inside `beforeFundsOut` is fixed:
-///        1. `IFinalityVerifier.verify(ctx, proof)`    — view-only;
-///        2. `ISettlementModule.beforeFundsOut(ctx, settlementData)` — mutates.
-///
-///      The registry requires both plugin slots in `setRoute` to point to
-///      deployed contracts. Routes that intentionally need no source-side
-///      proof or no per-route state register an explicit `NullVerifier` /
-///      `NullSettlementModule` deployment — the trust-model decision is then
-///      auditable on-chain rather than hidden behind an empty slot.
-///
-///      `renounceOwnership` is permanently blocked.
+/// @notice Stores route configuration and dispatches Bridge calls to plugins.
+/// @dev Paired with one immutable Bridge. The owner manages routes; dispatch to disabled
+///      or unset routes reverts. `getRoute` returns stored configuration without this check.
+///      Release verification runs before the settlement hook.
 contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // =========================================================================
     // Errors
@@ -46,8 +30,7 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // Storage
     // =========================================================================
 
-    /// @notice The Bridge instance this registry serves. Authorised caller
-    ///         of `onFundsIn` and `beforeFundsOut`.
+    /// @notice Bridge authorized to call this registry's dispatchers.
     address public immutable bridge;
 
     /// @dev Route table keyed by `keccak256(abi.encode(sourceChainId, destChainId))`.
@@ -67,8 +50,8 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // Constructor
     // =========================================================================
 
-    /// @param bridge_ Bridge deployment this registry serves. Must be non-zero.
-    /// @param owner_  Initial owner of the registry.
+    /// @param bridge_                Bridge deployment this registry serves. Must be non-zero.
+    /// @param owner_                 Initial owner of the registry.
     constructor(address bridge_, address owner_) Ownable(owner_) {
         if (bridge_ == address(0)) revert InvalidBridge();
         bridge = bridge_;
@@ -78,17 +61,7 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // Owner-only: route administration
     // =========================================================================
 
-    /// @notice Adds or updates a route. Plugin slots MUST point to deployed
-    ///         contracts — use explicit `NullVerifier` / `NullSettlementModule`
-    ///         deployments when a route deliberately opts out of a layer.
-    ///         Federation can pause a route in place by setting
-    ///         `enabled = false`; the plugin references stay registered
-    ///         and can be re-enabled with a follow-up call.
-    /// @param sourceChainId    Source chain id of the route key.
-    /// @param destChainId      Destination chain id of the route key.
-    /// @param enabled          New `enabled` flag.
-    /// @param finalityVerifier Verifier contract for this route.
-    /// @param settlementModule Settlement module contract for this route.
+    /// @inheritdoc IRouteRegistry
     function setRoute(
         uint256 sourceChainId,
         uint256 destChainId,
@@ -107,9 +80,7 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
         emit RouteSet(sourceChainId, destChainId, enabled, finalityVerifier, settlementModule);
     }
 
-    /// @inheritdoc Ownable
-    /// @dev Permanently blocked — the registry would otherwise be orphaned
-    ///      from any future federation governance action.
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() public view override(Ownable) onlyOwner {
         revert RenounceOwnershipBlocked();
     }
@@ -174,9 +145,7 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // Internal helpers
     // =========================================================================
 
-    /// @dev Canonical route key derivation. Using `abi.encode` (not
-    ///      `encodePacked`) keeps the hash collision-free for arbitrary
-    ///      `uint256` inputs.
+    /// @dev Hashes the ABI-encoded source and destination chain ids.
     function _routeKey(uint256 sourceChainId, uint256 destChainId) internal pure returns (bytes32) {
         return keccak256(abi.encode(sourceChainId, destChainId));
     }

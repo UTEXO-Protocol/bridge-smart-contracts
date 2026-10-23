@@ -548,7 +548,8 @@ library MultisigHelper {
     // Signatures
     // ========================================================================
 
-    /// @dev Signs a digest with each private key and returns concatenated [r,s,v] 65-byte signatures.
+    /// @dev Signs a digest with each private key and returns concatenated [r,s,v] 65-byte
+    ///      signatures.
     function signAll(Vm vm, bytes32 digest, uint256[] memory privateKeys) internal pure returns (bytes[] memory sigs) {
         sigs = new bytes[](privateKeys.length);
         for (uint256 i = 0; i < privateKeys.length; i++) {

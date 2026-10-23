@@ -63,49 +63,52 @@ interface IBridge {
 
     /// @notice Emitted on every successful `setLZAdapter` (rotation to a
     ///         non-zero adapter).
-    /// @param oldAdapter Previous trusted adapter (zero before first set).
-    /// @param newAdapter New trusted adapter (always non-zero).
+    /// @param oldAdapter             Previous adapter, including one set at initialization; zero
+    ///                               while disabled.
+    /// @param newAdapter             New trusted adapter (always non-zero).
     event LZAdapterUpdated(address indexed oldAdapter, address indexed newAdapter);
 
     /// @notice Emitted on `disableLZAdapter` — the inbound adapter path is
     ///         explicitly closed (distinct from a rotation).
-    /// @param oldAdapter Adapter that was cleared.
+    /// @param oldAdapter             Adapter that was cleared.
     event LZAdapterDisabled(address indexed oldAdapter);
 
     /// @notice Emitted on every successful `setRouteRegistry`.
-    /// @param oldRegistry Previous registry (the constructor-supplied value
-    ///                    before the first rotation).
-    /// @param newRegistry New registry (non-zero by `setRouteRegistry` guard).
+    /// @param oldRegistry            Previous registry (the initialization value
+    ///                               before the first rotation).
+    /// @param newRegistry            New registry (non-zero by `setRouteRegistry` guard).
     event RouteRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
 
     /// @notice Emitted on every successful `setCommissionManager`.
-    /// @param oldCommissionManager Previous CommissionManager address.
-    /// @param newCommissionManager New non-zero CommissionManager address.
+    /// @param oldCommissionManager   Previous CommissionManager address.
+    /// @param newCommissionManager   New non-zero CommissionManager address.
     event CommissionManagerUpdated(address indexed oldCommissionManager, address indexed newCommissionManager);
 
     /// @notice Emitted on every successful `setMinFundsInAmount`.
-    /// @param oldMinimum Previous minimum (constructor value before first update).
-    /// @param newMinimum New minimum (in token smallest units; always non-zero).
+    /// @param oldMinimum             Previous minimum (initialization value before first update).
+    /// @param newMinimum             New minimum (in token smallest units; always non-zero).
     event MinFundsInAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
 
     /// @notice Emitted on every successful `setMinFundsOutAmount`.
-    /// @param oldMinimum Previous minimum (constructor value before first update).
-    /// @param newMinimum New minimum (in token smallest units; always non-zero).
+    /// @param oldMinimum             Previous minimum (initialization value before first update).
+    /// @param newMinimum             New minimum (in token smallest units; always non-zero).
     event MinFundsOutAmountUpdated(uint256 oldMinimum, uint256 newMinimum);
 
     /// @notice Emitted on `setOutflowLimit` (per-chain outflow token bucket).
-    /// @param chainId             Source chain the limit applies to.
-    /// @param burstBps            Max instant outflow, in bps of reference liquidity.
-    /// @param refillBpsPerWindow  Allowance restored per refill window, in bps.
-    /// @param availableShares     Accrued allowance carried over, in shares.
+    /// @param chainId                Source chain the limit applies to.
+    /// @param burstBps               Max instant outflow, in bps of reference liquidity.
+    /// @param refillBpsPerWindow     Allowance restored per refill window, in bps.
+    /// @param availableShares        Available shares after configuration: full on first enable,
+    ///                               carried and capped on updates.
     event OutflowLimitUpdated(
         uint256 indexed chainId, uint256 burstBps, uint256 refillBpsPerWindow, uint256 availableShares
     );
 
     /// @notice Emitted on `setGlobalOutflowLimit` (aggregate outflow token bucket).
-    /// @param burstBps            Max instant aggregate outflow, in bps of reference TVL.
-    /// @param refillBpsPerWindow  Allowance restored per refill window, in bps.
-    /// @param availableShares     Accrued allowance carried over, in shares.
+    /// @param burstBps               Max instant aggregate outflow, in bps of reference TVL.
+    /// @param refillBpsPerWindow     Allowance restored per refill window, in bps.
+    /// @param availableShares        Available shares after configuration: full on first enable,
+    ///                               carried and capped on updates.
     event GlobalOutflowLimitUpdated(uint256 burstBps, uint256 refillBpsPerWindow, uint256 availableShares);
 
     /// @notice Emitted after an outflow consumes immutable per-chain rolling
@@ -124,36 +127,35 @@ interface IBridge {
     ///         whose module returns 0 (e.g. `NullSettlementModule`) do not emit
     ///         it. The canonical, route-agnostic id is `BridgeFundsIn.operationId`
     ///         (bytes32); this event exists for the RGB integration only.
-    /// @param sender  EVM caller Bridge saw (user, or the LZ adapter).
-    /// @param rgbOpId RGB operation id, decoded by the route module from its
-    ///                `settlementData`. Included in the RGB mint backing id
-    ///                together with the network and actual net amount.
-    /// @param amount  Net amount bridged (post-commission), bounded to the RGB `u64` range.
+    /// @param sender                 EVM caller Bridge saw (user, or the LZ adapter).
+    /// @param rgbOpId                RGB operation id, decoded by the route module from its
+    ///                               `settlementData`. Included in the RGB mint backing id
+    ///                               together with the network and actual net amount.
+    /// @param amount                 Net amount bridged (post-commission), bounded to the RGB `u64`
+    ///                               range.
     event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
 
-    /// @param operationId        Canonical bridge-side operation id, derived
-    ///                           on-chain by Bridge. RGB uses the mint identity;
-    ///                           other routes use sender/nonce deposit context.
-    ///                           This is the backend's canonical key.
-    /// @param sourceSender       Original source-chain sender (left-padded to
-    ///                           `bytes32`); bound into non-RGB `operationId`.
-    /// @param sender             EVM caller Bridge saw (the EOA on the public
-    ///                           overload, or the LZ adapter on the adapter-only
-    ///                           overload).
-    /// @param senderNonce        Per-`(sourceChainId, sourceSender)` nonce folded
-    ///                           into non-RGB `operationId`.
-    /// @param amount             Gross amount the user supplied (pre-commission).
-    /// @param netAmount          Amount actually bridged after token commission is taken.
-    /// @param tokenCommission    Fee charged in the bridged token (deducted from `amount`).
-    /// @param nativeCommission   Fee charged in native wei (paid via `msg.value`).
-    /// @param sourceChainId      EVM `block.chainid` for direct deposits, or the
-    ///                           non-spoofable chain id forwarded by the adapter.
-    /// @param destinationChainId Target chain id (backend-assigned for non-EVM
-    ///                           destinations like RGB / Bitcoin).
-    /// @param destinationAddress Target address on the destination chain. May
-    ///                           be empty when that route has no destination-
-    ///                           address concept (including RGB).
-    /// @param settlementData     Opaque route-specific settlement payload.
+    /// @param operationId            Canonical bridge-side operation id, derived
+    ///                               on-chain by Bridge. RGB uses the mint identity;
+    ///                               other routes use sender/nonce deposit context.
+    ///                               This is the backend's canonical key.
+    /// @param sourceSender           Original source-chain sender (left-padded to
+    ///                               `bytes32`); bound into non-RGB `operationId`.
+    /// @param sender                 EVM caller Bridge saw (the EOA on the public
+    ///                               overload, or the LZ adapter on the adapter-only
+    ///                               overload).
+    /// @param senderNonce            Per-`(sourceChainId, sourceSender)` nonce folded
+    ///                               into non-RGB `operationId`.
+    /// @param amount                 Gross amount the user supplied (pre-commission).
+    /// @param netAmount              Amount actually bridged after token commission is taken.
+    /// @param tokenCommission        Fee charged in the bridged token (deducted from `amount`).
+    /// @param nativeCommission       Fee charged in native wei (paid via `msg.value`).
+    /// @param sourceChainId          EVM `block.chainid` for direct deposits, or the
+    ///                               non-spoofable chain id forwarded by the adapter.
+    /// @param destinationChainId     Destination chain id (EVM chain id, or 827166 for RGB).
+    /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
+    ///                               consignment.
+    /// @param settlementData         Opaque route-specific settlement payload.
     event BridgeFundsIn(
         bytes32 indexed operationId,
         bytes32 indexed sourceSender,
@@ -169,16 +171,17 @@ interface IBridge {
         bytes settlementData
     );
 
-    /// @param recipient          Recipient on this chain.
-    /// @param amount             Gross amount released from the bridge pool (pre-commission).
-    /// @param netAmount          Amount actually delivered to `recipient`.
-    /// @param tokenCommission    Fee taken in the bridged token (sent to the CommissionManager).
-    /// @param burnId             Bridge-derived replay key. Stored on-chain to
-    ///                           block fundsOut replays for the same release intent.
-    /// @param sourceChainId      Source chain id (non-EVM side for RGB→EVM releases).
-    /// @param destinationChainId Destination chain id (EVM target receiving the release).
-    /// @param sourceAddress      Sender address on the source chain.
-    /// @param settlementData     Opaque route-specific settlement payload.
+    /// @param recipient              Recipient on this chain.
+    /// @param amount                 Gross amount released from the bridge pool (pre-commission).
+    /// @param netAmount              Net token payout before any token transfer fee.
+    /// @param tokenCommission        Fee taken in the bridged token (sent to the
+    ///                               CommissionManager).
+    /// @param burnId                 Bridge-derived replay key shared by fundsOut and
+    ///                               rebalanceLiquidity; the same source burn cannot be reused.
+    /// @param sourceChainId          Source chain id (non-EVM side for RGB→EVM releases).
+    /// @param destinationChainId     Destination chain id (EVM target receiving the release).
+    /// @param sourceAddress          Source address; empty when the source network is RGB.
+    /// @param settlementData         Opaque route-specific settlement payload.
     event BridgeFundsOut(
         address indexed recipient,
         uint256 amount,
@@ -197,21 +200,19 @@ interface IBridge {
     ///         destination route's settlement module returns a non-zero RGB
     ///         OpId, the standard `FundsIn` event is emitted alongside (the RGB
     ///         side consumes `FundsIn` only and needs no rebalance awareness).
-    /// @param operationId        Credit-leg canonical id, derived on-chain (keys
-    ///                           the destination route's settlement record).
-    /// @param burnId             Debit-leg replay key, shares the `consumedBurnIds`
-    ///                           namespace with `fundsOut`.
-    /// @param sourceChainId      Chain bucket debited.
-    /// @param destinationChainId Chain bucket credited.
-    /// @param amount             Amount migrated between the buckets (no commission).
-    /// @param sourceAddress      Source-chain identity behind the debit (e.g. the
-    ///                           RGB burner); its hash is folded into non-RGB
-    ///                           credit-leg `operationId`.
-    /// @param destinationAddress Destination-chain address backing the credit.
-    ///                           May be empty when the destination route has no
-    ///                           address concept (including RGB).
-    /// @param settlementDataOut  Opaque debit-leg settlement payload.
-    /// @param settlementDataIn   Opaque credit-leg settlement payload.
+    /// @param operationId            Credit-leg canonical id, derived on-chain (keys
+    ///                               the destination route's settlement record).
+    /// @param burnId                 Debit-leg replay key, shares the `consumedBurnIds`
+    ///                               namespace with `fundsOut`.
+    /// @param sourceChainId          Chain bucket debited.
+    /// @param destinationChainId     Chain bucket credited.
+    /// @param amount                 Amount migrated between the buckets (no commission).
+    /// @param sourceAddress          Source identity, empty for RGB sources; its hash enters the
+    ///                               non-RGB credit-leg `operationId`.
+    /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
+    ///                               consignment.
+    /// @param settlementDataOut      Opaque debit-leg settlement payload.
+    /// @param settlementDataIn       Opaque credit-leg settlement payload.
     event BridgeRebalance(
         bytes32 indexed operationId,
         uint256 indexed burnId,
@@ -228,25 +229,17 @@ interface IBridge {
     // External — user-facing
     // =========================================================================
 
-    /// @notice Direct deposit overload for EVM users on this chain. The
-    ///         `sourceChainId` half of the commission route key is filled with
-    ///         `block.chainid` — non-spoofable by the caller.
-    /// @dev Payable: if the active route uses NATIVE commission currency,
-    ///      `msg.value` must be at least the freshly quoted native commission
-    ///      and at most `NATIVE_COMMISSION_TOLERANCE_BPS` above it. Attach the
-    ///      quote plus a small buffer so ETH/USD drift between quoting and
-    ///      execution cannot revert the deposit: exactly the fresh quote is
-    ///      charged and the surplus is refunded to the caller before the call
-    ///      returns. A caller that cannot receive native value must therefore
-    ///      send the exact quote. If the route takes no native commission
-    ///      (TOKEN currency), `msg.value` must be 0.
-    /// @dev `settlementData` is an opaque per-route blob forwarded into the
-    ///      route's `ISettlementModule.onFundsIn`. Routes whose module does not
-    ///      consume any extra data accept an empty bytes string. RGB requires
-    ///      abi.encode(uint256 rgbOpId).
-    /// @dev The `operationId` is derived on-chain (not caller-supplied) and
-    ///      returned; read the canonical value from the emitted event.
-    /// @return operationId The canonical bridge-side operation id.
+    /// @notice Deposits tokens from the caller for a destination network.
+    /// @dev Source chain is `block.chainid`. Token commission reduces net liquidity.
+    ///      Native payment must be within [quote, quote + 5%]; excess is refunded.
+    ///      A caller unable to receive native currency must send the exact execution-time
+    ///      quote; refunding excess to it reverts with `NativeRefundFailed`.
+    /// @param amount                 Gross token amount, at least `minFundsInAmount`.
+    /// @param destinationChainId     Destination network id.
+    /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
+    ///                               consignment.
+    /// @param settlementData         Route payload; RGB uses `abi.encode(uint256 rgbOpId)`.
+    /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,
         uint256 destinationChainId,
@@ -259,22 +252,17 @@ interface IBridge {
     /// @dev Shared by deposits and RGB-destination rebalance credit legs.
     function rgbMintDepositId(uint256 rgbNetwork, uint256 rgbOpId, uint256 netAmount) external view returns (bytes32);
 
-    /// @notice Adapter-only overload. Used by `UtexoLZAdapter.lzCompose` to
-    ///         forward a cross-chain deposit while preserving the original
-    ///         source-chain id and sender (carried in `composeMsg` from the
-    ///         source side).
-    /// @dev Reverts `NotLZAdapter` if `msg.sender` is not the configured
-    ///      `lzAdapter`. Until federation sets a non-zero adapter, the
-    ///      overload is effectively closed. `sourceSender` is authenticated by
-    ///      the source-chain entrypoint and adapter, not by an arbitrary
-    ///      caller. Non-RGB ids bind it; RGB ids bind the mint identity instead.
-    /// @dev Native commission here is the source-agreed value the adapter
-    ///      forwards, and its payer lives on the source chain. Because no refund
-    ///      can reach them, `msg.value` is accepted anywhere within
-    ///      `NATIVE_COMMISSION_TOLERANCE_BPS` either side of the fresh quote and
-    ///      is collected in full — unlike the direct overload, which charges the
-    ///      quote exactly and refunds the difference.
-    /// @return operationId The canonical bridge-side operation id.
+    /// @notice Deposits tokens from the configured adapter on behalf of a source-chain user.
+    /// @dev The adapter authenticates `sourceChainId` and `sourceSender`. Native payment
+    ///      is accepted within ±5% of the quote and collected in full, without refund.
+    /// @param amount                 Gross token amount, at least `minFundsInAmount`.
+    /// @param sourceChainId          Authenticated source network id.
+    /// @param sourceSender           Authenticated source-chain sender, encoded as bytes32.
+    /// @param destinationChainId     Destination network id.
+    /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
+    ///                               consignment.
+    /// @param settlementData         Route payload; RGB uses `abi.encode(uint256 rgbOpId)`.
+    /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,
         uint256 sourceChainId,
@@ -289,22 +277,22 @@ interface IBridge {
     // =========================================================================
 
     /// @notice Release parameters for `fundsOut`.
-    /// @param recipient          Recipient on this chain.
-    /// @param amount             Gross amount to release (pre-commission).
-    /// @param burnId             Bridge-derived replay guard. Must equal the
-    ///                           Bridge's canonical settlement hash shared by
-    ///                           `fundsOut` and `rebalanceLiquidity`. It includes
-    ///                           `sourceBurnTxId`, but not `settlementData`,
-    ///                           the moving finality `proof`, the recipient or
-    ///                           `destinationChainId`.
-    /// @param sourceChainId      Source chain id.
-    /// @param destinationChainId Destination chain id; part of the
-    ///                           CommissionManager route key.
-    /// @param sourceAddress      Sender address on the source chain.
-    /// @param proof              Opaque per-route data for `IFinalityVerifier`.
-    /// @param settlementData     Opaque per-route data for `ISettlementModule`.
-    /// @param sourceBurnTxId     Source-chain identifier of the burn being
-    ///                           settled
+    /// @param recipient              Recipient on this chain.
+    /// @param amount                 Gross amount to release (pre-commission).
+    /// @param burnId                 Bridge-derived replay guard. Must equal the
+    ///                               Bridge's canonical settlement hash shared by
+    ///                               `fundsOut` and `rebalanceLiquidity`. It includes
+    ///                               `sourceBurnTxId`, but not `settlementData`,
+    ///                               the moving finality `proof`, the recipient or
+    ///                               `destinationChainId`.
+    /// @param sourceChainId          Source chain id.
+    /// @param destinationChainId     Destination chain id; part of the
+    ///                               CommissionManager route key.
+    /// @param sourceAddress          Source address; empty when the source network is RGB.
+    /// @param proof                  Opaque per-route data for `IFinalityVerifier`.
+    /// @param settlementData         Opaque per-route data for `ISettlementModule`.
+    /// @param sourceBurnTxId         Source-chain identifier of the burn being
+    ///                               settled
     struct FundsOutParams {
         address recipient;
         uint256 amount;
@@ -317,7 +305,7 @@ interface IBridge {
         bytes32 sourceBurnTxId;
     }
 
-    /// @notice Release tokens to a recipient. Only callable by owner
+    /// @notice Releases tokens to a recipient. Only callable by owner
     ///         (`MultisigProxy`). Parameters are bundled in `FundsOutParams`.
     /// @dev Per-chain / global outflow rate limiting uses the outflow
     ///      token-bucket library; bucket state is exposed via the `chainBuckets`
@@ -325,36 +313,20 @@ interface IBridge {
     ///      Requires token commission + net payout == gross amount, with a non-zero net payout.
     function fundsOut(FundsOutParams calldata params) external;
 
-    /// @notice Parameters for `rebalanceLiquidity`.
-    /// @param amount             Amount to migrate from the source bucket to the
-    ///                           destination bucket. No commission is taken.
-    /// @param burnId             Bridge-derived replay guard for the debit leg.
-    ///                           Must equal the Bridge's canonical hash of the
-    ///                           rebalance fields (no nonce — an identical intent
-    ///                           can never execute twice, matching `fundsOut`).
-    ///                           Lives in the same `consumedBurnIds` namespace as
-    ///                           `fundsOut` burn ids.
-    /// @param sourceChainId      Chain whose bucket is debited (burn side).
-    /// @param destinationChainId Chain whose bucket is credited (mint side).
-    /// @param sourceAddress      Source-chain identity behind the debit;
-    ///                           `keccak256(sourceAddress)` is folded into the
-    ///                           non-RGB credit-leg `operationId`.
-    /// @param destinationAddress Destination-chain address backing the credit;
-    ///                           may be empty when the destination route has no
-    ///                           address concept (including RGB).
-    /// @param proof              Opaque payload for the route's `IFinalityVerifier`
-    ///                           (debit-leg source proof; e.g. BtcRelay pairs for
-    ///                           an RGB burn).
-    /// @param settlementDataOut  Opaque payload for the route module's
-    ///                           `beforeFundsOut` (debit-leg settlement check).
-    /// @param settlementDataIn   Opaque payload for the route module's
-    ///                           `onFundsIn` (credit-leg settlement write).
-    /// @param sourceBurnTxId     Source-chain identifier of the debit-leg burn.
-    ///                           Same role and encoding as the `fundsOut` field,
-    ///                           and hashed into `burnId` by the same formula,
-    ///                           so a release and a rebalance settling the same
-    ///                           burn derive the SAME id and the second one is
-    ///                           rejected as a replay.
+    /// @notice Accounting migration parameters for a rebalance.
+    /// @param amount                 Token amount moved between liquidity buckets, without
+    ///                               commission.
+    /// @param burnId                 Canonical source-burn replay key shared with fundsOut.
+    /// @param sourceChainId          Network whose bucket is debited.
+    /// @param destinationChainId     Remote network whose bucket is credited; cannot equal
+    ///                               `block.chainid`.
+    /// @param sourceAddress          Source identity; empty when the source network is RGB.
+    /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
+    ///                               consignment.
+    /// @param proof                  Route-specific finality proof for the debit leg.
+    /// @param settlementDataOut      Debit-leg settlement payload.
+    /// @param settlementDataIn       Credit-leg settlement payload.
+    /// @param sourceBurnTxId         Nonzero source-burn identifier, included in burnId.
     struct RebalanceParams {
         uint256 amount;
         uint256 burnId;
@@ -368,25 +340,10 @@ interface IBridge {
         bytes32 sourceBurnTxId;
     }
 
-    /// @notice Migrate isolated liquidity between two chain buckets without
-    ///         moving tokens: debit `lockedLiquidity[sourceChainId]`, credit
-    ///         `lockedLiquidity[destinationChainId]`, atomically and
-    ///         proof-gated via the `(sourceChainId, destinationChainId)` route.
-    ///         Composition: the debit leg is `fundsOut` minus the token payout
-    ///         (replay guard, route verifier + settlement check, bucket debit,
-    ///         per-chain rate limit); the credit leg is `fundsIn` minus the
-    ///         token pull (operationId derivation, settlement write, bucket
-    ///         credit, `FundsIn` emission for RGB destinations).
-    ///         Only callable by owner (`MultisigProxy`, TEE M-of-N — the
-    ///         source chain's enclave set attests the funds left that chain).
-    /// @dev Consumes the source chain's outflow bucket (release capacity is
-    ///      migrating away) but NOT the global bucket (no token egress; the
-    ///      eventual physical exit pays the global bucket in `fundsOut`).
-    ///      Gated on `whenOutflowNotPaused` only: an inflow-only pause is
-    ///      documented as "withdrawals stay open for liquidity migration", and
-    ///      this is exactly a liquidity migration.
-    ///      The destination must not be the local chain (`block.chainid`);
-    ///      use `fundsOut` for physical token releases on this chain.
+    /// @notice Moves liquidity accounting between networks without transferring tokens.
+    /// @dev Owner-only. Requires an enabled route and a destination other than block.chainid.
+    ///      Shares burn replay protection with fundsOut. Charges the source-chain bucket
+    ///      and rolling limit, but not global limits. An inflow-only pause does not block it.
     function rebalanceLiquidity(RebalanceParams calldata params) external;
 
     // =========================================================================
@@ -443,7 +400,7 @@ interface IBridge {
     ///      released amount would not cover.
     function minFundsOutAmount() external view returns (uint256);
 
-    /// @notice Configure (or reconfigure) the per-chain outflow token bucket for
+    /// @notice Configures (or reconfigures) the per-chain outflow token bucket for
     ///         `chainId`. Owner-only (MultisigProxy timelock flow).
     ///
     ///         Both parameters are basis points of the chain's reference
@@ -467,11 +424,11 @@ interface IBridge {
     ///         it never gifts a fresh full burst.
     function setOutflowLimit(uint256 chainId, uint256 burstBps, uint256 refillBpsPerWindow) external;
 
-    /// @notice Configure (or reconfigure) the global (aggregate) outflow token
+    /// @notice Configures (or reconfigures) the global (aggregate) outflow token
     ///         bucket that bounds total `fundsOut` across all source chains.
     ///         Owner-only. Same bps semantics, combined burst-plus-refill bound
     ///         (against `MAX_GLOBAL_OUTFLOW_BPS`) and accrue-and-preserve
-    ///         behaviour as `setOutflowLimit`.
+    ///         behavior as `setOutflowLimit`.
     function setGlobalOutflowLimit(uint256 burstBps, uint256 refillBpsPerWindow) external;
 
     /// @notice Spendable per-chain bucket allowance right now in token units,
@@ -522,6 +479,6 @@ interface IBridge {
     /// @notice Current `CommissionManager` Bridge uses for fee quotes and custody.
     function commissionManager() external view returns (ICommissionManager);
 
-    /// @notice Permanently blocked — ownership cannot be renounced.
+    /// @notice Always reverts; ownership cannot be renounced.
     function renounceOwnership() external view;
 }

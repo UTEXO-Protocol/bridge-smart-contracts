@@ -20,23 +20,23 @@ contract MinimalBridge is BridgeBase {
     // =========================================================================
 
     /// @notice Emitted on every fundsIn.
-    /// @param sender      Address that deposited the tokens.
-    /// @param operationId Backend-assigned operation identifier (the RGB OpId).
-    /// @param amount      Amount of tokens locked.
+    /// @param sender                 Address that deposited the tokens.
+    /// @param operationId            Backend-assigned operation identifier (the RGB OpId).
+    /// @param amount                 Amount of tokens locked.
     event FundsIn(address indexed sender, uint256 indexed operationId, uint64 amount);
 
     /// @notice Emitted when tokens are released from the bridge.
-    /// @param recipient       Recipient on this chain.
-    /// @param amount          Amount of tokens released.
-    /// @param operationId     Backend-assigned operation identifier.
-    /// @param sourceAddress   Sender address on the source chain (e.g. RGB address).
+    /// @param recipient              Recipient on this chain.
+    /// @param amount                 Amount of tokens released.
+    /// @param operationId            Backend-assigned operation identifier.
+    /// @param sourceAddress          Sender address on the source chain (e.g. RGB address).
     event FundsOut(address indexed recipient, uint256 amount, uint256 indexed operationId, string sourceAddress);
 
     // =========================================================================
     // Constructor
     // =========================================================================
 
-    /// @param token_ ERC-20 token address accepted by this bridge (e.g. USDT0).
+    /// @param token_                 ERC-20 token address accepted by this bridge (e.g. USDT0).
     constructor(address token_) BridgeBase(token_) {}
 
     // =========================================================================
@@ -44,8 +44,8 @@ contract MinimalBridge is BridgeBase {
     // =========================================================================
 
     /// @notice Lock tokens in the bridge to initiate a transfer to the destination chain.
-    /// @param amount      Amount of tokens to lock.
-    /// @param operationId Backend-assigned operation identifier included in the event.
+    /// @param amount                 Amount of tokens to lock.
+    /// @param operationId            Backend-assigned operation identifier included in the event.
     function fundsIn(uint256 amount, uint256 operationId) external whenNotPaused {
         if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
 
@@ -60,10 +60,10 @@ contract MinimalBridge is BridgeBase {
     // =========================================================================
 
     /// @notice Release tokens from the bridge to a recipient. Only callable by owner.
-    /// @param recipient     Recipient address on this chain.
-    /// @param amount        Amount of tokens to release.
-    /// @param operationId   Backend-assigned operation identifier included in the event.
-    /// @param sourceAddress Sender address on the source chain (e.g. RGB address).
+    /// @param recipient              Recipient address on this chain.
+    /// @param amount                 Amount of tokens to release.
+    /// @param operationId            Backend-assigned operation identifier included in the event.
+    /// @param sourceAddress          Sender address on the source chain (e.g. RGB address).
     function fundsOut(address recipient, uint256 amount, uint256 operationId, string calldata sourceAddress)
         external
         onlyOwner

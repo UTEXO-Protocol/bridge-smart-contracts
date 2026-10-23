@@ -153,7 +153,7 @@ contract MultisigSourceChainSignersTest is MultisigProxyTestBase {
 
         address[] memory got = proxy.getEnclaveSigners(RGB_CHAIN_ID);
         assertEq(got.length, 2);
-        assertEq(got[0], encA1, "kept its own key via self-exclusion");
+        assertEq(got[0], encA1, "retained enclave key");
         // Rotating an existing chain must not add a duplicate registry entry.
         assertEq(proxy.getEnclaveSourceChains().length, chainsBefore, "no duplicate source-chain entry on rotation");
     }
@@ -303,13 +303,10 @@ contract MultisigSourceChainSignersTest is MultisigProxyTestBase {
         proxy.proposeUpdateEnclaveSigners(0, sB, 2, nonce, deadline, 0, noSigs);
     }
 
-    /// @dev Boundary/gas: fill the registry to MAX_ENCLAVE_SOURCE_CHAINS (32),
-    ///      each with the maximum MAX_SIGNERS (20) enclave signers, then confirm
-    ///      an enclave rotation and federation rotations (3/5/10 signers) still
-    ///      execute well under a conservative block gas limit — the cross-set
-    ///      disjoint loop is the worst case. Thresholds must be a strict majority
-    ///      (2*t > n), so 20-signer sets use t=11 (t=3 would be rejected as
-    ///      sub-majority); the disjoint-loop gas is independent of the threshold.
+    /// @dev Fills all 32 enclave source-chain slots with 20 signers each, then measures
+    ///      enclave and federation rotations against a fixture gas budget. Federation
+    ///      rotation checks every enclave set; enclave rotation checks only federation
+    ///      keys. Each 20-signer set uses the required strict-majority threshold of 11.
     function test_executeProposal_signerRotationsFitGasBudgetAtMaximumRegistrySize() public {
         uint256 blockGasLimit = 30_000_000; // explicit fixture budget
         uint256 nChains = proxy.MAX_ENCLAVE_SOURCE_CHAINS(); // 32
@@ -325,8 +322,8 @@ contract MultisigSourceChainSignersTest is MultisigProxyTestBase {
         }
         assertEq(proxy.getEnclaveSourceChains().length, nChains, "registry filled to the cap");
 
-        // Measure an enclave rotation across the other 31 maximum-size enclave
-        // sets and the federation.
+        // Measure an enclave rotation with a full registry. Candidate enclave keys
+        // are checked against federation keys, not other enclave sets.
         {
             uint256 rotChain = 5_000_000;
             address[] memory fresh = _encSetFor(9_999_999, nSigners); // disjoint namespace
@@ -394,10 +391,7 @@ contract MultisigSourceChainSignersTest is MultisigProxyTestBase {
 
         vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
 
-        // Current behavior: the normal rotation path is already covered above;
-        // this case documents that only address shape and threshold are checked,
-        // with no on-chain enclave attestation evidence. If attestation is
-        // enforced later, this test should be inverted to expect a revert.
+        // Rotation validates signer addresses and quorum policy, not enclave attestation.
         vm.expectEmit(true, false, false, true, address(proxy));
         emit IMultisigProxy.EnclaveSignersUpdated(RGB_CHAIN_ID, newSigners, newThreshold);
         vm.expectEmit(true, true, false, true, address(proxy));

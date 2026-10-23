@@ -2,7 +2,7 @@
 pragma solidity 0.8.35;
 
 /// @title OutflowRateLimiter
-/// @notice Small unit-agnostic token-bucket helper used by Bridge withdrawals.
+/// @notice Unit-agnostic token bucket used by Bridge releases and rebalances.
 /// @dev Amounts are stored as uint128 to keep bucket state compact. Bridge uses
 ///      normalized liquidity shares as the unit, so this library's raw state,
 ///      events, and revert arguments are share-denominated in that integration.
@@ -36,8 +36,8 @@ library OutflowRateLimiter {
         uint128 rate;
     }
 
-    /// @notice Debit `amount` from an enabled bucket.
-    /// @dev `token == address(0)` selects aggregate-scope revert reasons.
+    /// @dev Debits `amount` from an enabled bucket.
+    ///      `token == address(0)` selects aggregate-scope revert reasons.
     function spend(Bucket storage bucket, uint256 amount, address token) internal {
         if (!bucket.isEnabled) revert LimitNotConfigured();
         if (amount == 0) return;
@@ -62,22 +62,22 @@ library OutflowRateLimiter {
         emit AllowanceSpent(amount);
     }
 
-    /// @notice Apply settings and fill the bucket on the first enable only.
-    /// @dev Later changes preserve accrued allowance, clamped to new capacity.
+    /// @dev Applies settings and fills the bucket on the first enable only.
+    ///      Later changes preserve accrued allowance, clamped to new capacity.
     function configurePrimed(Bucket storage bucket, Settings memory settings) internal {
         bool firstEnable = !bucket.isEnabled && settings.isEnabled;
         configure(bucket, settings);
         if (firstEnable) bucket.tokens = settings.capacity;
     }
 
-    /// @notice Return bucket state including refill accrued up to this block.
+    /// @dev Returns bucket state including refill accrued up to this block.
     function currentState(Bucket memory bucket) internal view returns (Bucket memory updated) {
         updated = bucket;
         updated.tokens = _asUint128(_preview(bucket));
         updated.lastUpdated = uint32(block.timestamp);
     }
 
-    /// @notice Apply new settings while carrying over accrued allowance.
+    /// @dev Applies new settings while carrying over accrued allowance.
     function configure(Bucket storage bucket, Settings memory settings) internal {
         uint256 carried = _preview(bucket);
 
@@ -90,7 +90,7 @@ library OutflowRateLimiter {
         emit LimitSettingsChanged(settings);
     }
 
-    /// @notice Validate settings before they are written to a bucket.
+    /// @dev Validates settings before they are written to a bucket.
     function validate(Settings memory settings, bool mustBeDisabled) internal pure {
         if (mustBeDisabled && settings.isEnabled) revert LimitMustStayDisabled();
 

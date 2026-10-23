@@ -6,7 +6,8 @@ import {FundsOutContext} from "../../src/interfaces/RouteTypes.sol";
 import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
 import {MockBtcRelay} from "../mocks/MockBtcRelay.sol";
 
-/// @notice RGB source-address, commitment and confirmation validation.
+/// @notice RGB verifier construction, block commitments, confirmation thresholds and proof
+///         decoding.
 contract RGBVerifierTest is Test {
     bytes32 internal constant SRC_BURN_TX_ID = keccak256("unit-burn-tx");
 
@@ -26,7 +27,7 @@ contract RGBVerifierTest is Test {
 
     uint256 internal constant BURN_ID = 9_001;
 
-    // Default production verifier thresholds.
+    // Independent confirmation-threshold fixture.
     uint256 internal constant MIN_SOURCE_CONF = 6;
 
     uint256 internal constant MAX_LATEST_CONF = 1;
@@ -49,9 +50,7 @@ contract RGBVerifierTest is Test {
 
     function setUp() public {
         btcRelay = new MockBtcRelay();
-        // The real relay never stores a header below its initialisation
-        // checkpoint; mirror that here so a proof this suite accepts is one
-        // the deployed relay would also accept.
+        // Match the deployed relay's lower height bound; finality responses remain mocked.
         btcRelay.setCheckpointHeight(SOURCE_HEIGHT);
         btcRelay.setBlock(SOURCE_HEIGHT, SOURCE_COMMIT, SOURCE_CONF);
         btcRelay.setBlock(LATEST_HEIGHT, LATEST_COMMIT, LATEST_CONF);

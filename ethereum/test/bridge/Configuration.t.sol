@@ -61,7 +61,7 @@ contract BridgeConfigurationTest is BridgeTestBase {
     function test_setRouteRegistry_ownerCanRotate() public {
         // Deploy a NEW registry paired with the same Bridge (the documented
         // invariant). In production the new registry must already be wired
-        // with this Bridge as its `bridge_` immutable.
+        // with this Bridge as its `bridge` immutable.
         RouteRegistry newReg = new RouteRegistry(address(bridge), multisig);
 
         vm.expectEmit(true, true, false, true, address(bridge));
