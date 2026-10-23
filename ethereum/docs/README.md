@@ -272,6 +272,47 @@ ownership. `DeployMinimalBridge` reads USDT0_ADDRESS and creates a separate
 integrator bridge owned by the deployer. `DeployRgbRejectList` is standalone and
 requires different REJECT_LIST_OWNER and REJECT_LIST_APPENDER values.
 
+### MinimalBridge RGB mint records
+
+`MinimalBridge.fundsIn(amount, operationId, afterBlock)` accepts a funded RGB
+mint only from `afterBlock` through `afterBlock + MAX_LOCK_BLOCKS`, inclusive.
+It reads the child-chain height from the Arbitrum `ArbSys` precompile rather
+than Solidity's approximate L1 `block.number`.
+
+Each successful lock creates one permanent packed record under the key returned
+by `rgbMintDepositId(operationId, amount, afterBlock)`. The key binds the bridge,
+EVM chain, token, RGB operation, amount and lower block bound. Records are never
+deleted by `fundsOut`; `l2BlockPlusOne == 0` therefore unambiguously means that
+the claim was not recorded.
+
+RGB clients can fetch records in batches without scanning historical logs:
+
+```javascript
+const abi = [
+  "function getFundsInRecords(bytes32[] claimKeys) view returns ((uint64 amount,uint64 l2BlockPlusOne)[])"
+];
+const bridge = new ethers.Contract(bridgeAddress, abi, provider);
+const records = await bridge.getFundsInRecords(claimKeys, {
+  blockTag: "finalized"
+});
+```
+
+The equivalent direct `eth_call` with Foundry's `cast` is:
+
+```bash
+cast call "$MINIMAL_BRIDGE" \
+  "getFundsInRecords(bytes32[])((uint64,uint64)[])" \
+  "[$CLAIM_KEY_1,$CLAIM_KEY_2]" \
+  --rpc-url "$ARBITRUM_RPC_URL" \
+  --block finalized
+```
+
+Clients derive each claim key from validated RGB history, require a nonzero
+`l2BlockPlusOne`, compare the recorded amount, and decode the creation height as
+`l2BlockPlusOne - 1`. Large histories may be split into multiple calls to stay
+within an RPC provider's `eth_call` gas cap. The legacy `FundsIn` event remains
+unchanged for compatibility.
+
 ### LayerZero adapter wiring
 
 Bridge and MultisigProxy have separate adapter fields. `DeployAll` leaves both
