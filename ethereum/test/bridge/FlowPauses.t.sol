@@ -36,7 +36,8 @@ contract BridgeFlowPausesTest is BridgeTestBase {
     bytes32 private constant INFLOW_UNPAUSED = keccak256("Unpaused(address)");
     bytes32 private constant OUTFLOW_PAUSED = keccak256("OutflowPaused(address)");
     bytes32 private constant OUTFLOW_UNPAUSED = keccak256("OutflowUnpaused(address)");
-    uint64 private constant MINIMAL_AFTER_BLOCK = 1_000_000;
+    uint256 private constant MINIMAL_L2_BLOCK = 1_000_000;
+    uint64 private constant MINIMAL_BEFORE_BLOCK = 1_000_001;
 
     function setUp() public override {
         super.setUp();
@@ -46,7 +47,7 @@ contract BridgeFlowPausesTest is BridgeTestBase {
         minimalBridge.acceptOwnership();
         vm.prank(user);
         usdt0.approve(address(minimalBridge), type(uint256).max);
-        vm.mockCall(address(100), abi.encodeCall(IArbSys.arbBlockNumber, ()), abi.encode(uint256(MINIMAL_AFTER_BLOCK)));
+        vm.mockCall(address(100), abi.encodeCall(IArbSys.arbBlockNumber, ()), abi.encode(MINIMAL_L2_BLOCK));
     }
 
     function _pauseTargets() private view returns (IFlowPauseControl[2] memory) {
@@ -192,7 +193,7 @@ contract BridgeFlowPausesTest is BridgeTestBase {
         assertFalse(minimalBridge.paused(), "planned resume opens inflow");
         assertTrue(minimalBridge.outflowPaused(), "planned resume preserves emergency outflow freeze");
         vm.prank(user);
-        minimalBridge.fundsIn(AMOUNT, RGB_OP_ID, MINIMAL_AFTER_BLOCK);
+        minimalBridge.fundsIn(AMOUNT, RGB_OP_ID, MINIMAL_BEFORE_BLOCK);
         assertEq(usdt0.balanceOf(address(minimalBridge)), AMOUNT, "deposit succeeds with outflow frozen");
         vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
         vm.prank(multisig);

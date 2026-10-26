@@ -23,14 +23,9 @@ contract MinimalBridge is BridgeBase {
     /// @notice Arbitrum system precompile exposing the child-chain block number.
     IArbSys internal constant ARBSYS = IArbSys(address(100));
 
-    /// @notice Maximum number of Arbitrum L2 blocks after `afterBlock` in
-    ///         which an RGB mint may be funded.
-    uint64 public constant MAX_LOCK_BLOCKS = 400_000;
-
     /// @notice Domain-separated type hash for permanent RGB mint records.
-    bytes32 public constant RGB_MINT_DEPOSIT_TYPEHASH = keccak256(
-        "UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbOpId,uint256 amount,uint64 afterBlock)"
-    );
+    bytes32 public constant RGB_MINT_DEPOSIT_TYPEHASH =
+        keccak256("UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbOpId,uint256 amount)");
 
     // =========================================================================
     // Storage
@@ -67,14 +62,8 @@ contract MinimalBridge is BridgeBase {
     /// @notice A record already exists for the complete RGB mint claim.
     error DuplicateMintDeposit(bytes32 claimKey);
 
-    /// @notice The lock was submitted before its inclusive minimum L2 block.
-    error LockWindowNotStarted(uint256 l2Block, uint64 afterBlock);
-
-    /// @notice The lock was submitted after its allowed L2 block window.
-    error LockWindowExpired(uint256 l2Block, uint64 afterBlock);
-
-    /// @notice The Arbitrum L2 block number cannot be encoded in the record.
-    error L2BlockNumberExceedsUint64(uint256 l2Block);
+    /// @notice The lock was submitted at or after its exclusive maximum L2 block.
+    error LockWindowExpired(uint256 l2Block, uint64 beforeBlock);
 
     // =========================================================================
     // Constructor
@@ -90,17 +79,15 @@ contract MinimalBridge is BridgeBase {
     /// @notice Lock tokens in the bridge to initiate a transfer to the destination chain.
     /// @param amount                 Amount of tokens to lock.
     /// @param operationId            RGB mint operation identifier included in the event.
-    /// @param afterBlock              Inclusive minimum Arbitrum L2 block for the lock.
-    function fundsIn(uint256 amount, uint256 operationId, uint64 afterBlock) external whenNotPaused {
+    /// @param beforeBlock             Exclusive maximum Arbitrum L2 block for the lock.
+    function fundsIn(uint256 amount, uint256 operationId, uint64 beforeBlock) external whenNotPaused {
         if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
         if (operationId == 0) revert InvalidOperationId();
 
         uint256 l2Block = ARBSYS.arbBlockNumber();
-        if (l2Block < afterBlock) revert LockWindowNotStarted(l2Block, afterBlock);
-        if (l2Block - afterBlock > MAX_LOCK_BLOCKS) revert LockWindowExpired(l2Block, afterBlock);
-        if (l2Block >= type(uint64).max) revert L2BlockNumberExceedsUint64(l2Block);
+        if (l2Block >= beforeBlock) revert LockWindowExpired(l2Block, beforeBlock);
 
-        bytes32 claimKey = rgbMintDepositId(operationId, amount, afterBlock);
+        bytes32 claimKey = rgbMintDepositId(operationId, amount);
         if (fundsInRecords[claimKey] != 0) revert DuplicateMintDeposit(claimKey);
 
         // Safe after the explicit block-number bound above.
@@ -122,20 +109,15 @@ contract MinimalBridge is BridgeBase {
     // =========================================================================
 
     /// @notice Derives the permanent record key for an RGB mint claim.
-    function rgbMintDepositId(uint256 operationId, uint256 amount, uint64 afterBlock) public view returns (bytes32) {
-        return keccak256(
-            abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, address(this), block.chainid, TOKEN, operationId, amount, afterBlock)
-        );
+    function rgbMintDepositId(uint256 operationId, uint256 amount) public view returns (bytes32) {
+        return
+            keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, address(this), block.chainid, TOKEN, operationId, amount));
     }
 
     /// @notice Returns the funded L2 height for one RGB mint claim.
     /// @dev Zero means absent; otherwise subtract one to recover the L2 block.
-    function getFundsInBlock(uint256 operationId, uint256 amount, uint64 afterBlock)
-        external
-        view
-        returns (uint64 l2BlockPlusOne)
-    {
-        return fundsInRecords[rgbMintDepositId(operationId, amount, afterBlock)];
+    function getFundsInBlock(uint256 operationId, uint256 amount) external view returns (uint64 l2BlockPlusOne) {
+        return fundsInRecords[rgbMintDepositId(operationId, amount)];
     }
 
     // =========================================================================
