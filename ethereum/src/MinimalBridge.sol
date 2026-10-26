@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import {BridgeBase} from "./BridgeBase.sol";
+import {IArbSys} from "./interfaces/IArbSys.sol";
 
 /// @title MinimalBridge
 /// @notice Minimal single-token bridge for lock/unlock operations.
@@ -14,6 +15,25 @@ import {BridgeBase} from "./BridgeBase.sol";
 ///        similar access control contract on the integrator's side.
 contract MinimalBridge is BridgeBase {
     using SafeERC20 for IERC20;
+
+    // =========================================================================
+    // Constants
+    // =========================================================================
+
+    /// @notice Arbitrum system precompile exposing the child-chain block number.
+    IArbSys internal constant ARBSYS = IArbSys(address(100));
+
+    /// @notice Domain-separated type hash for permanent RGB mint records.
+    bytes32 public constant RGB_MINT_DEPOSIT_TYPEHASH =
+        keccak256("UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbOpId,uint256 amount)");
+
+    // =========================================================================
+    // Storage
+    // =========================================================================
+
+    /// @notice Permanent funded RGB mint heights, keyed by the complete claim.
+    /// @dev Zero means absent; otherwise the value is the actual L2 block plus one.
+    mapping(bytes32 claimKey => uint64 l2BlockPlusOne) public fundsInRecords;
 
     // =========================================================================
     // Events
@@ -33,6 +53,19 @@ contract MinimalBridge is BridgeBase {
     event FundsOut(address indexed recipient, uint256 amount, uint256 indexed operationId, string sourceAddress);
 
     // =========================================================================
+    // Errors
+    // =========================================================================
+
+    /// @notice The RGB operation identifier is zero.
+    error InvalidOperationId();
+
+    /// @notice A record already exists for the complete RGB mint claim.
+    error DuplicateMintDeposit(bytes32 claimKey);
+
+    /// @notice The lock was submitted at or after its exclusive maximum L2 block.
+    error LockWindowExpired(uint256 l2Block, uint64 beforeBlock);
+
+    // =========================================================================
     // Constructor
     // =========================================================================
 
@@ -45,14 +78,46 @@ contract MinimalBridge is BridgeBase {
 
     /// @notice Lock tokens in the bridge to initiate a transfer to the destination chain.
     /// @param amount                 Amount of tokens to lock.
-    /// @param operationId            Backend-assigned operation identifier included in the event.
-    function fundsIn(uint256 amount, uint256 operationId) external whenNotPaused {
+    /// @param operationId            RGB mint operation identifier included in the event.
+    /// @param beforeBlock             Exclusive maximum Arbitrum L2 block for the lock.
+    function fundsIn(uint256 amount, uint256 operationId, uint64 beforeBlock) external whenNotPaused {
         if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
+        if (operationId == 0) revert InvalidOperationId();
+
+        uint256 l2Block = ARBSYS.arbBlockNumber();
+        if (l2Block >= beforeBlock) revert LockWindowExpired(l2Block, beforeBlock);
+
+        bytes32 claimKey = rgbMintDepositId(operationId, amount);
+        if (fundsInRecords[claimKey] != 0) revert DuplicateMintDeposit(claimKey);
+
+        // Safe after the explicit block-number bound above.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 recordedBlockPlusOne = uint64(l2Block + 1);
+
+        // Write before the token interaction so the same claim cannot be
+        // re-entered. A transfer failure reverts this write atomically.
+        fundsInRecords[claimKey] = recordedBlockPlusOne;
 
         IERC20(TOKEN).safeTransferFrom(msg.sender, address(this), amount);
 
         // forge-lint: disable-next-line(unsafe-typecast)
         emit FundsIn(msg.sender, operationId, uint64(amount));
+    }
+
+    // =========================================================================
+    // Views
+    // =========================================================================
+
+    /// @notice Derives the permanent record key for an RGB mint claim.
+    function rgbMintDepositId(uint256 operationId, uint256 amount) public view returns (bytes32) {
+        return
+            keccak256(abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, address(this), block.chainid, TOKEN, operationId, amount));
+    }
+
+    /// @notice Returns the funded L2 height for one RGB mint claim.
+    /// @dev Zero means absent; otherwise subtract one to recover the L2 block.
+    function getFundsInBlock(uint256 operationId, uint256 amount) external view returns (uint64 l2BlockPlusOne) {
+        return fundsInRecords[rgbMintDepositId(operationId, amount)];
     }
 
     // =========================================================================

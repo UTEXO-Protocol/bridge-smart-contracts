@@ -272,6 +272,48 @@ ownership. `DeployMinimalBridge` reads USDT0_ADDRESS and creates a separate
 integrator bridge owned by the deployer. `DeployRgbRejectList` is standalone and
 requires different REJECT_LIST_OWNER and REJECT_LIST_APPENDER values.
 
+### MinimalBridge RGB mint records
+
+`MinimalBridge.fundsIn(amount, operationId, beforeBlock)` accepts a funded RGB
+mint only while the current Arbitrum L2 block is strictly less than
+`beforeBlock`. It reads the child-chain height from the Arbitrum `ArbSys`
+precompile rather than Solidity's approximate L1 `block.number`.
+
+Each successful lock creates one permanent height record under the key returned
+by `rgbMintDepositId(operationId, amount)`. The key binds the bridge, EVM chain,
+token, RGB operation and amount. `beforeBlock` is a call-time deadline rather
+than part of the permanent identity. Records are never deleted by `fundsOut`. A
+stored value of zero therefore means that the claim was not recorded; otherwise
+the value is the actual L2 block plus one.
+
+An RGB resolver can check one external anchor without scanning historical logs:
+
+```javascript
+const abi = [
+  "function getFundsInBlock(uint256 operationId,uint256 amount) view returns (uint64 l2BlockPlusOne)"
+];
+const bridge = new ethers.Contract(bridgeAddress, abi, provider);
+const l2BlockPlusOne = await bridge.getFundsInBlock(operationId, amount, {
+  blockTag: "finalized"
+});
+```
+
+The equivalent direct `eth_call` with Foundry's `cast` is:
+
+```bash
+cast call "$MINIMAL_BRIDGE" \
+  "getFundsInBlock(uint256,uint256)(uint64)" \
+  "$OPERATION_ID" "$AMOUNT" \
+  --rpc-url "$ARBITRUM_RPC_URL" \
+  --block finalized
+```
+
+The resolver supplies the operation id and amount from validated RGB history.
+It requires a nonzero result, decodes the creation height as
+`l2BlockPlusOne - 1`, and checks that height against the `beforeBlock` committed
+by the RGB transition. The legacy `FundsIn` event remains unchanged for
+compatibility.
+
 ### LayerZero adapter wiring
 
 Bridge and MultisigProxy have separate adapter fields. `DeployAll` leaves both
