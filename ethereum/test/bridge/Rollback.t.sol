@@ -232,11 +232,13 @@ contract BridgeRollbackTest is BridgeTestBase {
         bytes32 opId2 = bridge.fundsIn(amount2, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
         _ensureRgbSafetyCapacity(releaseAmount);
 
-        // Reference opId1 with a deliberately wrong amount so the settlement
-        // module reverts (AmountMismatch) after the Bridge has already marked
-        // the burn id and debited liquidity — exercising the rollback.
-        bytes32[] memory ids = _ids(opId1);
-        uint256[] memory badAmounts = _one(amount1 + 1);
+        // Reference one valid record followed by an unknown id so the settlement
+        // module reverts after the Bridge has already marked the burn id and
+        // debited liquidity — exercising the rollback.
+        bytes32 unknownId = keccak256("unknown-rgb-record");
+        bytes32[] memory ids = new bytes32[](2);
+        ids[0] = opId1;
+        ids[1] = unknownId;
 
         beforeState.bridgeBalance = usdt0.balanceOf(address(bridge));
         beforeState.recipientBalance = usdt0.balanceOf(recipient);
@@ -246,7 +248,7 @@ contract BridgeRollbackTest is BridgeTestBase {
         beforeState.firstRecord = rgbModule.fundsInRecords(opId1);
         beforeState.secondRecord = rgbModule.fundsInRecords(opId2);
         bytes memory proof = _proof();
-        bytes memory settlementData = _settlementWithAmounts(ids, badAmounts);
+        bytes memory settlementData = _settlement(ids);
         uint256 burnId = _deriveBurnId(releaseAmount, RGB_CHAIN_ID, SRC_ADDR, SRC_BURN_TX_ID);
 
         beforeState.chainLiquidity = bridge.lockedLiquidity(RGB_CHAIN_ID);
@@ -263,12 +265,10 @@ contract BridgeRollbackTest is BridgeTestBase {
         assertEq(beforeState.firstRecord, amount1, "pre record 1");
         assertEq(beforeState.secondRecord, amount2, "pre record 2");
 
-        // The module reverts on the amount mismatch; the surrounding fundsOut
+        // The module reverts on the unknown second record; the surrounding fundsOut
         // must atomically roll back the burn-id mark and the liquidity debit.
         // Records are permanent and queried without consumption.
-        vm.expectRevert(
-            abi.encodeWithSelector(RgbSettlementModule.AmountMismatch.selector, opId1, amount1 + 1, amount1)
-        );
+        vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, unknownId));
         vm.prank(multisig);
         _fundsOut(
             recipient, releaseAmount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, proof, settlementData, SRC_BURN_TX_ID

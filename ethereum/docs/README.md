@@ -53,9 +53,12 @@ fundsIn(amount, destinationChainId, destinationAddress, settlementData)
 
 Bridge derives the source network from `block.chainid`, pulls tokens from the
 caller and credits destination liquidity with the actual receipt minus token
-commission. For RGB, `settlementData = abi.encode(uint256 rgbOpId)` and
+commission. For RGB,
+`settlementData = abi.encode(uint256 rgbOpId, uint64 beforeBlock)` and
 `destinationAddress` must be empty: the destination is carried in the RGB
-consignment, not supplied again as an EVM argument.
+consignment, not supplied again as an EVM argument. `beforeBlock` is an
+exclusive Arbitrum L2 deadline: the deposit reverts when
+`ArbSys.arbBlockNumber() >= beforeBlock`.
 
 An adapter-only overload additionally takes `sourceChainId` and `sourceSender`.
 The configured LayerZero adapter authenticates those values and supplies tokens.
@@ -71,6 +74,13 @@ non-zero correlation id from the settlement module also produces `FundsIn`, with
 an amount bounded by `uint64`. The RGB id is derived from the Bridge address,
 local chain id, token, RGB network, mint OpId and actual net amount. Other routes
 use the sender/nonce deposit context.
+
+`RgbSettlementModule` permanently stores the net amount and destination RGB
+network for each RGB backing id. Clients can batch state lookups through
+`getFundsInRecords(bytes32[] operationIds)`; results preserve input order and
+zero means that a record is absent. This avoids historical `eth_getLogs` scans.
+The deadline is deliberately excluded from the backing id, so changing it
+cannot create another record for the same RGB mint.
 
 ### Releases and rebalances
 
@@ -127,10 +137,9 @@ and `minConfirmationGap = 2`. Set `MIN_SOURCE_CONFIRMATIONS`,
 `MAX_LATEST_CONFIRMATIONS` and `MIN_CONFIRMATION_GAP` to override them.
 
 RGB settlement records contain an operation id, exact net amount and network tag.
-Release payloads encode `abi.encode(bytes32[] operationIds, uint256[] amounts)`.
-The module checks each record's existence, exact amount and source-network tag.
-It does not consume records or compare their sum with the release amount; Bridge
-handles liquidity/replay checks and enclaves validate consignment semantics.
+Release payloads encode `abi.encode(bytes32[] operationIds)`. The module checks
+each record's existence and source-network tag. It does not consume records;
+Bridge handles liquidity/replay checks and enclaves validate consignment semantics.
 Physical releases require non-empty arrays. The canonical module allows empty
 arrays for rebalance; the outbound wrapper always requires records.
 

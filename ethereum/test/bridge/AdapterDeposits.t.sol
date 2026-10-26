@@ -84,6 +84,35 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         assertEq(bridge.sourceSenderNonces(customSource, sourceSender), 0);
     }
 
+    function test_fundsInFromAdapter_expiredRgbMintRollsBackDeposit() public {
+        address adapter = makeAddr("expired-adapter");
+        vm.prank(multisig);
+        bridge.setLZAdapter(adapter);
+        vm.prank(deployer);
+        routeRegistry.setRoute(ADAPTER_SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+        usdt0.mint(adapter, AMOUNT);
+        vm.prank(adapter);
+        usdt0.approve(address(bridge), AMOUNT);
+        bytes32 sourceSender = bytes32(uint256(uint160(user)));
+        bytes32 operationId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        _setArbitrumL2Block(RGB_BEFORE_BLOCK);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(RgbSettlementModule.LockWindowExpired.selector, RGB_BEFORE_BLOCK, RGB_BEFORE_BLOCK)
+        );
+        vm.prank(adapter);
+        bridge.fundsIn(
+            AMOUNT, ADAPTER_SOURCE_CHAIN_ID, sourceSender, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID, RGB_BEFORE_BLOCK)
+        );
+
+        assertEq(usdt0.balanceOf(adapter), AMOUNT, "adapter token pull rolled back");
+        assertEq(usdt0.balanceOf(address(bridge)), 0, "bridge custody unchanged");
+        assertEq(bridge.sourceSenderNonces(ADAPTER_SOURCE_CHAIN_ID, sourceSender), 0, "nonce rolled back");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 0, "liquidity unchanged");
+        assertEq(bridge.totalLockedLiquidity(), 0, "total liquidity unchanged");
+        assertEq(rgbModule.fundsInRecords(operationId), 0, "amount record absent");
+    }
+
     function test_fundsInFromAdapter_revertsOnZeroSourceChain() public {
         address adapter = makeAddr("zero-source-adapter");
         vm.prank(multisig);

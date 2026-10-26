@@ -51,11 +51,12 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
 
     function test_fundsIn_acceptsSettlementDataAtMaxLength() public {
         // The length guard lives in Bridge, ahead of the route module. A
-        // maximal-length blob still decodes as a non-zero RGB OpId (the first
-        // 32 bytes read as uint256), so the deposit clears the guard and
-        // records normally under the bridge-derived operationId.
+        // maximal-length blob with a canonical tuple prefix still decodes as
+        // valid RGB data, so the deposit clears the guard and records normally
+        // under the bridge-derived operationId.
         uint256 max = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH();
-        bytes memory atMax = PayloadHelper.filledBytes(max);
+        bytes memory prefix = abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK);
+        bytes memory atMax = bytes.concat(prefix, PayloadHelper.filledBytes(max - prefix.length));
 
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, atMax);
@@ -63,25 +64,26 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
     }
 
     function test_fundsOut_acceptsSettlementDataAboveInboundCap() public {
-        // A two-record release payload (128 + 64 * 2 = 256 bytes) is above the
+        // A three-record release payload (64 + 32 * 3 = 160 bytes) is above the
         // inbound cap; the release path must be bounded by the outbound cap only.
         vm.prank(user);
         bytes32 opA = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
         vm.prank(user);
         bytes32 opB = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
-        _ensureRgbSafetyCapacity(2 * AMOUNT);
+        vm.prank(user);
+        bytes32 opC = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(3));
+        _ensureRgbSafetyCapacity(AMOUNT);
 
-        bytes32[] memory ids = new bytes32[](2);
+        bytes32[] memory ids = new bytes32[](3);
         ids[0] = opA;
         ids[1] = opB;
+        ids[2] = opC;
         bytes memory settlementData = _settlement(ids);
         assertGt(settlementData.length, bridge.MAX_SETTLEMENT_DATA_IN_LENGTH());
 
         vm.prank(multisig);
-        _fundsOut(
-            recipient, 2 * AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), settlementData, SRC_BURN_TX_ID
-        );
-        assertEq(usdt0.balanceOf(recipient), 2 * AMOUNT, "release above the inbound cap succeeds");
+        _fundsOut(recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), settlementData, SRC_BURN_TX_ID);
+        assertEq(usdt0.balanceOf(recipient), AMOUNT, "release above the inbound cap succeeds");
     }
 
     function test_fundsOut_revertsOnSettlementDataTooLong() public {

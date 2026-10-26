@@ -246,7 +246,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
         // Release exactly the permanent record amount; the remaining deposits
         // provide liquidity for the configured burst.
         bytes memory proof = _proof();
-        bytes memory settlementData = _settlementWithAmounts(_ids(opId), _one(received));
+        bytes memory settlementData = _settlement(_ids(opId));
         uint256 burnId = _deriveBurnIdFor(s, received, RGB_CHAIN_ID, SRC_ADDR, SRC_BURN_TX_ID);
 
         uint256 recipientBefore = s.token.balanceOf(recipient);

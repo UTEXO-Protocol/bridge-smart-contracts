@@ -26,7 +26,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
             ),
             abi.encode(fee, uint256(0), net)
         );
-        bytes memory settlementData = _settlementWithAmounts(_ids(_seedOpId), _one(_seedAmt));
+        bytes memory settlementData = _settlement(_ids(_seedOpId));
         uint256 burnId = _deriveBurnId(AMOUNT, RGB_CHAIN_ID, SRC_ADDR, SRC_BURN_TX_ID);
         LedgerSnapshot memory beforeState = _snapshotLedger(_seedOpId);
         uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
@@ -155,9 +155,6 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
         bytes32[] memory ids = new bytes32[](2);
         ids[0] = opId1;
         ids[1] = opId2;
-        uint256[] memory amounts = new uint256[](2);
-        amounts[0] = amount1;
-        amounts[1] = amount2;
 
         vm.prank(multisig);
         _fundsOut(
@@ -167,7 +164,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
             SOURCE_CHAIN_ID,
             SRC_ADDR,
             _proof(),
-            _settlementWithAmounts(ids, amounts),
+            _settlement(ids),
             SRC_BURN_TX_ID
         );
 
@@ -206,7 +203,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
         _ensureRgbSafetyCapacity(AMOUNT);
 
         bytes memory proof = _proof();
-        bytes memory settlementData = _settlementWithAmounts(new bytes32[](0), new uint256[](0));
+        bytes memory settlementData = _settlement(new bytes32[](0));
         uint256 burnId = _deriveBurnId(AMOUNT, RGB_CHAIN_ID, SRC_ADDR, SRC_BURN_TX_ID);
         uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
 
@@ -231,35 +228,6 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
         vm.prank(multisig);
         _fundsOut(
             recipient, AMOUNT, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), _settlement(ids), SRC_BURN_TX_ID
-        );
-    }
-
-    function test_fundsOut_revertsOnAmountMismatch() public {
-        // Record one amount, then claim a different amount in
-        // settlementData. The module binds operationId → exact mint amount, so
-        // the mismatch must revert (surfaced through the Bridge).
-        vm.prank(user);
-        uint256 recordedAmount = AMOUNT / 2;
-        uint256 claimedAmount = AMOUNT * 3 / 5;
-        bytes32 opId = bridge.fundsIn(recordedAmount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-        _ensureRgbSafetyCapacity(recordedAmount);
-
-        bytes32[] memory ids = _ids(opId);
-        uint256[] memory amounts = _one(claimedAmount);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(RgbSettlementModule.AmountMismatch.selector, opId, claimedAmount, recordedAmount)
-        );
-        vm.prank(multisig);
-        _fundsOut(
-            recipient,
-            recordedAmount,
-            RGB_CHAIN_ID,
-            SOURCE_CHAIN_ID,
-            SRC_ADDR,
-            _proof(),
-            _settlementWithAmounts(ids, amounts),
-            SRC_BURN_TX_ID
         );
     }
 

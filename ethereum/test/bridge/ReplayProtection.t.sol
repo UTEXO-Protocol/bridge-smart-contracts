@@ -202,7 +202,7 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
         vm.stopPrank();
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-        bytes memory settlementData = _settlementWithAmounts(_ids(opId), _one(AMOUNT * 10));
+        bytes memory settlementData = _settlement(_ids(opId));
 
         vm.prank(multisig);
         _fundsOut(

@@ -238,7 +238,8 @@ interface IBridge {
     /// @param destinationChainId     Destination network id.
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
-    /// @param settlementData         Route payload; RGB uses `abi.encode(uint256 rgbOpId)`.
+    /// @param settlementData         Route payload; RGB uses
+    ///                               `abi.encode(uint256 rgbOpId, uint64 beforeBlock)`.
     /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,
@@ -261,7 +262,8 @@ interface IBridge {
     /// @param destinationChainId     Destination network id.
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
-    /// @param settlementData         Route payload; RGB uses `abi.encode(uint256 rgbOpId)`.
+    /// @param settlementData         Route payload; RGB uses
+    ///                               `abi.encode(uint256 rgbOpId, uint64 beforeBlock)`.
     /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,

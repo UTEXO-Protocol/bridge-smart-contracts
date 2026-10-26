@@ -70,13 +70,35 @@ contract BridgeDepositsTest is BridgeTestBase {
         uint256 balanceBefore = usdt0.balanceOf(user);
         vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID, RGB_BEFORE_BLOCK + 1));
 
         assertEq(opId1, _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT));
         assertEq(rgbModule.fundsInRecords(opId1), AMOUNT, "original record unchanged");
         assertEq(usdt0.balanceOf(user), balanceBefore, "duplicate token pull rolled back");
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT, "only one liquidity credit");
         assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))), 1);
+    }
+
+    function test_fundsIn_expiredRgbMintRollsBackDeposit() public {
+        uint64 beforeBlock = RGB_BEFORE_BLOCK;
+        _setArbitrumL2Block(beforeBlock);
+        bytes32 sourceSender = bytes32(uint256(uint160(user)));
+        bytes32 operationId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        uint256 userBalance = usdt0.balanceOf(user);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(RgbSettlementModule.LockWindowExpired.selector, beforeBlock, beforeBlock)
+        );
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID, beforeBlock));
+
+        assertEq(usdt0.balanceOf(user), userBalance, "token pull rolled back");
+        assertEq(usdt0.balanceOf(address(bridge)), 0, "bridge custody unchanged");
+        assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, sourceSender), 0, "nonce rolled back");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 0, "liquidity unchanged");
+        assertEq(bridge.totalLockedLiquidity(), 0, "total liquidity unchanged");
+        assertEq(rgbModule.fundsInRecords(operationId), 0, "amount record absent");
+        assertEq(rgbModule.fundsInRecordChainIds(operationId), 0, "chain record absent");
     }
 
     function testFuzz_fundsIn_creditsDepositedAmount(uint64 amount) public {

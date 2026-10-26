@@ -209,7 +209,7 @@ contract BridgeFlowPausesTest is BridgeTestBase {
 
     function test_unpauseInflow_keepsProxyOutflowFrozen() public {
         _seedRGB(AMOUNT);
-        bytes memory settlementData = _settlementWithAmounts(_ids(_seedOpId), _one(_seedAmt));
+        bytes memory settlementData = _settlement(_ids(_seedOpId));
         vm.startPrank(multisig);
         bridge.emergencyPauseAll();
         bridge.unpauseInflow();

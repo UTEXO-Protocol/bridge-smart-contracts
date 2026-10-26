@@ -392,7 +392,7 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
         second.sourceBurnTxId = keccak256("nonce-second-rebalance");
         // The first rebalance records RGB_OP_ID + 7; a fresh mint ID lets this
         // payload succeed once it is signed with the current nonce.
-        second.settlementDataIn = abi.encode(RGB_OP_ID + 8);
+        second.settlementDataIn = abi.encode(RGB_OP_ID + 8, RGB_BEFORE_BLOCK);
         second.burnId = _deriveRebalanceBurnId(second);
         bytes[] memory signatures =
             MultisigHelper.signAll(vm, MultisigHelper.digestTeeRebalance(domainSep, second, 0, deadline), keys);
