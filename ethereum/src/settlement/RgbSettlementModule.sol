@@ -2,6 +2,8 @@
 pragma solidity 0.8.35;
 
 import {IArbSys} from "../interfaces/IArbSys.sol";
+import {IBridge} from "../interfaces/IBridge.sol";
+import {IRouteRegistry} from "../interfaces/IRouteRegistry.sol";
 import {ISettlementModule} from "../interfaces/ISettlementModule.sol";
 import {FundsInContext, FundsOutContext} from "../interfaces/RouteTypes.sol";
 
@@ -19,6 +21,9 @@ contract RgbSettlementModule is ISettlementModule {
 
     /// @notice Arbitrum system precompile exposing the child-chain block number.
     IArbSys internal constant ARBSYS = IArbSys(address(100));
+
+    /// @notice Canonical RGB network used by the two-argument rgb-lib lookup ABI.
+    uint256 public constant RGB_NETWORK = 827166;
 
     // =========================================================================
     // Errors
@@ -74,6 +79,11 @@ contract RgbSettlementModule is ISettlementModule {
 
     /// @notice Destination RGB network for each recorded mint id.
     mapping(bytes32 operationId => uint256 chainId) public fundsInRecordChainIds;
+
+    /// @notice Funded Arbitrum L2 height for each RGB mint id, encoded as block + 1.
+    /// @dev Zero means absent. Records are permanent and scoped by the full
+    ///      Bridge-derived operation id, which includes the RGB network and net amount.
+    mapping(bytes32 operationId => uint64 l2BlockPlusOne) public fundsInRecordL2Blocks;
 
     // =========================================================================
     // Modifiers
@@ -132,6 +142,18 @@ contract RgbSettlementModule is ISettlementModule {
         // Tag the record with the RGB network it was minted to, so a release
         // can only cite it when burning from that same network.
         fundsInRecordChainIds[ctx.operationId] = ctx.destChainId;
+        // Safe because l2Block < beforeBlock and beforeBlock is uint64.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        fundsInRecordL2Blocks[ctx.operationId] = uint64(l2Block + 1);
+    }
+
+    /// @notice Returns the funded L2 height for one canonical RGB mint claim.
+    /// @dev Matches rgb-lib's BFA resolver ABI. `netAmount` is the post-commission
+    ///      amount committed by Bridge. Zero means that this module has no record.
+    function getFundsInBlock(uint256 rgbOpId, uint256 netAmount) external view returns (uint64 l2BlockPlusOne) {
+        address bridge_ = IRouteRegistry(routeRegistry).bridge();
+        bytes32 operationId = IBridge(bridge_).rgbMintDepositId(RGB_NETWORK, rgbOpId, netAmount);
+        return fundsInRecordL2Blocks[operationId];
     }
 
     /// @notice Returns RGB mint amounts for operation ids in caller-supplied order.

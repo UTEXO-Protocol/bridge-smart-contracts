@@ -3,6 +3,8 @@ pragma solidity 0.8.35;
 
 import {Test} from "forge-std/Test.sol";
 import {IArbSys} from "../../src/interfaces/IArbSys.sol";
+import {IBridge} from "../../src/interfaces/IBridge.sol";
+import {IRouteRegistry} from "../../src/interfaces/IRouteRegistry.sol";
 import {FundsInContext, FundsOutContext} from "../../src/interfaces/RouteTypes.sol";
 import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol";
 
@@ -17,6 +19,8 @@ contract RgbSettlementModuleTest is Test {
 
     address internal routeRegistry = makeAddr("routeRegistry");
 
+    address internal bridge = makeAddr("bridge");
+
     address internal attacker = makeAddr("attacker");
 
     address internal user = makeAddr("user");
@@ -26,6 +30,8 @@ contract RgbSettlementModuleTest is Test {
     address internal token = makeAddr("token");
 
     uint256 internal constant RGB_CHAIN_ID = 1_000_001; // RGB network the mint is credited to
+
+    uint256 internal constant CANONICAL_RGB_NETWORK = 827166;
 
     uint256 internal constant EVM_CHAIN_ID = 42161; // arbitrum
 
@@ -139,6 +145,11 @@ contract RgbSettlementModuleTest is Test {
         assertEq(module.fundsInRecords(TX_ID_1), AMOUNT);
     }
 
+    function test_onFundsIn_recordsL2BlockPlusOne() public {
+        _record(TX_ID_1, AMOUNT);
+        assertEq(module.fundsInRecordL2Blocks(TX_ID_1), L2_BLOCK + 1);
+    }
+
     function test_onFundsIn_tagsRecordWithDestChainId() public {
         _record(TX_ID_1, AMOUNT);
         assertEq(module.fundsInRecordChainIds(TX_ID_1), RGB_CHAIN_ID, "record tagged with the RGB network");
@@ -160,6 +171,16 @@ contract RgbSettlementModuleTest is Test {
         assertEq(module.fundsInRecords(TX_ID_1), AMOUNT);
     }
 
+    function test_onFundsIn_recordsUint64MaxAtBlockBoundary() public {
+        uint256 lastUint64Block = type(uint64).max - 1;
+        _setL2Block(lastUint64Block);
+
+        vm.prank(routeRegistry);
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_OP_ID, type(uint64).max));
+
+        assertEq(module.fundsInRecordL2Blocks(TX_ID_1), type(uint64).max);
+    }
+
     function test_onFundsIn_revertsAtDeadlineWithoutWritingRecord() public {
         _setL2Block(BEFORE_BLOCK);
 
@@ -171,6 +192,7 @@ contract RgbSettlementModuleTest is Test {
 
         assertEq(module.fundsInRecords(TX_ID_1), 0);
         assertEq(module.fundsInRecordChainIds(TX_ID_1), 0);
+        assertEq(module.fundsInRecordL2Blocks(TX_ID_1), 0);
     }
 
     function test_onFundsIn_revertsAfterDeadlineWithoutWritingRecord() public {
@@ -183,6 +205,7 @@ contract RgbSettlementModuleTest is Test {
 
         assertEq(module.fundsInRecords(TX_ID_1), 0);
         assertEq(module.fundsInRecordChainIds(TX_ID_1), 0);
+        assertEq(module.fundsInRecordL2Blocks(TX_ID_1), 0);
     }
 
     function test_onFundsIn_revertsOnLegacyOneWordPayload() public {
@@ -207,6 +230,26 @@ contract RgbSettlementModuleTest is Test {
         assertEq(amounts[2], AMOUNT);
     }
 
+    function test_getFundsInBlock_returnsRecordedL2BlockPlusOne() public {
+        _mockClaimKey(RGB_OP_ID, AMOUNT, TX_ID_1);
+        _record(TX_ID_1, AMOUNT);
+
+        assertEq(module.getFundsInBlock(RGB_OP_ID, AMOUNT), L2_BLOCK + 1);
+    }
+
+    function test_getFundsInBlock_returnsZeroForMissingClaim() public {
+        _mockClaimKey(RGB_OP_ID, AMOUNT, TX_ID_1);
+        assertEq(module.getFundsInBlock(RGB_OP_ID, AMOUNT), 0);
+    }
+
+    function test_getFundsInBlock_usesCanonicalRgbNetwork() public {
+        _mockClaimKey(RGB_OP_ID, AMOUNT, TX_ID_1);
+        module.getFundsInBlock(RGB_OP_ID, AMOUNT);
+
+        vm.expectCall(bridge, abi.encodeCall(IBridge.rgbMintDepositId, (CANONICAL_RGB_NETWORK, RGB_OP_ID, AMOUNT)));
+        module.getFundsInBlock(RGB_OP_ID, AMOUNT);
+    }
+
     function test_onFundsIn_revertsOnZeroRgbOpId() public {
         vm.prank(routeRegistry);
         vm.expectRevert(RgbSettlementModule.InvalidRgbOpId.selector);
@@ -215,6 +258,15 @@ contract RgbSettlementModuleTest is Test {
 
     function _setL2Block(uint256 l2Block) private {
         vm.mockCall(address(100), abi.encodeCall(IArbSys.arbBlockNumber, ()), abi.encode(l2Block));
+    }
+
+    function _mockClaimKey(uint256 rgbOpId, uint256 netAmount, bytes32 operationId) private {
+        vm.mockCall(routeRegistry, abi.encodeCall(IRouteRegistry.bridge, ()), abi.encode(bridge));
+        vm.mockCall(
+            bridge,
+            abi.encodeCall(IBridge.rgbMintDepositId, (CANONICAL_RGB_NETWORK, rgbOpId, netAmount)),
+            abi.encode(operationId)
+        );
     }
 
     function test_onFundsIn_revertsOnNonEmptyDestinationAddress() public {
@@ -227,14 +279,20 @@ contract RgbSettlementModuleTest is Test {
 
         assertEq(module.fundsInRecords(TX_ID_1), 0, "record not written");
         assertEq(module.fundsInRecordChainIds(TX_ID_1), 0, "network tag not written");
+        assertEq(module.fundsInRecordL2Blocks(TX_ID_1), 0, "block not written");
     }
 
     function test_onFundsIn_revertsOnDuplicateOperationId() public {
         _record(TX_ID_1, AMOUNT);
 
+        uint64 recordedBlock = module.fundsInRecordL2Blocks(TX_ID_1);
+        _setL2Block(L2_BLOCK + 1);
+
         vm.prank(routeRegistry);
         vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
         module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_OP_ID, BEFORE_BLOCK));
+
+        assertEq(module.fundsInRecordL2Blocks(TX_ID_1), recordedBlock, "first block preserved");
     }
 
     function test_onFundsIn_revertsIfNotRouteRegistry() public {

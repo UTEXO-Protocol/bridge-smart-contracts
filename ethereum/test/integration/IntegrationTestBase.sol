@@ -84,7 +84,7 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant SOURCE_CHAIN_ID = 31337; // foundry default block.chainid
 
-    uint256 internal constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
+    uint256 internal constant RGB_CHAIN_ID = 827166; // protocol-assigned RGB network
 
     uint256 internal constant USER_DEPOSIT = 1 ether; // one 18-decimal mock token gross
 

@@ -108,6 +108,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         uint256 cmPool;
         uint256 nativePool;
         uint256 record;
+        uint64 recordL2Block;
     }
 
     function setUp() public virtual {
@@ -426,6 +427,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         s.cmPool = cm.tokenCommissionPool(address(usdt0));
         s.nativePool = cm.nativeCommissionPool();
         s.record = rgbModule.fundsInRecords(opId);
+        s.recordL2Block = rgbModule.fundsInRecordL2Blocks(opId);
     }
 
     function _assertLedgerUnchanged(LedgerSnapshot memory before, bytes32 opId) internal view {
@@ -438,6 +440,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         assertEq(cm.tokenCommissionPool(address(usdt0)), before.cmPool, "cm pool unchanged");
         assertEq(cm.nativeCommissionPool(), before.nativePool, "native pool unchanged");
         assertEq(rgbModule.fundsInRecords(opId), before.record, "rgb record unchanged");
+        assertEq(rgbModule.fundsInRecordL2Blocks(opId), before.recordL2Block, "rgb block record unchanged");
     }
 
     /// @dev Reads no contracts, so it does not consume a pending prank.

@@ -24,6 +24,11 @@ contract IntegrationDepositsTest is IntegrationTestBase {
         assertEq(cm.tokenCommissionPool(address(token)), fee, "CM recorded inbound fee");
         assertEq(rgbModule.fundsInRecords(opId), netIn, "mint record stores net");
         assertEq(opId, bridge.rgbMintDepositId(RGB_CHAIN_ID, RGB_OP_ID, netIn), "consignment-derived backing id");
+        assertEq(
+            rgbModule.getFundsInBlock(RGB_OP_ID, netIn),
+            ARBITRUM_L2_BLOCK + 1,
+            "rgb-lib lookup returns funded L2 block plus one"
+        );
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), netIn, "destination liquidity credited");
         assertEq(bridge.totalLockedLiquidity(), netIn, "total liquidity credited");
         assertEq(
