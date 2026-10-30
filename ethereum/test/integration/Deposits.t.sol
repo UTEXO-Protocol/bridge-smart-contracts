@@ -25,7 +25,7 @@ contract IntegrationDepositsTest is IntegrationTestBase {
         assertEq(rgbModule.fundsInRecords(opId), netIn, "mint record stores net");
         assertEq(opId, bridge.rgbMintDepositId(RGB_CHAIN_ID, RGB_OP_ID, netIn), "consignment-derived backing id");
         assertEq(
-            rgbModule.getFundsInBlock(RGB_OP_ID, netIn),
+            bridge.getFundsInBlock(RGB_OP_ID, netIn),
             ARBITRUM_L2_BLOCK + 1,
             "rgb-lib lookup returns funded L2 block plus one"
         );
@@ -57,6 +57,10 @@ contract IntegrationDepositsTest is IntegrationTestBase {
             2,
             "two deposit nonces consumed"
         );
+    }
+
+    function test_getFundsInBlock_returnsZeroForMissingMint() public view {
+        assertEq(bridge.getFundsInBlock(RGB_OP_ID, _netIn()), 0, "missing mint returns zero");
     }
 
     /// @notice A mint route must carry a non-zero RGB OpId in settlementData.

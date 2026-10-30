@@ -76,10 +76,11 @@ local chain id, token, RGB network, mint OpId and actual net amount. Other route
 use the sender/nonce deposit context.
 
 `RgbSettlementModule` permanently stores the net amount, destination RGB
-network and funded Arbitrum L2 block plus one for each RGB backing id. The
+network and funded Arbitrum L2 block plus one for each RGB backing id. Bridge's
 two-argument `getFundsInBlock(rgbOpId, netAmount)` view matches rgb-lib's BFA
-resolver ABI for the canonical RGB network `827166`; zero means no record.
-The BFA `bridgeLocation` must point to this settlement module deployment.
+resolver ABI for the canonical RGB network `827166`; zero means no record in
+the currently configured settlement module. The BFA `bridgeLocation` points to
+the stable Bridge proxy.
 Clients can also batch state lookups through
 `getFundsInRecords(bytes32[] operationIds)`; results preserve input order and
 zero means that a record is absent. This avoids historical `eth_getLogs` scans.
