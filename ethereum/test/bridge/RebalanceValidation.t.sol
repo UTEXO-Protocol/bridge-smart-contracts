@@ -109,11 +109,13 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_acceptsSettlementDataInAtMaxLength() public {
-        // A max-length blob still decodes as a non-zero RGB OpId (its first
-        // 32 bytes), so the credit leg records normally. The length is far
-        // above the deposit cap: the rebalance credit leg is not bound by it.
+        // A max-length blob with a canonical tuple prefix still decodes as
+        // valid RGB data, so the credit leg records normally. The length is
+        // far above the deposit cap: the rebalance credit leg is not bound by it.
         IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
-        p.settlementDataIn = PayloadHelper.filledBytes(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH());
+        bytes memory prefix = abi.encode(RGB_OP_ID + 1, RGB_BEFORE_BLOCK);
+        p.settlementDataIn =
+            bytes.concat(prefix, PayloadHelper.filledBytes(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH() - prefix.length));
         assertGt(p.settlementDataIn.length, bridge.MAX_SETTLEMENT_DATA_IN_LENGTH());
         bytes32 expectedOperationId = _deriveRebalanceOpId(p);
 

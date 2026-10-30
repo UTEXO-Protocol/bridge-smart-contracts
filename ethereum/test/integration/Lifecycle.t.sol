@@ -52,8 +52,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         // amount (no consumption), Bridge releases `netBridgedIn` from the
         // pool. 1% outbound commission to CM, the rest to recipient.
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netBridgedIn, netBridgedIn, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netBridgedIn, "", _validProof());
 
         uint256 tokenCommissionOut = netBridgedIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
         uint256 netOut = netBridgedIn - tokenCommissionOut;
@@ -164,7 +163,8 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         vm.deal(user, nativeQuote);
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn{value: nativeQuote}(USER_DEPOSIT, RGB_CHAIN_ID, "", abi.encode(RGB_OP_ID));
+        bytes32 opId =
+            bridge.fundsIn{value: nativeQuote}(USER_DEPOSIT, RGB_CHAIN_ID, "", abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
 
         assertEq(token.balanceOf(address(bridge)), USER_DEPOSIT, "bridge got full token amount");
         assertEq(token.balanceOf(address(cm)), 0, "cm no token commission");
@@ -218,7 +218,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         assertEq(rgbModule.fundsInRecords(opId), netIn, "mint record excludes full inbound fee");
 
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT + outBaseFee;
-        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", _validProof());
         ReleaseState memory beforeState = _releaseState(burnId);
         FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         vm.expectEmit(true, true, false, true, address(bridge));

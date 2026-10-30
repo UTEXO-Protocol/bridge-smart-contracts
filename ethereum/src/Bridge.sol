@@ -10,7 +10,8 @@ import {BridgeBaseUpgradeable} from "./BridgeBaseUpgradeable.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
 import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
-import {FundsInContext, FundsOutContext} from "./interfaces/RouteTypes.sol";
+import {IRgbSettlementModule} from "./interfaces/IRgbSettlementModule.sol";
+import {FundsInContext, FundsOutContext, RouteConfig} from "./interfaces/RouteTypes.sol";
 import {OutflowRateLimiter} from "./libraries/OutflowRateLimiter.sol";
 import {RollingOutflowLimiter} from "./libraries/RollingOutflowLimiter.sol";
 
@@ -42,12 +43,12 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     uint256 public constant MAX_PROOF_LENGTH = 1024;
 
     /// @notice Maximum byte length of deposit settlement data.
-    /// @dev RGB deposits encode one uint256 mint OpId.
+    /// @dev RGB deposits encode `(uint256 rgbOpId, uint64 beforeBlock)` in 64 bytes.
     uint256 public constant MAX_SETTLEMENT_DATA_IN_LENGTH = 128;
 
     /// @notice Maximum byte length of each release or rebalance settlement payload.
-    /// @dev Two parallel arrays encode as 128 + 64 * n bytes; 90,000 bytes allows
-    ///      up to 1,404 RGB record pairs and bounds module processing.
+    /// @dev One dynamic bytes32 array encodes as 64 + 32 * n bytes; 90,000 bytes
+    ///      allows up to 2,810 RGB record ids and bounds module processing.
     uint256 public constant MAX_SETTLEMENT_DATA_OUT_LENGTH = 90_000;
 
     /// @notice Basis-point denominator for outflow policies, safety limits and native-fee
@@ -94,6 +95,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     bytes32 public constant RGB_MINT_DEPOSIT_TYPEHASH = keccak256(
         "UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)"
     );
+
+    /// @notice Canonical RGB network used by rgb-lib's two-argument BFA lookup.
+    uint256 public constant RGB_NETWORK = 827166;
 
     /// @notice Type hash for the replay key shared by releases and rebalances.
     /// @dev Excludes destination, recipient, proof and settlement data so changing them
@@ -955,8 +959,20 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         );
     }
 
+    /// @inheritdoc IBridge
+    function getFundsInBlock(uint256 rgbOpId, uint256 netAmount)
+        external
+        view
+        override
+        returns (uint64 l2BlockPlusOne)
+    {
+        bytes32 operationId = rgbMintDepositId(RGB_NETWORK, rgbOpId, netAmount);
+        RouteConfig memory route = IRouteRegistry(routeRegistry).getRoute(block.chainid, RGB_NETWORK);
+        return IRgbSettlementModule(route.settlementModule).fundsInRecordL2Blocks(operationId);
+    }
+
     function _decodeRgbOpId(bytes calldata settlementData) private pure returns (uint256 rgbOpId) {
-        rgbOpId = abi.decode(settlementData, (uint256));
+        (rgbOpId,) = abi.decode(settlementData, (uint256, uint64));
         if (rgbOpId == 0) revert InvalidRgbOpId();
     }
 

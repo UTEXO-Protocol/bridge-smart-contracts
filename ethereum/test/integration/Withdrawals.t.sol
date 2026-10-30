@@ -30,7 +30,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
         uint256 netOut = netIn - outFee;
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", _validProof());
 
         ReleaseState memory beforeState = _releaseState(burnId);
         FundsOutAuthorization memory authorization = _prepareFundsOut(params);
@@ -64,7 +64,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         bytes32 opId = _depositN(10, RGB_OP_ID);
         uint256 netIn = _netIn();
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", _validProof());
         _submitFundsOut(params);
 
         ReleaseState memory afterFirst = _releaseState(burnId);
@@ -88,7 +88,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         bytes32 opId = _depositN(10, RGB_OP_ID);
         uint256 netIn = _netIn();
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", _validProof());
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = vm.getBlockTimestamp() + 1 hours;
         bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
@@ -105,11 +105,9 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
         bytes32 opId = _depositN(10, RGB_OP_ID);
-        uint256 netIn = _netIn();
         uint256 poolPlusOne = token.balanceOf(address(bridge)) + 1;
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn, poolPlusOne, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, poolPlusOne, "", _validProof());
 
         FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
@@ -129,7 +127,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
 
         // Use the fresh (1-confirmation) block as the source: below the 6 required.
         bytes memory shallowProof = abi.encode(LATEST_HEIGHT, LATEST_COMMIT, LATEST_HEIGHT, LATEST_COMMIT);
-        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", shallowProof);
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", shallowProof);
 
         FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
@@ -149,31 +147,11 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         uint256 netIn = _netIn();
 
         bytes32 fakeOpId = keccak256("nonexistent-deposit");
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(fakeOpId, netIn, netIn, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(fakeOpId, netIn, "", _validProof());
 
         FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
         vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.FundsInNotFound.selector, fakeOpId));
-        proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
-
-        _assertReleaseUnchanged(burnId, beforeState);
-    }
-
-    /// @notice A withdraw whose proof-of-mint amount differs from the recorded
-    ///         deposit is rejected with no trace.
-    function test_fundsOut_burnAmountMismatchRejected() public {
-        _configTokenCommissionRoutes();
-        _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
-        uint256 netIn = _netIn();
-
-        (IBridge.FundsOutParams memory params, uint256 burnId) =
-            _buildFundsOut(opId, netIn + 1, netIn, "", _validProof());
-
-        FundsOutAuthorization memory authorization = _prepareFundsOut(params);
-        ReleaseState memory beforeState = _releaseState(burnId);
-        vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.AmountMismatch.selector, opId, netIn + 1, netIn));
         proxy.fundsOutCall(params, authorization.nonce, authorization.deadline, 3, authorization.signatures);
 
         _assertReleaseUnchanged(burnId, beforeState);
@@ -189,7 +167,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         vm.prank(address(proxy));
         bridge.emergencyPauseAll();
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", _validProof());
 
         FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
@@ -207,7 +185,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         bytes32 opId = _depositN(10, RGB_OP_ID);
         uint256 netIn = _netIn();
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
-        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", _validProof());
         FundsOutAuthorization memory authorization = _prepareFundsOut(params);
         ReleaseState memory beforeState = _releaseState(burnId);
         uint256 emergencyNonceBefore = proxy.emergencyNonce();
@@ -225,7 +203,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
 
         vm.prank(user);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID + 100));
+        bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID + 100, RGB_BEFORE_BLOCK));
         _assertReleaseUnchanged(burnId, beforeState);
 
         uint256 unpauseNonce = proxy.emergencyNonce();

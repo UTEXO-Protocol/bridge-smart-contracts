@@ -205,7 +205,7 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
 
         uint256 depositAmount = 1e18;
         vm.prank(user);
-        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
+        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
 
         uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
         assertEq(cm.tokenCommissionPool(address(token)), expectedCommission);
@@ -740,7 +740,7 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         // Deposits are frozen...
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
 
         // ...but the enclave release still executes.
         IBridge.FundsOutParams memory params = _fundsOutParams();

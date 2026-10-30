@@ -7,6 +7,7 @@ import {CommissionManager} from "../../src/CommissionManager.sol";
 import {MultisigProxy} from "../../src/MultisigProxy.sol";
 import {RouteRegistry} from "../../src/RouteRegistry.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
+import {IArbSys} from "../../src/interfaces/IArbSys.sol";
 import {
     CommissionConfig,
     CommissionCurrency,
@@ -83,7 +84,7 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant SOURCE_CHAIN_ID = 31337; // foundry default block.chainid
 
-    uint256 internal constant RGB_CHAIN_ID = 1_000_001; // backend-assigned for RGB
+    uint256 internal constant RGB_CHAIN_ID = 827166; // protocol-assigned RGB network
 
     uint256 internal constant USER_DEPOSIT = 1 ether; // one 18-decimal mock token gross
 
@@ -100,6 +101,10 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     // Non-zero RGB OpId threaded through the RGB-route settlementData on fundsIn.
     uint256 internal constant RGB_OP_ID = 0xABCDEF;
+
+    uint256 internal constant ARBITRUM_L2_BLOCK = 1_000_000;
+
+    uint64 internal constant RGB_BEFORE_BLOCK = 1_100_000;
 
     bytes32 internal constant SRC_BURN_TX_ID = keccak256("integration-burn-tx-default");
 
@@ -142,6 +147,8 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
     }
 
     function setUp() public {
+        vm.mockCall(address(100), abi.encodeCall(IArbSys.arbBlockNumber, ()), abi.encode(ARBITRUM_L2_BLOCK));
+
         encA1 = vm.addr(ENC_PK_1);
         encA2 = vm.addr(ENC_PK_2);
         encA3 = vm.addr(ENC_PK_3);
@@ -353,10 +360,10 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     function _depositN(uint256 n, uint256 rgbOpBase) internal returns (bytes32 firstOpId) {
         vm.prank(user);
-        firstOpId = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(rgbOpBase));
+        firstOpId = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(rgbOpBase, RGB_BEFORE_BLOCK));
         for (uint256 i = 1; i < n; i++) {
             vm.prank(user);
-            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(rgbOpBase + i));
+            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(rgbOpBase + i, RGB_BEFORE_BLOCK));
         }
     }
 
@@ -364,18 +371,14 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
         return abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
     }
 
-    function _buildFundsOut(
-        bytes32 sdOpId,
-        uint256 sdAmount,
-        uint256 releaseAmount,
-        string memory srcAddr,
-        bytes memory proof
-    ) internal view returns (IBridge.FundsOutParams memory params, uint256 burnId) {
+    function _buildFundsOut(bytes32 sdOpId, uint256 releaseAmount, string memory srcAddr, bytes memory proof)
+        internal
+        view
+        returns (IBridge.FundsOutParams memory params, uint256 burnId)
+    {
         bytes32[] memory ids = new bytes32[](1);
         ids[0] = sdOpId;
-        uint256[] memory amts = new uint256[](1);
-        amts[0] = sdAmount;
-        bytes memory settlementData = abi.encode(ids, amts);
+        bytes memory settlementData = abi.encode(ids);
         burnId = _deriveBurnId(releaseAmount, RGB_CHAIN_ID, srcAddr, SRC_BURN_TX_ID);
         params = IBridge.FundsOutParams(
             recipient,

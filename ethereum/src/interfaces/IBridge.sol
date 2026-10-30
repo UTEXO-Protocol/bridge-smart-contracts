@@ -238,7 +238,8 @@ interface IBridge {
     /// @param destinationChainId     Destination network id.
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
-    /// @param settlementData         Route payload; RGB uses `abi.encode(uint256 rgbOpId)`.
+    /// @param settlementData         Route payload; RGB uses
+    ///                               `abi.encode(uint256 rgbOpId, uint64 beforeBlock)`.
     /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,
@@ -252,6 +253,12 @@ interface IBridge {
     /// @dev Shared by deposits and RGB-destination rebalance credit legs.
     function rgbMintDepositId(uint256 rgbNetwork, uint256 rgbOpId, uint256 netAmount) external view returns (bytes32);
 
+    /// @notice Returns the funded L2 height for one canonical RGB mint claim.
+    /// @dev Matches rgb-lib's BFA resolver ABI for RGB network 827166. The
+    ///      Bridge derives the claim id and reads the currently configured RGB
+    ///      settlement module. Zero means that the module has no such record.
+    function getFundsInBlock(uint256 rgbOpId, uint256 netAmount) external view returns (uint64 l2BlockPlusOne);
+
     /// @notice Deposits tokens from the configured adapter on behalf of a source-chain user.
     /// @dev The adapter authenticates `sourceChainId` and `sourceSender`. Native payment
     ///      is accepted within ±5% of the quote and collected in full, without refund.
@@ -261,7 +268,8 @@ interface IBridge {
     /// @param destinationChainId     Destination network id.
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
-    /// @param settlementData         Route payload; RGB uses `abi.encode(uint256 rgbOpId)`.
+    /// @param settlementData         Route payload; RGB uses
+    ///                               `abi.encode(uint256 rgbOpId, uint64 beforeBlock)`.
     /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,

@@ -130,7 +130,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
             SOURCE_CHAIN_ID,
             SRC_ADDR,
             _proof(),
-            _settlementWithAmounts(_ids(opId), _one(amount)),
+            _settlement(_ids(opId)),
             SRC_BURN_TX_ID
         );
 
@@ -155,7 +155,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
             SOURCE_CHAIN_ID,
             SRC_ADDR,
             _proof(),
-            _settlementWithAmounts(_ids(opId), _one(amount)),
+            _settlement(_ids(opId)),
             SRC_BURN_TX_ID
         );
 
@@ -167,7 +167,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
             SOURCE_CHAIN_ID,
             SRC_ADDR,
             _proof(),
-            _settlementWithAmounts(_ids(opId), _one(amount)),
+            _settlement(_ids(opId)),
             SRC_BURN_TX_ID
         );
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), amount - bucketLimit, "configured 10% burst debited");

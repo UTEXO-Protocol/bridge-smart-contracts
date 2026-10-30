@@ -7,6 +7,7 @@ import {CommissionManager} from "../../src/CommissionManager.sol";
 import {MultisigProxy} from "../../src/MultisigProxy.sol";
 import {RouteRegistry} from "../../src/RouteRegistry.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
+import {IArbSys} from "../../src/interfaces/IArbSys.sol";
 import {IMultisigProxy} from "../../src/interfaces/IMultisigProxy.sol";
 import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol";
 import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
@@ -102,6 +103,10 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant RGB_OP_ID = 0xABCDEF;
 
+    uint256 internal constant ARBITRUM_L2_BLOCK = 1_000_000;
+
+    uint64 internal constant RGB_BEFORE_BLOCK = 1_100_000;
+
     uint256 internal constant LZ_NATIVE_FEE = 0.01 ether;
 
     uint32 internal constant DST_EID = 30110;
@@ -123,6 +128,8 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
     uint256 internal constant LATEST_CONFIRMATIONS = 1;
 
     function setUp() public virtual {
+        vm.mockCall(address(100), abi.encodeCall(IArbSys.arbBlockNumber, ()), abi.encode(ARBITRUM_L2_BLOCK));
+
         encA1 = vm.addr(ENC_PK_1);
         encA2 = vm.addr(ENC_PK_2);
         encA3 = vm.addr(ENC_PK_3);
@@ -223,7 +230,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
         vm.stopPrank();
 
         vm.prank(user);
-        seedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID));
+        seedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
     }
 
     function _encSigSet2of3() internal pure returns (uint256[] memory pks, uint256 bitmap) {
@@ -245,18 +252,9 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
         ids[0] = seedOpId;
     }
 
-    /// @dev Build `settlementData` for RgbSettlementModule, which
-    ///      expects `(bytes32[] operationIds, uint256[] amounts)` and checks
-    ///      each id exists with an EXACTLY matching amount (no consumption).
-    ///      The amount is derived from the on-chain mint record so an exact
-    ///      match is guaranteed for the common path; ids with no record resolve
-    ///      to amount 0 (the module then reverts FundsInNotFound first).
-    function _settlementFromRecords(bytes32[] memory ids) internal view returns (bytes memory) {
-        uint256[] memory amounts = new uint256[](ids.length);
-        for (uint256 i = 0; i < ids.length; i++) {
-            amounts[i] = rgbModule.fundsInRecords(ids[i]);
-        }
-        return abi.encode(ids, amounts);
+    /// @dev Build `settlementData` referencing permanent RGB mint records.
+    function _settlementFromRecords(bytes32[] memory ids) internal pure returns (bytes memory) {
+        return abi.encode(ids);
     }
 
     /// @dev Valid 2-of-2 enclave quorum for constructor tests.
@@ -370,7 +368,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
             destinationAddress: DST_ADDR,
             proof: proof,
             settlementDataOut: _settlementFromRecords(_fundsInIds()),
-            settlementDataIn: abi.encode(RGB_OP_ID + 7),
+            settlementDataIn: abi.encode(RGB_OP_ID + 7, RGB_BEFORE_BLOCK),
             sourceBurnTxId: SRC_BURN_TX_ID
         });
 

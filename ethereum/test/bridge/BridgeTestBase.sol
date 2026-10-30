@@ -6,6 +6,7 @@ import {Bridge} from "../../src/Bridge.sol";
 import {CommissionManager} from "../../src/CommissionManager.sol";
 import {RouteRegistry} from "../../src/RouteRegistry.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
+import {IArbSys} from "../../src/interfaces/IArbSys.sol";
 import {CommissionConfig, CommissionCurrency, CommissionSide} from "../../src/interfaces/ICommissionManager.sol";
 import {RgbSettlementModule} from "../../src/settlement/RgbSettlementModule.sol";
 import {RGBVerifier} from "../../src/verifiers/RGBVerifier.sol";
@@ -56,6 +57,10 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     /// @notice Non-zero RGB OpId threaded through the RGB-route settlementData.
     uint256 internal constant RGB_OP_ID = 0xABCDEF;
 
+    uint256 internal constant ARBITRUM_L2_BLOCK = 1_000_000;
+
+    uint64 internal constant RGB_BEFORE_BLOCK = 1_100_000;
+
     /// @notice Default source-chain burn identifier used by the helpers. Tests
     ///         that need two distinct burns pass an explicit id instead.
     bytes32 internal constant SRC_BURN_TX_ID = keccak256("rgb-burn-tx-default");
@@ -103,9 +108,12 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         uint256 cmPool;
         uint256 nativePool;
         uint256 record;
+        uint64 recordL2Block;
     }
 
     function setUp() public virtual {
+        vm.mockCall(address(100), abi.encodeCall(IArbSys.arbBlockNumber, ()), abi.encode(ARBITRUM_L2_BLOCK));
+
         // Leave enough history for the healthy sequencer round to be past the
         // mandatory one-hour post-restart grace period.
         vm.warp(2 hours);
@@ -177,15 +185,23 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     }
 
     /// @dev RGB-route `settlementData` for `fundsIn`: the module decodes a
-    ///      non-zero `uint256 rgbOpId`.
+    ///      a non-zero `uint256 rgbOpId` and exclusive `uint64 beforeBlock`.
     function _rgbData() internal pure returns (bytes memory) {
-        return abi.encode(RGB_OP_ID);
+        return abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK);
     }
 
     /// @dev RGB-route `settlementData` with an explicit rgbOpId (for tests that
     ///      need distinct ids or the zero-id revert path).
     function _rgbData(uint256 rgbOpId) internal pure returns (bytes memory) {
-        return abi.encode(rgbOpId);
+        return abi.encode(rgbOpId, RGB_BEFORE_BLOCK);
+    }
+
+    function _rgbData(uint256 rgbOpId, uint64 beforeBlock) internal pure returns (bytes memory) {
+        return abi.encode(rgbOpId, beforeBlock);
+    }
+
+    function _setArbitrumL2Block(uint256 l2Block) internal {
+        vm.mockCall(address(100), abi.encodeCall(IArbSys.arbBlockNumber, ()), abi.encode(l2Block));
     }
 
     /// @dev Single-element `bytes32[]` for fundsOut settlement operationIds.
@@ -244,40 +260,10 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         return abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
     }
 
-    /// @dev Build `settlementData` for RgbSettlementModule, which
-    ///      expects `(bytes32[] operationIds, uint256[] amounts)` and checks
-    ///      each id exists with an EXACTLY matching amount (no consumption).
-    ///
-    ///      This convenience encodes `AMOUNT` for every id — the standard
-    ///      deposit size used across these tests. It is intentionally `pure`: it must NOT make an
-    ///      external
-    ///      call, because it is frequently passed inline as a `fundsOut`
-    ///      argument right after `vm.prank`/`vm.expectRevert`, and a staticcall
-    ///      there would consume the cheatcode. Tests whose records differ from
-    ///      `AMOUNT` (seeded liquidity, multi-amount, fuzz, deliberate
-    ///      mismatch) use `_settlementWithAmounts` with explicit values.
+    /// @dev Build `settlementData` for RgbSettlementModule. Every referenced
+    ///      operation id must exist in the permanent mint ledger.
     function _settlement(bytes32[] memory ids) internal pure returns (bytes memory) {
-        uint256[] memory amounts = new uint256[](ids.length);
-        for (uint256 i = 0; i < ids.length; i++) {
-            amounts[i] = AMOUNT;
-        }
-        return abi.encode(ids, amounts);
-    }
-
-    /// @dev Explicit `(ids, amounts)` encoding for records that are not `AMOUNT`
-    ///      (seeded liquidity, multi-amount, fuzz) and for mismatch/length tests.
-    function _settlementWithAmounts(bytes32[] memory ids, uint256[] memory amounts)
-        internal
-        pure
-        returns (bytes memory)
-    {
-        return abi.encode(ids, amounts);
-    }
-
-    /// @dev Single-element `uint256[]` (used for explicit amount arrays).
-    function _one(uint256 value) internal pure returns (uint256[] memory arr) {
-        arr = new uint256[](1);
-        arr[0] = value;
+        return abi.encode(ids);
     }
 
     /// @dev Builds and submits a release with an explicit source burn transaction.
@@ -427,14 +413,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         ids[0] = _seedOpId;
         vm.prank(multisig);
         _fundsOut(
-            payoutRecipient,
-            amount,
-            RGB_CHAIN_ID,
-            SOURCE_CHAIN_ID,
-            SRC_ADDR,
-            _proof(),
-            _settlementWithAmounts(ids, _one(_seedAmt)),
-            sourceBurnTxId
+            payoutRecipient, amount, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), _settlement(ids), sourceBurnTxId
         );
     }
 
@@ -448,6 +427,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         s.cmPool = cm.tokenCommissionPool(address(usdt0));
         s.nativePool = cm.nativeCommissionPool();
         s.record = rgbModule.fundsInRecords(opId);
+        s.recordL2Block = rgbModule.fundsInRecordL2Blocks(opId);
     }
 
     function _assertLedgerUnchanged(LedgerSnapshot memory before, bytes32 opId) internal view {
@@ -460,6 +440,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         assertEq(cm.tokenCommissionPool(address(usdt0)), before.cmPool, "cm pool unchanged");
         assertEq(cm.nativeCommissionPool(), before.nativePool, "native pool unchanged");
         assertEq(rgbModule.fundsInRecords(opId), before.record, "rgb record unchanged");
+        assertEq(rgbModule.fundsInRecordL2Blocks(opId), before.recordL2Block, "rgb block record unchanged");
     }
 
     /// @dev Reads no contracts, so it does not consume a pending prank.

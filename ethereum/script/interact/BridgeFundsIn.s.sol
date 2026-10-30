@@ -8,12 +8,13 @@ import {ICommissionManager} from "../../src/interfaces/ICommissionManager.sol";
 
 /// @title BridgeFundsIn
 /// @notice Approves tokens and submits a direct RGB deposit from PRIVATE_KEY.
-/// @dev Encodes the RGB mint OpId, quotes commission and attaches a native buffer.
+/// @dev Encodes the RGB mint OpId and exclusive Arbitrum L2 deadline, quotes commission
+///      and attaches a native buffer.
 ///      AMOUNT is in token smallest units; DESTINATION_ADDRESS is empty for RGB.
 ///      Bridge refunds excess native value and returns the logged operationId.
 ///      Inputs (see the matching .env example for values):
 ///      `PRIVATE_KEY`, `BRIDGE_ADDRESS`, `AMOUNT`, `DESTINATION_CHAIN_ID`, `DESTINATION_ADDRESS`,
-///      `RGB_OP_ID`.
+///      `RGB_OP_ID`, `RGB_BEFORE_BLOCK`.
 contract BridgeFundsIn is Script {
     /// @dev Drift headroom attached on top of the quote. Kept below the
     ///      Bridge's `NATIVE_COMMISSION_TOLERANCE_BPS` so a quote that is still
@@ -27,6 +28,10 @@ contract BridgeFundsIn is Script {
         uint256 destChainId = vm.envUint("DESTINATION_CHAIN_ID");
         string memory dAddr = vm.envString("DESTINATION_ADDRESS");
         uint256 rgbOpId = vm.envUint("RGB_OP_ID");
+        uint256 beforeBlockValue = vm.envUint("RGB_BEFORE_BLOCK");
+        require(beforeBlockValue <= type(uint64).max, "RGB_BEFORE_BLOCK exceeds uint64");
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 beforeBlock = uint64(beforeBlockValue);
 
         Bridge bridge = Bridge(bridgeAddr);
         address token = bridge.TOKEN();
@@ -44,10 +49,10 @@ contract BridgeFundsIn is Script {
 
         vm.startBroadcast(pk);
         IERC20(token).approve(bridgeAddr, amount);
-        // RGB route: `settlementData` carries the RGB OpId as `abi.encode(uint256)`;
-        // the settlement module decodes it and surfaces it in the FundsIn event.
-        // Other routes define their own blob layout.
-        bytes32 operationId = bridge.fundsIn{value: nativeValue}(amount, destChainId, dAddr, abi.encode(rgbOpId));
+        // RGB route: `settlementData` carries the RGB OpId and an exclusive
+        // Arbitrum L2 deadline. Other routes define their own blob layout.
+        bytes32 operationId =
+            bridge.fundsIn{value: nativeValue}(amount, destChainId, dAddr, abi.encode(rgbOpId, beforeBlock));
         vm.stopBroadcast();
 
         console2.log("fundsIn succeeded. Derived operationId:");

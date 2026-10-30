@@ -31,7 +31,7 @@ contract RouteRegistry is IRouteRegistry, Ownable2Step {
     // =========================================================================
 
     /// @notice Bridge authorized to call this registry's dispatchers.
-    address public immutable bridge;
+    address public immutable override bridge;
 
     /// @dev Route table keyed by `keccak256(abi.encode(sourceChainId, destChainId))`.
     ///      Accessed externally via `getRoute(...)` (see `IRouteRegistry`).
