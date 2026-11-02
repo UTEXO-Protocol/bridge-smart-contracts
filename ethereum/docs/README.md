@@ -300,6 +300,10 @@ than part of the permanent identity. Records are never deleted by `fundsOut`. A
 stored value of zero therefore means that the claim was not recorded; otherwise
 the value is the actual L2 block plus one.
 
+`circulatingSupply()` returns the accounted RGB supply as `uint64`. Successful
+locks increase it and releases decrease it; direct token transfers do not affect
+the counter. A lock that would make the supply exceed `uint64::MAX` is rejected.
+
 An RGB resolver can check one external anchor without scanning historical logs:
 
 ```javascript

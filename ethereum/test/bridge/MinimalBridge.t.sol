@@ -61,6 +61,7 @@ contract MinimalBridgeTest is Test {
     function test_constructor_setsTokenAndOwner() public view {
         assertEq(bridge.TOKEN(), address(token));
         assertEq(bridge.owner(), owner);
+        assertEq(bridge.circulatingSupply(), 0);
     }
 
     function test_constructor_revertsOnZeroToken() public {
@@ -76,6 +77,7 @@ contract MinimalBridgeTest is Test {
 
         assertEq(token.balanceOf(address(bridge)), AMOUNT);
         assertEq(token.balanceOf(user), userBefore - AMOUNT);
+        assertEq(bridge.circulatingSupply(), AMOUNT);
     }
 
     function test_fundsIn_recordsL2Block() public {
@@ -86,6 +88,7 @@ contract MinimalBridgeTest is Test {
 
         uint64 l2BlockPlusOne = bridge.fundsInRecords(claimKey);
         assertEq(l2BlockPlusOne, L2_BLOCK + 1);
+        assertEq(bridge.circulatingSupply(), AMOUNT);
     }
 
     function test_rgbMintDepositId_matchesCanonicalFormula() public view {
@@ -126,6 +129,7 @@ contract MinimalBridgeTest is Test {
 
         assertEq(token.balanceOf(address(bridge)), 0);
         assertEq(bridge.getFundsInBlock(OPERATION_ID, AMOUNT), 0);
+        assertEq(bridge.circulatingSupply(), 0);
     }
 
     function test_fundsIn_revertsAfterDeadlineWithoutPullingTokensOrWritingRecord() public {
@@ -138,6 +142,7 @@ contract MinimalBridgeTest is Test {
 
         assertEq(token.balanceOf(address(bridge)), 0);
         assertEq(bridge.getFundsInBlock(OPERATION_ID, AMOUNT), 0);
+        assertEq(bridge.circulatingSupply(), 0);
     }
 
     function test_fundsIn_revertsWithZeroDeadline() public {
@@ -171,6 +176,7 @@ contract MinimalBridgeTest is Test {
         bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
 
         assertEq(bridge.fundsInRecords(claimKey), 0);
+        assertEq(bridge.circulatingSupply(), 0);
     }
 
     function test_fundsIn_revertsZeroOperationId() public {
@@ -225,6 +231,28 @@ contract MinimalBridgeTest is Test {
 
         vm.prank(user);
         bridge.fundsIn(amount, OPERATION_ID, BEFORE_BLOCK);
+
+        assertEq(bridge.circulatingSupply(), type(uint64).max);
+    }
+
+    function test_fundsIn_revertsWhenCumulativeSupplyExceedsUint64() public {
+        uint256 maxSupply = type(uint64).max;
+        token.mint(user, maxSupply);
+
+        vm.prank(user);
+        bridge.fundsIn(maxSupply, OPERATION_ID, BEFORE_BLOCK);
+
+        uint256 userBefore = token.balanceOf(user);
+        bytes32 secondClaim = bridge.rgbMintDepositId(OPERATION_ID + 1, 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(MinimalBridge.CirculatingSupplyOverflow.selector, type(uint64).max, uint256(1))
+        );
+        vm.prank(user);
+        bridge.fundsIn(1, OPERATION_ID + 1, BEFORE_BLOCK);
+
+        assertEq(bridge.circulatingSupply(), type(uint64).max);
+        assertEq(token.balanceOf(user), userBefore);
+        assertEq(bridge.fundsInRecords(secondClaim), 0);
     }
 
     function test_fundsIn_revertsAboveUint64WithoutPullingTokens() public {
@@ -273,6 +301,32 @@ contract MinimalBridgeTest is Test {
 
         assertEq(token.balanceOf(recipient), AMOUNT);
         assertEq(token.balanceOf(address(bridge)), 0);
+        assertEq(bridge.circulatingSupply(), 0);
+    }
+
+    function test_fundsOut_decrementsCirculatingSupplyByReleasedAmount() public {
+        vm.prank(user);
+        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+
+        uint256 releaseAmount = AMOUNT / 4;
+        vm.prank(owner);
+        bridge.fundsOut(recipient, releaseAmount, OPERATION_ID, SRC_ADDR);
+
+        assertEq(bridge.circulatingSupply(), AMOUNT - releaseAmount);
+    }
+
+    function test_fundsOut_revertsWhenDonationCoversAmountButCirculatingSupplyDoesNot() public {
+        token.mint(address(bridge), AMOUNT);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(MinimalBridge.AmountExceedsCirculatingSupply.selector, AMOUNT, uint64(0))
+        );
+        vm.prank(owner);
+        bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+
+        assertEq(bridge.circulatingSupply(), 0);
+        assertEq(token.balanceOf(address(bridge)), AMOUNT);
+        assertEq(token.balanceOf(recipient), 0);
     }
 
     function test_fundsOut_revertsForNonOwner() public {
@@ -454,6 +508,7 @@ contract MinimalBridgeTest is Test {
         bridge.fundsIn(amount, OPERATION_ID, BEFORE_BLOCK);
 
         assertEq(token.balanceOf(address(bridge)), uint256(amount));
+        assertEq(bridge.circulatingSupply(), amount);
     }
 
     function testFuzz_fundsOut_anyAmountUpToPool(uint64 lockAmount, uint64 releaseAmount) public {
@@ -469,6 +524,7 @@ contract MinimalBridgeTest is Test {
 
         assertEq(token.balanceOf(recipient), uint256(releaseAmount));
         assertEq(token.balanceOf(address(bridge)), uint256(lockAmount) - uint256(releaseAmount));
+        assertEq(bridge.circulatingSupply(), uint256(lockAmount) - uint256(releaseAmount));
     }
 
     function test_emergencyUnpauseAll_resumesPlannedInflowPauseAndIsIdempotent() public {
