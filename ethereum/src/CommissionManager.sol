@@ -14,7 +14,8 @@ import {
     CommissionConfig,
     CommissionCurrency,
     CommissionSide,
-    ICommissionManager
+    ICommissionManager,
+    PayerTier
 } from "./interfaces/ICommissionManager.sol";
 
 /// @notice Bridge amount floors used to validate fee rules.
@@ -69,6 +70,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
     /// @notice Per-route overrides; key = `buildRouteKey(sourceChainId, destChainId, token)`.
     mapping(bytes32 => CommissionConfig) public commissionRules;
+
+    /// @notice Per-route client tiers, keyed first by route and then authenticated fee subject.
+    mapping(bytes32 routeKey => mapping(bytes32 feeSubject => PayerTier tier)) public payerTiers;
 
     /// @notice Accrued ERC-20 commission per token (tracks balance held for that token).
     mapping(address => uint256) public tokenCommissionPool;
@@ -141,11 +145,13 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     ///         separately in native).
     /// @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_IN`. NATIVE path uses
     ///      `convertTokenFeeToNative` (Chainlink ETH/USD) and `IERC20Metadata(token).decimals()`.
-    function calculateFundsInCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
-        external
-        view
-        returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)
-    {
+    function calculateFundsInCommission(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        uint256 amount,
+        bytes32 feeSubject
+    ) external view returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) {
         bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
         CommissionConfig memory config = getEffectiveConfig(ruleKey);
 
@@ -155,12 +161,14 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         }
 
         // Total fee in token units: proportional part plus the flat `baseFee`.
-        uint256 totalFee = calculateStableFee(amount, config.stablePercent, config.multiplier) + config.baseFee;
-        _requireNonZeroConfiguredCommission(amount, totalFee, config);
+        CommissionConfig memory effectiveConfig = _applyPayerTier(ruleKey, feeSubject, config);
+        uint256 totalFee = calculateStableFee(amount, effectiveConfig.stablePercent, effectiveConfig.multiplier)
+            + effectiveConfig.baseFee;
+        _requireNonZeroConfiguredCommission(amount, totalFee, effectiveConfig);
         // Recheck the current floor: it may have changed since this rule was configured.
         _requireFeeFitsAmountFloor(config);
 
-        if (config.currency == CommissionCurrency.TOKEN) {
+        if (effectiveConfig.currency == CommissionCurrency.TOKEN) {
             // TOKEN commission: deduct from amount
             if (totalFee >= amount) revert ZeroNetAmount(amount, totalFee);
             tokenCommission = totalFee;
@@ -174,7 +182,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             } else {
                 nativeCommission = convertTokenFeeToNative(totalFee, _tokenDecimals(token));
                 if (nativeCommission == 0) {
-                    revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
+                    revert CommissionRoundsToZero(amount, effectiveConfig.stablePercent, effectiveConfig.multiplier);
                 }
             }
             netAmount = amount; // Full amount bridges
@@ -193,11 +201,13 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     ///         `NATIVE` (fee separate).
     /// @dev Returns `(0, 0, amount)` if effective `side` is not `FUNDS_OUT`. See
     ///      `calculateFundsInCommission` for rates/decimals.
-    function calculateFundsOutCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
-        external
-        view
-        returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)
-    {
+    function calculateFundsOutCommission(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        uint256 amount,
+        bytes32 feeSubject
+    ) external view returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) {
         bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
         CommissionConfig memory config = getEffectiveConfig(ruleKey);
 
@@ -207,11 +217,13 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         }
 
         // Calculate in token smallest units before selecting the payment currency.
-        uint256 totalFee = calculateStableFee(amount, config.stablePercent, config.multiplier) + config.baseFee;
-        _requireNonZeroConfiguredCommission(amount, totalFee, config);
+        CommissionConfig memory effectiveConfig = _applyPayerTier(ruleKey, feeSubject, config);
+        uint256 totalFee = calculateStableFee(amount, effectiveConfig.stablePercent, effectiveConfig.multiplier)
+            + effectiveConfig.baseFee;
+        _requireNonZeroConfiguredCommission(amount, totalFee, effectiveConfig);
         _requireFeeFitsAmountFloor(config);
 
-        if (config.currency == CommissionCurrency.TOKEN) {
+        if (effectiveConfig.currency == CommissionCurrency.TOKEN) {
             if (totalFee >= amount) revert ZeroNetAmount(amount, totalFee);
             tokenCommission = totalFee;
             nativeCommission = 0;
@@ -224,7 +236,7 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             } else {
                 nativeCommission = convertTokenFeeToNative(totalFee, _tokenDecimals(token));
                 if (nativeCommission == 0) {
-                    revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
+                    revert CommissionRoundsToZero(amount, effectiveConfig.stablePercent, effectiveConfig.multiplier);
                 }
             }
             netAmount = amount;
@@ -248,12 +260,15 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     /// @dev Convenience view for the backend: resolves the effective rule and
     ///      returns the full `proportional + flat` fee without the side/currency
     ///      branching the `calculate*Commission` entrypoints apply.
-    function calculateTotalFee(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
-        external
-        view
-        returns (uint256)
-    {
-        CommissionConfig memory config = getEffectiveConfig(buildRouteKey(sourceChainId, destChainId, token));
+    function calculateTotalFee(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        uint256 amount,
+        bytes32 feeSubject
+    ) external view returns (uint256) {
+        bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
+        CommissionConfig memory config = _applyPayerTier(ruleKey, feeSubject, getEffectiveConfig(ruleKey));
         return calculateStableFee(amount, config.stablePercent, config.multiplier) + config.baseFee;
     }
 
@@ -513,6 +528,36 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         emit CommissionRuleCleared(sourceChainId, destChainId, token);
     }
 
+    /// @inheritdoc ICommissionManager
+    function setPayerTier(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        bytes32 feeSubject,
+        uint256 stablePercent
+    ) external onlyOwner {
+        if (token == address(0)) revert InvalidToken();
+        if (feeSubject == bytes32(0)) revert InvalidFeeSubject();
+        if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
+
+        bytes32 routeKey = buildRouteKey(sourceChainId, destChainId, token);
+        PayerTier memory tier = PayerTier({stablePercent: stablePercent, isSet: true});
+        payerTiers[routeKey][feeSubject] = tier;
+        emit PayerTierUpdated(sourceChainId, destChainId, token, feeSubject, tier);
+    }
+
+    /// @inheritdoc ICommissionManager
+    function clearPayerTier(uint256 sourceChainId, uint256 destChainId, address token, bytes32 feeSubject)
+        external
+        onlyOwner
+    {
+        if (token == address(0)) revert InvalidToken();
+        if (feeSubject == bytes32(0)) revert InvalidFeeSubject();
+
+        delete payerTiers[buildRouteKey(sourceChainId, destChainId, token)][feeSubject];
+        emit PayerTierCleared(sourceChainId, destChainId, token, feeSubject);
+    }
+
     /// @notice Updates `bridgeAddress` (only that address may credit commissions).
     /// @param newBridge              Non-zero bridge contract.
     function setBridgeAddress(address newBridge) external onlyOwner {
@@ -544,6 +589,22 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             currency: globalCurrency,
             isSet: true
         });
+    }
+
+    /// @dev Applies only a lower proportional TOKEN rate. Side, currency,
+    ///      multiplier and flat base fee remain owned by the resolved route config.
+    function _applyPayerTier(bytes32 routeKey, bytes32 feeSubject, CommissionConfig memory config)
+        private
+        view
+        returns (CommissionConfig memory)
+    {
+        if (config.currency != CommissionCurrency.TOKEN || feeSubject == bytes32(0)) return config;
+
+        PayerTier memory tier = payerTiers[routeKey][feeSubject];
+        if (tier.isSet && tier.stablePercent < config.stablePercent) {
+            config.stablePercent = tier.stablePercent;
+        }
+        return config;
     }
 
     /// @dev A configured fee must not round to zero; an explicitly zero-fee rule is allowed.
@@ -588,6 +649,15 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     {
         bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
         return commissionRules[ruleKey];
+    }
+
+    /// @inheritdoc ICommissionManager
+    function getPayerTier(uint256 sourceChainId, uint256 destChainId, address token, bytes32 feeSubject)
+        external
+        view
+        returns (PayerTier memory)
+    {
+        return payerTiers[buildRouteKey(sourceChainId, destChainId, token)][feeSubject];
     }
 
     /// @notice Deterministic route id for commission rules.

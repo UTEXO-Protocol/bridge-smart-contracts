@@ -27,6 +27,14 @@ struct CommissionConfig {
     bool isSet;
 }
 
+/// @notice Optional proportional TOKEN-fee ceiling for one client on one route.
+/// @dev `stablePercent` uses the same numerator units as `CommissionConfig`.
+///      An explicit zero waives only the proportional component; route `baseFee` remains.
+struct PayerTier {
+    uint256 stablePercent;
+    bool isSet;
+}
+
 /// @title ICommissionManager
 /// @notice Commission quotes, owner configuration, and custody of bridge fees.
 /// @dev EVM routes use EVM chain ids; RGB uses the protocol-assigned id 827166.
@@ -39,6 +47,7 @@ interface ICommissionManager {
     error InvalidBridgeAddress();
     error InvalidToken();
     error InvalidRecipient();
+    error InvalidFeeSubject();
     error StablePercentTooHigh();
     error MultiplierZero();
     error InvalidFeeShape(uint256 stablePercent, uint8 multiplier);
@@ -86,6 +95,14 @@ interface ICommissionManager {
 
     event CommissionRuleCleared(uint256 sourceChainId, uint256 destChainId, address indexed token);
 
+    event PayerTierUpdated(
+        uint256 sourceChainId, uint256 destChainId, address indexed token, bytes32 indexed feeSubject, PayerTier tier
+    );
+
+    event PayerTierCleared(
+        uint256 sourceChainId, uint256 destChainId, address indexed token, bytes32 indexed feeSubject
+    );
+
     event TokenCommissionReceived(address indexed token, uint256 amount);
     event NativeCommissionReceived(uint256 amount);
 
@@ -122,6 +139,8 @@ interface ICommissionManager {
 
     function nativeCommissionPool() external view returns (uint256);
 
+    function payerTiers(bytes32 routeKey, bytes32 feeSubject) external view returns (uint256 stablePercent, bool isSet);
+
     function ethUsdFeed() external view returns (address);
 
     function ethUsdHeartbeat() external view returns (uint256);
@@ -138,15 +157,21 @@ interface ICommissionManager {
     // Core calculations
     // =========================================================================
 
-    function calculateFundsInCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
-        external
-        view
-        returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount);
+    function calculateFundsInCommission(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        uint256 amount,
+        bytes32 feeSubject
+    ) external view returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount);
 
-    function calculateFundsOutCommission(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
-        external
-        view
-        returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount);
+    function calculateFundsOutCommission(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        uint256 amount,
+        bytes32 feeSubject
+    ) external view returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount);
 
     function calculateStableFee(uint256 amount, uint256 stablePercent, uint256 multiplier)
         external
@@ -155,10 +180,13 @@ interface ICommissionManager {
 
     /// @notice Total fee for `amount` under the route's effective rule:
     ///         `calculateStableFee(...) + baseFee`, in token smallest units.
-    function calculateTotalFee(uint256 sourceChainId, uint256 destChainId, address token, uint256 amount)
-        external
-        view
-        returns (uint256);
+    function calculateTotalFee(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        uint256 amount,
+        bytes32 feeSubject
+    ) external view returns (uint256);
 
     /// @notice The Bridge's current `minFundsInAmount`. Every configured
     ///         `FUNDS_IN` fee must leave a positive net for a deposit sitting
@@ -214,6 +242,16 @@ interface ICommissionManager {
 
     function clearCommissionRule(uint256 sourceChainId, uint256 destChainId, address token) external;
 
+    function setPayerTier(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        bytes32 feeSubject,
+        uint256 stablePercent
+    ) external;
+
+    function clearPayerTier(uint256 sourceChainId, uint256 destChainId, address token, bytes32 feeSubject) external;
+
     function setBridgeAddress(address newBridge) external;
 
     function getGlobalDefaults()
@@ -231,6 +269,11 @@ interface ICommissionManager {
         external
         view
         returns (CommissionConfig memory);
+
+    function getPayerTier(uint256 sourceChainId, uint256 destChainId, address token, bytes32 feeSubject)
+        external
+        view
+        returns (PayerTier memory);
 
     function buildRouteKey(uint256 sourceChainId, uint256 destChainId, address token) external pure returns (bytes32);
 
