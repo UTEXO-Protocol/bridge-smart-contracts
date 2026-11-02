@@ -369,6 +369,13 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     }
 
     /// @inheritdoc IBridge
+    function circulatingSupply() external view override returns (uint64) {
+        // Every RGB credit is bounded by `_creditChainLiquidity`.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint64(lockedLiquidity[RGB_NETWORK]);
+    }
+
+    /// @inheritdoc IBridge
     function effectiveAvailableOutflow(uint256 chainId) external view override returns (uint256) {
         uint256 chainSpent = _chainSafetyWindows[chainId].current();
         uint256 chainLiquidity = lockedLiquidity[chainId];
@@ -608,7 +615,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
                 params.settlementDataIn
             );
 
-        lockedLiquidity[params.destinationChainId] += params.amount;
+        _creditChainLiquidity(
+            params.destinationChainId, params.amount, rgbOpId != 0 || params.destinationChainId == RGB_NETWORK
+        );
 
         // Rebalance moves release capacity away from the source chain and
         // therefore consumes the same immutable per-chain safety allowance as a
@@ -647,9 +656,22 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @dev Emit the RGB compatibility event without silently truncating an
     ///      EVM-native `uint256` token amount to RGB's `u64` amount range.
     function _emitRgbFundsIn(address sender, uint256 rgbOpId, uint256 amount) private {
-        if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
+        // `_creditChainLiquidity` has already bounded every RGB credit to uint64.
         // forge-lint: disable-next-line(unsafe-typecast)
         emit FundsIn(sender, rgbOpId, uint64(amount));
+    }
+
+    /// @dev Credits one destination bucket and enforces RGB's cumulative u64 supply bound.
+    ///      `isRgb` covers both non-zero RGB correlation ids and the canonical RGB network.
+    function _creditChainLiquidity(uint256 chainId, uint256 amount, bool isRgb) private {
+        uint256 currentLiquidity = lockedLiquidity[chainId];
+        if (isRgb) {
+            if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
+            if (currentLiquidity > type(uint64).max - amount) {
+                revert CirculatingSupplyOverflow(currentLiquidity, amount);
+            }
+        }
+        lockedLiquidity[chainId] = currentLiquidity + amount;
     }
 
     function _validateFundsOutParams(FundsOutParams calldata params) private view {
@@ -836,7 +858,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         uint256 rgbOpId = IRouteRegistry(routeRegistry).onFundsIn(ctx, settlementData);
 
         // Credit only the net tokens retained by Bridge.
-        lockedLiquidity[destinationChainId] += ctx.netAmount;
+        _creditChainLiquidity(destinationChainId, ctx.netAmount, rgbOpId != 0 || destinationChainId == RGB_NETWORK);
         totalLockedLiquidity += ctx.netAmount;
 
         // Forward the accepted native fee; refund any direct-deposit surplus below.

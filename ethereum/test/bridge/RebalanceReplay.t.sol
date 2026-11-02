@@ -17,7 +17,7 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         private
         returns (IBridge.RebalanceParams memory p, IBridge.FundsOutParams memory release)
     {
-        usdt0.mint(user, AMOUNT * 19);
+        usdt0.mint(user, AMOUNT * 17);
         vm.prank(user);
         bytes32 backingOperationId = bridge.fundsIn(
             AMOUNT, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_000, RGB_BEFORE_BLOCK)
@@ -25,11 +25,11 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         // Headroom under the 10% bucket burst; each deposit stays within uint64.
         vm.prank(user);
         bridge.fundsIn(
-            AMOUNT * 9, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_001, RGB_BEFORE_BLOCK)
+            AMOUNT * 8, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_001, RGB_BEFORE_BLOCK)
         );
         vm.prank(user);
         bridge.fundsIn(
-            AMOUNT * 9, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_002, RGB_BEFORE_BLOCK)
+            AMOUNT * 8, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_002, RGB_BEFORE_BLOCK)
         );
 
         p = _mintBurnToChainAParams(AMOUNT, backingOperationId);

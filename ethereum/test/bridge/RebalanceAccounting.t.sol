@@ -139,6 +139,30 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         assertFalse(bridge.consumedBurnIds(p.burnId), "burn id remains unused");
     }
 
+    function test_rebalanceLiquidity_rgbCreditRejectsCumulativeSupplyAboveUint64() public {
+        uint256 currentSupply = bridge.lockedLiquidity(RGB_CHAIN_ID);
+        uint256 topUp = uint256(type(uint64).max) - currentSupply;
+        usdt0.mint(user, topUp);
+        vm.prank(user);
+        bridge.fundsIn(topUp, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 9_100, RGB_BEFORE_BLOCK));
+
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(1, RGB_OP_ID + 9_101);
+        bytes32 operationId = _deriveRebalanceOpId(p);
+        uint256 sourceBefore = bridge.lockedLiquidity(CHAIN_A_ID);
+        uint256 totalBefore = bridge.totalLockedLiquidity();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IBridge.CirculatingSupplyOverflow.selector, uint256(type(uint64).max), uint256(1))
+        );
+        _rebalance(p);
+
+        assertEq(bridge.lockedLiquidity(CHAIN_A_ID), sourceBefore, "source debit rolled back");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), type(uint64).max, "destination supply unchanged");
+        assertEq(bridge.totalLockedLiquidity(), totalBefore, "total liquidity unchanged");
+        assertEq(rgbModule.fundsInRecords(operationId), 0, "RGB settlement write rolled back");
+        assertFalse(bridge.consumedBurnIds(p.burnId), "burn id remains unused");
+    }
+
     function test_rebalanceLiquidity_rgbToChainABurnBackedNoFundsInEvent() public {
         uint256 srcBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
         uint256 dstBefore = bridge.lockedLiquidity(CHAIN_A_ID);

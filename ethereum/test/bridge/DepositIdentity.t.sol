@@ -331,6 +331,50 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), amount);
     }
 
+    function test_fundsIn_rgbRouteRejectsCumulativeSupplyAboveUint64() public {
+        uint256 maxSupply = type(uint64).max;
+        usdt0.mint(user, maxSupply);
+
+        vm.prank(user);
+        bridge.fundsIn(maxSupply, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        uint256 userBefore = usdt0.balanceOf(user);
+        bytes32 sourceSender = bytes32(uint256(uint160(user)));
+        bytes32 secondOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID + 1, 1);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.CirculatingSupplyOverflow.selector, maxSupply, uint256(1)));
+        vm.prank(user);
+        bridge.fundsIn(1, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 1));
+
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), maxSupply, "RGB supply remains at the maximum");
+        assertEq(bridge.totalLockedLiquidity(), maxSupply, "total liquidity unchanged");
+        assertEq(rgbModule.fundsInRecords(secondOpId), 0, "settlement record rolled back");
+        assertEq(usdt0.balanceOf(user), userBefore, "token pull rolled back");
+        assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, sourceSender), 1, "failed credit restores nonce");
+    }
+
+    function test_fundsIn_canonicalRgbBucketEnforcesSupplyCapWithZeroIdModule() public {
+        uint256 canonicalRgbNetwork = bridge.RGB_NETWORK();
+        MockSettlementModule zeroIdModule = new MockSettlementModule();
+        vm.prank(deployer);
+        routeRegistry.setRoute(SOURCE_CHAIN_ID, canonicalRgbNetwork, true, address(rgbVerifier), address(zeroIdModule));
+
+        uint256 maxSupply = type(uint64).max;
+        usdt0.mint(user, maxSupply);
+        vm.prank(user);
+        bridge.fundsIn(maxSupply, canonicalRgbNetwork, DST_ADDR, bytes(""));
+
+        uint256 userBefore = usdt0.balanceOf(user);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.CirculatingSupplyOverflow.selector, maxSupply, uint256(1)));
+        vm.prank(user);
+        bridge.fundsIn(1, canonicalRgbNetwork, DST_ADDR, bytes(""));
+
+        assertEq(bridge.circulatingSupply(), type(uint64).max, "getter cannot truncate canonical supply");
+        assertEq(bridge.lockedLiquidity(canonicalRgbNetwork), maxSupply, "canonical supply unchanged");
+        assertEq(bridge.totalLockedLiquidity(), maxSupply, "total liquidity unchanged");
+        assertEq(zeroIdModule.onFundsInCount(), 1, "module callback rolled back");
+        assertEq(usdt0.balanceOf(user), userBefore, "token pull rolled back");
+    }
+
     function test_fundsIn_rgbRouteRejectsNetAmountAboveUint64WithoutTruncation() public {
         uint256 amount = uint256(type(uint64).max) + 1;
         usdt0.mint(user, amount);

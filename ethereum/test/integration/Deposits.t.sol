@@ -30,6 +30,7 @@ contract IntegrationDepositsTest is IntegrationTestBase {
             "rgb-lib lookup returns funded L2 block plus one"
         );
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), netIn, "destination liquidity credited");
+        assertEq(bridge.circulatingSupply(), netIn, "circulating supply credited");
         assertEq(bridge.totalLockedLiquidity(), netIn, "total liquidity credited");
         assertEq(
             bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))), 1, "deposit nonce consumed"
