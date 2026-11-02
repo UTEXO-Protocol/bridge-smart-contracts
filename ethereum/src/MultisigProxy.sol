@@ -7,7 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IMultisigProxy} from "./interfaces/IMultisigProxy.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
 import {IBridgeProxy} from "./interfaces/IBridgeProxy.sol";
-import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
+import {ICommissionManager, PayerTier} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
 
 /// @notice LayerZero adapter entry point used by `lzFundsOutCall`.
@@ -133,7 +133,6 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
     bytes4 private constant _SEL_WITHDRAW_ALL_TOKEN = ICommissionManager.withdrawAllTokenCommission.selector;
     bytes4 private constant _SEL_WITHDRAW_ALL_NATIVE = ICommissionManager.withdrawAllNativeCommission.selector;
     bytes4 private constant _SEL_SET_PAYER_TIER = ICommissionManager.setPayerTier.selector;
-    bytes4 private constant _SEL_CLEAR_PAYER_TIER = ICommissionManager.clearPayerTier.selector;
 
     /// @dev Bridge value-moving selectors reserved exclusively for the typed
     ///         enclave entrypoints. They are rejected from EVERY generic raw-call
@@ -209,10 +208,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         "ProposeUpdateCommissionManager(address target,address newCommissionManager,uint256 nonce,uint256 deadline)"
     );
     bytes32 private constant _PROPOSE_SET_PAYER_TIER_TYPEHASH = keccak256(
-        "ProposeSetPayerTier(address target,address bridge,uint256 sourceChainId,uint256 destChainId,address token,bytes32 feeSubject,uint256 stablePercent,uint256 nonce,uint256 deadline)"
-    );
-    bytes32 private constant _PROPOSE_CLEAR_PAYER_TIER_TYPEHASH = keccak256(
-        "ProposeClearPayerTier(address target,address bridge,uint256 sourceChainId,uint256 destChainId,address token,bytes32 feeSubject,uint256 nonce,uint256 deadline)"
+        "ProposeSetPayerTier(address target,address bridge,uint256 sourceChainId,uint256 destChainId,address token,bytes32 feeSubject,uint256 stablePercent,bool isSet,uint256 nonce,uint256 deadline)"
     );
 
     // Federation propose — LZAdapter side
@@ -811,7 +807,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         uint256 sourceChainId,
         uint256 destChainId,
         bytes32 feeSubject,
-        uint256 stablePercent,
+        PayerTier calldata tier,
         uint256 nonce,
         uint256 deadline,
         uint256 fedBitmap,
@@ -820,6 +816,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         address target = commissionManager;
         address signedBridge = bridge;
         address token = IBridgeToken(signedBridge).TOKEN();
+        PayerTier memory normalizedTier = tier.isSet ? tier : PayerTier({stablePercent: 0, isSet: false});
         bytes32 structHash = keccak256(
             abi.encode(
                 _PROPOSE_SET_PAYER_TIER_TYPEHASH,
@@ -829,7 +826,8 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
                 destChainId,
                 token,
                 feeSubject,
-                stablePercent,
+                normalizedTier.stablePercent,
+                normalizedTier.isSet,
                 nonce,
                 deadline
             )
@@ -837,46 +835,7 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
 
         return _proposeForTarget(
             OperationType.SetPayerTier,
-            abi.encode(signedBridge, sourceChainId, destChainId, token, feeSubject, stablePercent),
-            nonce,
-            deadline,
-            structHash,
-            fedBitmap,
-            fedSigs,
-            target
-        );
-    }
-
-    /// @inheritdoc IMultisigProxy
-    function proposeClearPayerTier(
-        uint256 sourceChainId,
-        uint256 destChainId,
-        bytes32 feeSubject,
-        uint256 nonce,
-        uint256 deadline,
-        uint256 fedBitmap,
-        bytes[] calldata fedSigs
-    ) external returns (bytes32) {
-        address target = commissionManager;
-        address signedBridge = bridge;
-        address token = IBridgeToken(signedBridge).TOKEN();
-        bytes32 structHash = keccak256(
-            abi.encode(
-                _PROPOSE_CLEAR_PAYER_TIER_TYPEHASH,
-                target,
-                signedBridge,
-                sourceChainId,
-                destChainId,
-                token,
-                feeSubject,
-                nonce,
-                deadline
-            )
-        );
-
-        return _proposeForTarget(
-            OperationType.ClearPayerTier,
-            abi.encode(signedBridge, sourceChainId, destChainId, token, feeSubject),
+            abi.encode(signedBridge, sourceChainId, destChainId, token, feeSubject, normalizedTier),
             nonce,
             deadline,
             structHash,
@@ -1361,7 +1320,6 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         if (
             opType == OperationType.AdminExecuteCommissionManager || opType == OperationType.WithdrawTokenCommissionCM
                 || opType == OperationType.WithdrawNativeCommissionCM || opType == OperationType.SetPayerTier
-                || opType == OperationType.ClearPayerTier
         ) return commissionManager;
         if (opType == OperationType.AdminExecuteAdapter) return lzAdapter;
         if (opType == OperationType.AdminExecuteRouteRegistry || opType == OperationType.SetRoute) {
@@ -1464,21 +1422,11 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
                 uint256 destChainId,
                 address token,
                 bytes32 feeSubject,
-                uint256 stablePercent
-            ) = abi.decode(opData, (address, uint256, uint256, address, bytes32, uint256));
+                PayerTier memory tier
+            ) = abi.decode(opData, (address, uint256, uint256, address, bytes32, PayerTier));
             if (signedBridge != bridge) revert StaleBridgeTarget(signedBridge, bridge);
             (bool ok, bytes memory ret) = target.call(
-                abi.encodeCall(
-                    ICommissionManager.setPayerTier, (sourceChainId, destChainId, token, feeSubject, stablePercent)
-                )
-            );
-            _propagateRevert(ok, ret);
-        } else if (opType == OperationType.ClearPayerTier) {
-            (address signedBridge, uint256 sourceChainId, uint256 destChainId, address token, bytes32 feeSubject) =
-                abi.decode(opData, (address, uint256, uint256, address, bytes32));
-            if (signedBridge != bridge) revert StaleBridgeTarget(signedBridge, bridge);
-            (bool ok, bytes memory ret) = target.call(
-                abi.encodeCall(ICommissionManager.clearPayerTier, (sourceChainId, destChainId, token, feeSubject))
+                abi.encodeCall(ICommissionManager.setPayerTier, (sourceChainId, destChainId, token, feeSubject, tier))
             );
             _propagateRevert(ok, ret);
         } else if (opType == OperationType.UpdateCommissionManager) {
@@ -1728,7 +1676,6 @@ contract MultisigProxy is IMultisigProxy, ReentrancyGuard {
         if (
             selector == _SEL_WITHDRAW_TOKEN || selector == _SEL_WITHDRAW_NATIVE || selector == _SEL_WITHDRAW_ALL_TOKEN
                 || selector == _SEL_WITHDRAW_ALL_NATIVE || selector == _SEL_SET_PAYER_TIER
-                || selector == _SEL_CLEAR_PAYER_TIER
         ) {
             revert ForbiddenCommissionManagerSelector(selector);
         }

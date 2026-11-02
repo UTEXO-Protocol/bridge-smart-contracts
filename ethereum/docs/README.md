@@ -177,6 +177,10 @@ A client rate may be zero and therefore waive only the proportional component;
 the route's `baseFee` still applies. Tiers never increase the default rate and do
 not apply to NATIVE commission. For deposits, direct calls use the caller padded
 to `bytes32`, while adapter deposits use the authenticated source sender.
+`SetPayerTier` with `isSet = false` removes the override and restores the default
+route rate; its supplied percentage is ignored and normalized to zero in the
+signed proposal. This differs from `{stablePercent: 0, isSet: true}`, which keeps
+an explicit zero-rate client tier.
 
 Deposits support TOKEN fees deducted from principal or NATIVE fees paid separately.
 Releases support TOKEN only. Native conversion assumes the bridge token is
@@ -226,7 +230,7 @@ consume the regular proposal nonce.
 | `AdminExecuteAdapter` | Allowed calls to the current adapter |
 | `UpdateEnclaveSigners` / `UpdateFederationSigners` | Signer-set changes |
 | `WithdrawTokenCommissionCM` / `WithdrawNativeCommissionCM` | Withdraw commissions to the fixed recipient |
-| `SetPayerTier` / `ClearPayerTier` | Set / clear a route-scoped TOKEN client rate; token is derived from Bridge |
+| `SetPayerTier` | Set or clear a route-scoped TOKEN client rate; token is derived from Bridge |
 | `UpdateCommissionManager` | Update Bridge and proxy CM pointers atomically |
 | `SetRoute` / `UpdateRouteRegistry` | Route configuration / Bridge registry pointer |
 | `UpdateLZAdapter` / `DisableLZAdapter` | Set / clear the proxy's adapter target |

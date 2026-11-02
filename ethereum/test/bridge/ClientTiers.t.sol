@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import {CommissionConfig, CommissionCurrency, CommissionSide} from "../../src/interfaces/ICommissionManager.sol";
+import {
+    CommissionConfig,
+    CommissionCurrency,
+    CommissionSide,
+    PayerTier
+} from "../../src/interfaces/ICommissionManager.sol";
 import {BridgeTestBase} from "./BridgeTestBase.sol";
 
 contract BridgeClientTiersTest is BridgeTestBase {
@@ -12,7 +17,13 @@ contract BridgeClientTiersTest is BridgeTestBase {
     function test_directFundsInUsesCallerTier() public {
         _setFundsInTokenRule(DEFAULT_PERCENT);
         vm.prank(deployer);
-        cm.setPayerTier(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), bytes32(uint256(uint160(user))), CLIENT_PERCENT);
+        cm.setPayerTier(
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            address(usdt0),
+            bytes32(uint256(uint160(user))),
+            PayerTier({stablePercent: CLIENT_PERCENT, isSet: true})
+        );
 
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
@@ -34,8 +45,20 @@ contract BridgeClientTiersTest is BridgeTestBase {
             address(usdt0),
             CommissionConfig(DEFAULT_PERCENT, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN, true)
         );
-        cm.setPayerTier(ADAPTER_SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), sourceSender, CLIENT_PERCENT);
-        cm.setPayerTier(ADAPTER_SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), bytes32(uint256(uint160(adapter))), 0);
+        cm.setPayerTier(
+            ADAPTER_SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            address(usdt0),
+            sourceSender,
+            PayerTier({stablePercent: CLIENT_PERCENT, isSet: true})
+        );
+        cm.setPayerTier(
+            ADAPTER_SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            address(usdt0),
+            bytes32(uint256(uint160(adapter))),
+            PayerTier({stablePercent: 0, isSet: true})
+        );
         vm.stopPrank();
 
         usdt0.mint(adapter, AMOUNT);
@@ -55,7 +78,11 @@ contract BridgeClientTiersTest is BridgeTestBase {
         _setFundsOutTokenRule(DEFAULT_PERCENT);
         vm.prank(deployer);
         cm.setPayerTier(
-            RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(usdt0), bytes32(uint256(uint160(recipient))), CLIENT_PERCENT
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(usdt0),
+            bytes32(uint256(uint160(recipient))),
+            PayerTier({stablePercent: CLIENT_PERCENT, isSet: true})
         );
 
         uint256 recipientBefore = usdt0.balanceOf(recipient);

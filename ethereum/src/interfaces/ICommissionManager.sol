@@ -30,6 +30,7 @@ struct CommissionConfig {
 /// @notice Optional proportional TOKEN-fee ceiling for one client on one route.
 /// @dev `stablePercent` uses the same numerator units as `CommissionConfig`.
 ///      An explicit zero waives only the proportional component; route `baseFee` remains.
+///      `isSet == false` removes the client override and ignores `stablePercent`.
 struct PayerTier {
     uint256 stablePercent;
     bool isSet;
@@ -97,10 +98,6 @@ interface ICommissionManager {
 
     event PayerTierUpdated(
         uint256 sourceChainId, uint256 destChainId, address indexed token, bytes32 indexed feeSubject, PayerTier tier
-    );
-
-    event PayerTierCleared(
-        uint256 sourceChainId, uint256 destChainId, address indexed token, bytes32 indexed feeSubject
     );
 
     event TokenCommissionReceived(address indexed token, uint256 amount);
@@ -247,10 +244,8 @@ interface ICommissionManager {
         uint256 destChainId,
         address token,
         bytes32 feeSubject,
-        uint256 stablePercent
+        PayerTier calldata tier
     ) external;
-
-    function clearPayerTier(uint256 sourceChainId, uint256 destChainId, address token, bytes32 feeSubject) external;
 
     function setBridgeAddress(address newBridge) external;
 

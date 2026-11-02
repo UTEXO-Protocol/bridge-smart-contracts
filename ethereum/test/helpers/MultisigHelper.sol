@@ -3,6 +3,7 @@ pragma solidity 0.8.35;
 
 import {Vm} from "forge-std/Vm.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
+import {PayerTier} from "../../src/interfaces/ICommissionManager.sol";
 import {IMultisigProxy} from "../../src/interfaces/IMultisigProxy.sol";
 
 /// @notice EIP-712 digest builders and deterministic signature helpers.
@@ -79,11 +80,7 @@ library MultisigHelper {
         keccak256("ProposeWithdrawNativeCommissionCM(address target,uint256 amount,uint256 nonce,uint256 deadline)");
 
     bytes32 internal constant PROPOSE_SET_PAYER_TIER_TYPEHASH = keccak256(
-        "ProposeSetPayerTier(address target,address bridge,uint256 sourceChainId,uint256 destChainId,address token,bytes32 feeSubject,uint256 stablePercent,uint256 nonce,uint256 deadline)"
-    );
-
-    bytes32 internal constant PROPOSE_CLEAR_PAYER_TIER_TYPEHASH = keccak256(
-        "ProposeClearPayerTier(address target,address bridge,uint256 sourceChainId,uint256 destChainId,address token,bytes32 feeSubject,uint256 nonce,uint256 deadline)"
+        "ProposeSetPayerTier(address target,address bridge,uint256 sourceChainId,uint256 destChainId,address token,bytes32 feeSubject,uint256 stablePercent,bool isSet,uint256 nonce,uint256 deadline)"
     );
 
     bytes32 internal constant PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH = keccak256(
@@ -470,10 +467,11 @@ library MultisigHelper {
         uint256 destChainId,
         address token,
         bytes32 feeSubject,
-        uint256 stablePercent,
+        PayerTier memory tier,
         uint256 nonce,
         uint256 deadline
     ) internal pure returns (bytes32) {
+        uint256 stablePercent = tier.isSet ? tier.stablePercent : 0;
         return toTypedDataHash(
             domainSep,
             keccak256(
@@ -486,35 +484,7 @@ library MultisigHelper {
                     token,
                     feeSubject,
                     stablePercent,
-                    nonce,
-                    deadline
-                )
-            )
-        );
-    }
-
-    function digestProposeClearPayerTier(
-        bytes32 domainSep,
-        address target,
-        address bridge,
-        uint256 sourceChainId,
-        uint256 destChainId,
-        address token,
-        bytes32 feeSubject,
-        uint256 nonce,
-        uint256 deadline
-    ) internal pure returns (bytes32) {
-        return toTypedDataHash(
-            domainSep,
-            keccak256(
-                abi.encode(
-                    PROPOSE_CLEAR_PAYER_TIER_TYPEHASH,
-                    target,
-                    bridge,
-                    sourceChainId,
-                    destChainId,
-                    token,
-                    feeSubject,
+                    tier.isSet,
                     nonce,
                     deadline
                 )

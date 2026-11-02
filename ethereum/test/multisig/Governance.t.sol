@@ -167,23 +167,18 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
     }
 
-    function test_adminExecute_rejectsPayerTierSelectorsInAllLanes() public {
+    function test_adminExecute_rejectsPayerTierSelectorInAllLanes() public {
         bytes32 feeSubject = bytes32(uint256(uint160(user)));
-        bytes[] memory callDatas = new bytes[](2);
-        callDatas[0] = abi.encodeCall(
-            ICommissionManager.setPayerTier, (SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject, uint256(70))
+        bytes memory callData = abi.encodeCall(
+            ICommissionManager.setPayerTier,
+            (SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject, PayerTier({stablePercent: 70, isSet: true}))
         );
-        callDatas[1] = abi.encodeCall(
-            ICommissionManager.clearPayerTier, (SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject)
-        );
-        for (uint256 i; i < callDatas.length; ++i) {
-            _assertGenericPathsRejectSelector(callDatas[i], IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
-        }
+        _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
     }
 
     function test_typedPayerTierGovernanceDerivesBridgeTokenAndClearsTier() public {
         bytes32 feeSubject = bytes32(uint256(uint160(user)));
-        uint256 stablePercent = 70;
+        PayerTier memory enabledTier = PayerTier({stablePercent: 70, isSet: true});
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = vm.getBlockTimestamp() + 1 days;
         bytes32 digest = MultisigHelper.digestProposeSetPayerTier(
@@ -194,18 +189,18 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
             RGB_CHAIN_ID,
             address(token),
             feeSubject,
-            stablePercent,
+            enabledTier,
             nonce,
             deadline
         );
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
         bytes memory setData =
-            abi.encode(address(bridge), SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject, stablePercent);
+            abi.encode(address(bridge), SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject, enabledTier);
         bytes32 setId = proxy.proposeSetPayerTier(
             SOURCE_CHAIN_ID,
             RGB_CHAIN_ID,
             feeSubject,
-            stablePercent,
+            enabledTier,
             nonce,
             deadline,
             bitmap,
@@ -218,12 +213,14 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
         proxy.executeProposal(setId, setData);
         PayerTier memory tier = cm.getPayerTier(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject);
-        assertEq(tier.stablePercent, stablePercent);
+        assertEq(tier.stablePercent, enabledTier.stablePercent);
         assertTrue(tier.isSet);
 
         nonce = proxy.proposalNonce();
         deadline = vm.getBlockTimestamp() + 1 days;
-        digest = MultisigHelper.digestProposeClearPayerTier(
+        PayerTier memory requestedClear = PayerTier({stablePercent: 9001, isSet: false});
+        PayerTier memory normalizedClear = PayerTier({stablePercent: 0, isSet: false});
+        digest = MultisigHelper.digestProposeSetPayerTier(
             domainSep,
             address(cm),
             address(bridge),
@@ -231,22 +228,34 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
             RGB_CHAIN_ID,
             address(token),
             feeSubject,
+            requestedClear,
             nonce,
             deadline
         );
-        bytes memory clearData = abi.encode(address(bridge), SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject);
-        bytes32 clearId = proxy.proposeClearPayerTier(
-            SOURCE_CHAIN_ID, RGB_CHAIN_ID, feeSubject, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks)
+        bytes memory clearData =
+            abi.encode(address(bridge), SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject, normalizedClear);
+        bytes32 clearId = proxy.proposeSetPayerTier(
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            feeSubject,
+            requestedClear,
+            nonce,
+            deadline,
+            bitmap,
+            MultisigHelper.signAll(vm, digest, pks)
         );
+        assertEq(proxy.getProposal(clearId).dataHash, keccak256(clearData), "clear opData is canonical");
         vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
         proxy.executeProposal(clearId, clearData);
         tier = cm.getPayerTier(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject);
+        assertEq(tier.stablePercent, 0);
         assertFalse(tier.isSet);
     }
 
     function test_typedPayerTierProposalBecomesStaleAfterBridgeRotation() public {
         address signedBridge = address(bridge);
         bytes32 feeSubject = bytes32(uint256(uint160(user)));
+        PayerTier memory tier = PayerTier({stablePercent: 70, isSet: true});
         uint256 nonce = proxy.proposalNonce();
         uint256 deadline = vm.getBlockTimestamp() + 1 days;
         (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
@@ -258,7 +267,7 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
             RGB_CHAIN_ID,
             address(token),
             feeSubject,
-            70,
+            tier,
             nonce,
             deadline
         );
@@ -266,14 +275,14 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
             SOURCE_CHAIN_ID,
             RGB_CHAIN_ID,
             feeSubject,
-            70,
+            tier,
             nonce,
             deadline,
             bitmap,
             MultisigHelper.signAll(vm, tierDigest, pks)
         );
         bytes memory tierData =
-            abi.encode(signedBridge, SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject, uint256(70));
+            abi.encode(signedBridge, SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject, tier);
 
         address replacementBridge = makeAddr("tier-replacement-bridge");
         nonce = proxy.proposalNonce();

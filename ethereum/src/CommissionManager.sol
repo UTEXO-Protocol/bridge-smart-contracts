@@ -534,28 +534,22 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         uint256 destChainId,
         address token,
         bytes32 feeSubject,
-        uint256 stablePercent
+        PayerTier calldata tier
     ) external onlyOwner {
         if (token == address(0)) revert InvalidToken();
         if (feeSubject == bytes32(0)) revert InvalidFeeSubject();
-        if (stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
 
         bytes32 routeKey = buildRouteKey(sourceChainId, destChainId, token);
-        PayerTier memory tier = PayerTier({stablePercent: stablePercent, isSet: true});
-        payerTiers[routeKey][feeSubject] = tier;
-        emit PayerTierUpdated(sourceChainId, destChainId, token, feeSubject, tier);
-    }
-
-    /// @inheritdoc ICommissionManager
-    function clearPayerTier(uint256 sourceChainId, uint256 destChainId, address token, bytes32 feeSubject)
-        external
-        onlyOwner
-    {
-        if (token == address(0)) revert InvalidToken();
-        if (feeSubject == bytes32(0)) revert InvalidFeeSubject();
-
-        delete payerTiers[buildRouteKey(sourceChainId, destChainId, token)][feeSubject];
-        emit PayerTierCleared(sourceChainId, destChainId, token, feeSubject);
+        if (!tier.isSet) {
+            delete payerTiers[routeKey][feeSubject];
+            emit PayerTierUpdated(
+                sourceChainId, destChainId, token, feeSubject, PayerTier({stablePercent: 0, isSet: false})
+            );
+        } else {
+            if (tier.stablePercent > _MAX_STABLE_PERCENT) revert StablePercentTooHigh();
+            payerTiers[routeKey][feeSubject] = tier;
+            emit PayerTierUpdated(sourceChainId, destChainId, token, feeSubject, tier);
+        }
     }
 
     /// @notice Updates `bridgeAddress` (only that address may credit commissions).

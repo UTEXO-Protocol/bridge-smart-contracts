@@ -34,7 +34,9 @@ contract CommissionManagerClientTiersTest is CommissionManagerTestBase {
 
     function _setTier(uint256 sourceChainId, uint256 destChainId, bytes32 subject, uint256 stablePercent) private {
         vm.prank(owner);
-        cm.setPayerTier(sourceChainId, destChainId, address(token), subject, stablePercent);
+        cm.setPayerTier(
+            sourceChainId, destChainId, address(token), subject, PayerTier({stablePercent: stablePercent, isSet: true})
+        );
     }
 
     function test_setAndClearRouteScopedTier() public {
@@ -47,28 +49,52 @@ contract CommissionManagerClientTiersTest is CommissionManagerTestBase {
         assertEq(stored.stablePercent, 70);
         assertTrue(stored.isSet);
 
+        PayerTier memory cleared = PayerTier({stablePercent: 0, isSet: false});
         vm.expectEmit(true, true, true, true, address(cm));
-        emit ICommissionManager.PayerTierCleared(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), CLIENT);
+        emit ICommissionManager.PayerTierUpdated(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), CLIENT, cleared);
         vm.prank(owner);
-        cm.clearPayerTier(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), CLIENT);
+        cm.setPayerTier(
+            SRC_CHAIN_ID, DST_CHAIN_ID, address(token), CLIENT, PayerTier({stablePercent: 9001, isSet: false})
+        );
         stored = cm.getPayerTier(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), CLIENT);
         assertEq(stored.stablePercent, 0);
         assertFalse(stored.isSet);
     }
 
+    function test_unsetTierRestoresDefaultAndIgnoresStablePercent() public {
+        _setRule(SRC_CHAIN_ID, DST_CHAIN_ID, 100, 0, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
+        _setTier(SRC_CHAIN_ID, DST_CHAIN_ID, CLIENT, 70);
+
+        vm.prank(owner);
+        cm.setPayerTier(
+            SRC_CHAIN_ID,
+            DST_CHAIN_ID,
+            address(token),
+            CLIENT,
+            PayerTier({stablePercent: type(uint256).max, isSet: false})
+        );
+
+        (uint256 fee,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000, CLIENT);
+        assertEq(fee, 10_000);
+    }
+
     function test_tierAdministrationRejectsInvalidCalls() public {
         vm.startPrank(owner);
         vm.expectRevert(ICommissionManager.InvalidFeeSubject.selector);
-        cm.setPayerTier(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), bytes32(0), 70);
+        cm.setPayerTier(
+            SRC_CHAIN_ID, DST_CHAIN_ID, address(token), bytes32(0), PayerTier({stablePercent: 70, isSet: true})
+        );
         vm.expectRevert(ICommissionManager.InvalidToken.selector);
-        cm.setPayerTier(SRC_CHAIN_ID, DST_CHAIN_ID, address(0), CLIENT, 70);
+        cm.setPayerTier(SRC_CHAIN_ID, DST_CHAIN_ID, address(0), CLIENT, PayerTier({stablePercent: 70, isSet: true}));
         vm.expectRevert(ICommissionManager.StablePercentTooHigh.selector);
-        cm.setPayerTier(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), CLIENT, 9001);
+        cm.setPayerTier(
+            SRC_CHAIN_ID, DST_CHAIN_ID, address(token), CLIENT, PayerTier({stablePercent: 9001, isSet: true})
+        );
         vm.stopPrank();
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
-        cm.setPayerTier(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), CLIENT, 70);
+        cm.setPayerTier(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), CLIENT, PayerTier({stablePercent: 70, isSet: true}));
     }
 
     function test_lowerTierDiscountsOnlySelectedClient() public {

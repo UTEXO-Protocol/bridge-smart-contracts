@@ -2,7 +2,12 @@
 pragma solidity 0.8.35;
 
 import {IBridge} from "../../src/interfaces/IBridge.sol";
-import {CommissionConfig, CommissionCurrency, CommissionSide} from "../../src/interfaces/ICommissionManager.sol";
+import {
+    CommissionConfig,
+    CommissionCurrency,
+    CommissionSide,
+    PayerTier
+} from "../../src/interfaces/ICommissionManager.sol";
 import {IMultisigProxy} from "../../src/interfaces/IMultisigProxy.sol";
 import {MultisigHelper} from "../helpers/MultisigHelper.sol";
 import {MultisigProxyTestBase} from "./MultisigProxyTestBase.sol";
@@ -107,8 +112,20 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
             address(token),
             CommissionConfig(500, 0, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN, true)
         );
-        cm.setPayerTier(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), bytes32(uint256(uint160(recipient))), 200);
-        cm.setPayerTier(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), bytes32(uint256(uint160(address(proxy)))), 0);
+        cm.setPayerTier(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            bytes32(uint256(uint160(recipient))),
+            PayerTier({stablePercent: 200, isSet: true})
+        );
+        cm.setPayerTier(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            bytes32(uint256(uint160(address(proxy)))),
+            PayerTier({stablePercent: 0, isSet: true})
+        );
         vm.stopPrank();
 
         IBridge.FundsOutParams memory params = _fundsOutParams();
