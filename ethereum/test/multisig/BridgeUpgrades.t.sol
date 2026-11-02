@@ -96,7 +96,9 @@ contract MultisigBridgeUpgradesTest is MultisigProxyTestBase {
         address current = IBridgeProxy(address(bridge)).implementation();
         bytes memory errorData = abi.encodeWithSelector(IMultisigProxy.InvalidBridgeImplementation.selector, current);
         _expectRejectedBridgeUpgrade(current, "", errorData);
-        _expectRejectedBridgeUpgrade(current, abi.encodeCall(IBridge.fundsOut, (_fundsOutParams())), errorData);
+        _expectRejectedBridgeUpgrade(
+            current, abi.encodeCall(IBridge.fundsOut, (_fundsOutParams(), bytes32(0))), errorData
+        );
         _expectRejectedBridgeUpgrade(
             current, abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams())), errorData
         );
@@ -105,7 +107,7 @@ contract MultisigBridgeUpgradesTest is MultisigProxyTestBase {
     function test_upgrade_rejectsReleaseSelectorsOnDifferentImplementation() public {
         BridgeV2Mock candidate = new BridgeV2Mock();
         bytes[2] memory payloads = [
-            abi.encodeCall(IBridge.fundsOut, (_fundsOutParams())),
+            abi.encodeCall(IBridge.fundsOut, (_fundsOutParams(), bytes32(0))),
             abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams()))
         ];
         for (uint256 i; i < payloads.length; ++i) {
@@ -212,7 +214,7 @@ contract MultisigBridgeUpgradesTest is MultisigProxyTestBase {
     function test_upgrade_executionRejectsReleasePayloadsIndependently() public {
         BridgeV2Mock candidate = new BridgeV2Mock();
         bytes[2] memory payloads = [
-            abi.encodeCall(IBridge.fundsOut, (_fundsOutParams())),
+            abi.encodeCall(IBridge.fundsOut, (_fundsOutParams(), bytes32(0))),
             abi.encodeCall(IBridge.rebalanceLiquidity, (_rebalanceParams()))
         ];
         address originalImplementation = IBridgeProxy(address(bridge)).implementation();

@@ -22,7 +22,8 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
         vm.mockCall(
             address(cm),
             abi.encodeCall(
-                ICommissionManager.calculateFundsOutCommission, (RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(usdt0), AMOUNT)
+                ICommissionManager.calculateFundsOutCommission,
+                (RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(usdt0), AMOUNT, bytes32(uint256(uint160(recipient))))
             ),
             abi.encode(fee, uint256(0), net)
         );
@@ -334,7 +335,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
             params.settlementData
         );
         vm.prank(multisig);
-        bridge.fundsOut(params);
+        bridge.fundsOut(params, bytes32(uint256(uint160(params.recipient))));
 
         assertTrue(bridge.consumedBurnIds(params.burnId), "burn id consumed");
         assertEq(usdt0.balanceOf(address(bridge)), beforeState.bridgeBalance - releaseAmount, "bridge debit");

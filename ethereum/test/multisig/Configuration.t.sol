@@ -48,6 +48,8 @@ contract MultisigConfigurationTest is MultisigProxyTestBase {
         assertEq(uint256(IMultisigProxy.OperationType.TransferManagedOwnership), 17);
         assertEq(uint256(IMultisigProxy.OperationType.SetEmergencyGuardian), 18);
         assertEq(uint256(IMultisigProxy.OperationType.UpgradeBridgeImplementation), 19);
+        assertEq(uint256(IMultisigProxy.OperationType.SetPayerTier), 20);
+        assertEq(uint256(IMultisigProxy.OperationType.ClearPayerTier), 21);
     }
 
     function test_constructor_revertsOnZeroBridge() public {

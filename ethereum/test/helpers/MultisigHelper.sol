@@ -78,6 +78,14 @@ library MultisigHelper {
     bytes32 internal constant PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH =
         keccak256("ProposeWithdrawNativeCommissionCM(address target,uint256 amount,uint256 nonce,uint256 deadline)");
 
+    bytes32 internal constant PROPOSE_SET_PAYER_TIER_TYPEHASH = keccak256(
+        "ProposeSetPayerTier(address target,address bridge,uint256 sourceChainId,uint256 destChainId,address token,bytes32 feeSubject,uint256 stablePercent,uint256 nonce,uint256 deadline)"
+    );
+
+    bytes32 internal constant PROPOSE_CLEAR_PAYER_TIER_TYPEHASH = keccak256(
+        "ProposeClearPayerTier(address target,address bridge,uint256 sourceChainId,uint256 destChainId,address token,bytes32 feeSubject,uint256 nonce,uint256 deadline)"
+    );
+
     bytes32 internal constant PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH = keccak256(
         "ProposeUpdateCommissionManager(address target,address newCommissionManager,uint256 nonce,uint256 deadline)"
     );
@@ -451,6 +459,66 @@ library MultisigHelper {
         return toTypedDataHash(
             domainSep,
             keccak256(abi.encode(PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH, target, amount, nonce, deadline))
+        );
+    }
+
+    function digestProposeSetPayerTier(
+        bytes32 domainSep,
+        address target,
+        address bridge,
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        bytes32 feeSubject,
+        uint256 stablePercent,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(
+            domainSep,
+            keccak256(
+                abi.encode(
+                    PROPOSE_SET_PAYER_TIER_TYPEHASH,
+                    target,
+                    bridge,
+                    sourceChainId,
+                    destChainId,
+                    token,
+                    feeSubject,
+                    stablePercent,
+                    nonce,
+                    deadline
+                )
+            )
+        );
+    }
+
+    function digestProposeClearPayerTier(
+        bytes32 domainSep,
+        address target,
+        address bridge,
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        bytes32 feeSubject,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return toTypedDataHash(
+            domainSep,
+            keccak256(
+                abi.encode(
+                    PROPOSE_CLEAR_PAYER_TIER_TYPEHASH,
+                    target,
+                    bridge,
+                    sourceChainId,
+                    destChainId,
+                    token,
+                    feeSubject,
+                    nonce,
+                    deadline
+                )
+            )
         );
     }
 

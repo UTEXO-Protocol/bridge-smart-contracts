@@ -8,7 +8,13 @@ import {CommissionManager} from "../../src/CommissionManager.sol";
 import {RouteRegistry} from "../../src/RouteRegistry.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {IBridgeProxy} from "../../src/interfaces/IBridgeProxy.sol";
-import {CommissionConfig, CommissionCurrency, CommissionSide} from "../../src/interfaces/ICommissionManager.sol";
+import {
+    CommissionConfig,
+    CommissionCurrency,
+    CommissionSide,
+    ICommissionManager,
+    PayerTier
+} from "../../src/interfaces/ICommissionManager.sol";
 import {IMultisigProxy} from "../../src/interfaces/IMultisigProxy.sol";
 import {MultisigHelper} from "../helpers/MultisigHelper.sol";
 import {MultisigProxyTestBase} from "./MultisigProxyTestBase.sol";
@@ -142,7 +148,7 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
     }
 
     function test_adminExecute_rejectsFundsOutSelectorInAllLanes() public {
-        bytes memory callData = abi.encodeCall(IBridge.fundsOut, (_fundsOutParams()));
+        bytes memory callData = abi.encodeCall(IBridge.fundsOut, (_fundsOutParams(), bytes32(0)));
         _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
     }
 
@@ -159,6 +165,129 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
     function test_adminExecute_rejectsCommissionBindingSelectorsInAllLanes() public {
         bytes memory callData = abi.encodeCall(IBridge.setCommissionManager, (makeAddr("genericCm")));
         _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
+    }
+
+    function test_adminExecute_rejectsPayerTierSelectorsInAllLanes() public {
+        bytes32 feeSubject = bytes32(uint256(uint160(user)));
+        bytes[] memory callDatas = new bytes[](2);
+        callDatas[0] = abi.encodeCall(
+            ICommissionManager.setPayerTier, (SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject, uint256(70))
+        );
+        callDatas[1] = abi.encodeCall(
+            ICommissionManager.clearPayerTier, (SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject)
+        );
+        for (uint256 i; i < callDatas.length; ++i) {
+            _assertGenericPathsRejectSelector(callDatas[i], IMultisigProxy.ForbiddenCommissionManagerSelector.selector);
+        }
+    }
+
+    function test_typedPayerTierGovernanceDerivesBridgeTokenAndClearsTier() public {
+        bytes32 feeSubject = bytes32(uint256(uint160(user)));
+        uint256 stablePercent = 70;
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = vm.getBlockTimestamp() + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeSetPayerTier(
+            domainSep,
+            address(cm),
+            address(bridge),
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            address(token),
+            feeSubject,
+            stablePercent,
+            nonce,
+            deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes memory setData =
+            abi.encode(address(bridge), SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject, stablePercent);
+        bytes32 setId = proxy.proposeSetPayerTier(
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            feeSubject,
+            stablePercent,
+            nonce,
+            deadline,
+            bitmap,
+            MultisigHelper.signAll(vm, digest, pks)
+        );
+        IMultisigProxy.Proposal memory proposal = proxy.getProposal(setId);
+        assertEq(proposal.expectedTarget, address(cm));
+        assertEq(proposal.dataHash, keccak256(setData));
+
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
+        proxy.executeProposal(setId, setData);
+        PayerTier memory tier = cm.getPayerTier(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject);
+        assertEq(tier.stablePercent, stablePercent);
+        assertTrue(tier.isSet);
+
+        nonce = proxy.proposalNonce();
+        deadline = vm.getBlockTimestamp() + 1 days;
+        digest = MultisigHelper.digestProposeClearPayerTier(
+            domainSep,
+            address(cm),
+            address(bridge),
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            address(token),
+            feeSubject,
+            nonce,
+            deadline
+        );
+        bytes memory clearData = abi.encode(address(bridge), SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject);
+        bytes32 clearId = proxy.proposeClearPayerTier(
+            SOURCE_CHAIN_ID, RGB_CHAIN_ID, feeSubject, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks)
+        );
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
+        proxy.executeProposal(clearId, clearData);
+        tier = cm.getPayerTier(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject);
+        assertFalse(tier.isSet);
+    }
+
+    function test_typedPayerTierProposalBecomesStaleAfterBridgeRotation() public {
+        address signedBridge = address(bridge);
+        bytes32 feeSubject = bytes32(uint256(uint160(user)));
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = vm.getBlockTimestamp() + 1 days;
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 tierDigest = MultisigHelper.digestProposeSetPayerTier(
+            domainSep,
+            address(cm),
+            signedBridge,
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            address(token),
+            feeSubject,
+            70,
+            nonce,
+            deadline
+        );
+        bytes32 tierId = proxy.proposeSetPayerTier(
+            SOURCE_CHAIN_ID,
+            RGB_CHAIN_ID,
+            feeSubject,
+            70,
+            nonce,
+            deadline,
+            bitmap,
+            MultisigHelper.signAll(vm, tierDigest, pks)
+        );
+        bytes memory tierData =
+            abi.encode(signedBridge, SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), feeSubject, uint256(70));
+
+        address replacementBridge = makeAddr("tier-replacement-bridge");
+        nonce = proxy.proposalNonce();
+        bytes32 bridgeDigest = MultisigHelper.digestProposeUpdateBridge(domainSep, replacementBridge, nonce, deadline);
+        bytes32 bridgeId = proxy.proposeUpdateBridge(
+            replacementBridge, nonce, deadline, bitmap, MultisigHelper.signAll(vm, bridgeDigest, pks)
+        );
+
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
+        proxy.executeProposal(bridgeId, abi.encode(replacementBridge));
+        vm.expectRevert(
+            abi.encodeWithSelector(IMultisigProxy.StaleBridgeTarget.selector, signedBridge, replacementBridge)
+        );
+        proxy.executeProposal(tierId, tierData);
     }
 
     function test_proposeUpdateCommissionManager_updatesManagerAfterTimelock() public {

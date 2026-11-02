@@ -29,7 +29,7 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
 
         // 2% of 10_000_000 = 200_000, plus the flat 50_000.
         (uint256 tok,, uint256 net) =
-            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000, bytes32(0));
         assertEq(tok, 250_000, "percentage + flat");
         assertEq(net, 9_750_000, "net is gross minus total");
     }
@@ -40,7 +40,7 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         cm.setGlobalDefaults(0, 50_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
         (uint256 tok,, uint256 net) =
-            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000, bytes32(0));
         assertEq(tok, 50_000);
         assertEq(net, 9_950_000);
     }
@@ -50,7 +50,8 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         vm.prank(owner);
         cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
-        (uint256 tok,, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1234);
+        (uint256 tok,, uint256 net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1234, bytes32(0));
         assertEq(tok, 0);
         assertEq(net, 1234);
     }
@@ -62,7 +63,8 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         cm.setGlobalDefaults(400, 10, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
         // 4% of 24 rounds to 0, but the flat 10 keeps the total non-zero.
-        (uint256 tok,, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24);
+        (uint256 tok,, uint256 net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24, bytes32(0));
         assertEq(tok, 10);
         assertEq(net, 14);
     }
@@ -73,7 +75,7 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         cm.setGlobalDefaults(200, 50_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.NATIVE);
 
         (uint256 tok, uint256 nativeFee, uint256 net) =
-            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000, bytes32(0));
         assertEq(tok, 0, "native route takes no token fee");
         assertEq(net, 10_000_000, "full amount bridges");
         // 250_000 token units at 18 decimals, $2000/ETH.
@@ -92,13 +94,15 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
             _cfg(100, 7_000, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN)
         );
 
-        (uint256 tok,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000);
+        (uint256 tok,,) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000, bytes32(0));
         assertEq(tok, 10_000 + 7_000);
 
         // Clearing it falls back to the (fee-free) globals.
         vm.prank(owner);
         cm.clearCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, address(token));
-        (uint256 tokAfter,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000);
+        (uint256 tokAfter,,) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000, bytes32(0));
         assertEq(tokAfter, 0);
     }
 
@@ -111,7 +115,7 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
 
         // No per-route override exists, so the quote resolves through the
         // global fallback and must include the flat part.
-        assertEq(cm.calculateTotalFee(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000), 12_345);
+        assertEq(cm.calculateTotalFee(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000, bytes32(0)), 12_345);
     }
 
     function test_baseFee_appliesOnFundsOut() public {
@@ -119,7 +123,7 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         cm.setGlobalDefaults(400, 50_000, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
 
         (uint256 tok,, uint256 net) =
-            cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+            cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000, bytes32(0));
         assertEq(tok, 400_000 + 50_000, "percentage + flat on release");
         assertEq(net, 9_550_000);
     }
@@ -127,7 +131,8 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
     function test_baseFee_zeroStillAllowedOnFundsOut() public {
         vm.prank(owner);
         cm.setGlobalDefaults(400, 0, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
-        (uint256 tok,,) = cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000);
+        (uint256 tok,,) =
+            cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000, bytes32(0));
         assertEq(tok, 40_000);
     }
 
@@ -162,13 +167,14 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         vm.prank(owner);
         cm.setGlobalDefaults(0, 1_800_000, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN);
 
-        (uint256 tok,,) = cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000);
+        (uint256 tok,,) =
+            cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000, bytes32(0));
         assertEq(tok, 1_800_000);
 
         MockDepositFloor(BRIDGE).setMinFundsOutAmount(1_000_000);
 
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.FeeAboveAmountFloor.selector, 1_800_000, 1_000_000));
-        cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000);
+        cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000, bytes32(0));
     }
 
     /// @dev NATIVE is still unrepresentable on a release, flat fee or not.
@@ -223,14 +229,15 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         cm.setGlobalDefaults(0, 900_000, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
         // Valid at the original floor.
-        (uint256 tok,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000);
+        (uint256 tok,,) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000, bytes32(0));
         assertEq(tok, 900_000);
 
         // Bridge governance lowers the floor under the already-stored rule.
         MockDepositFloor(BRIDGE).setMinFundsInAmount(500_000);
 
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.FeeAboveAmountFloor.selector, 900_000, 500_000));
-        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000);
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 5_000_000, bytes32(0));
     }
 
     /// @dev A zero-fee quote stays unchanged when the mock floor exceeds the
@@ -239,11 +246,11 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         vm.prank(owner);
         cm.setGlobalDefaults(0, 0, 100, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
         (uint256 beforeFee,, uint256 beforeNet) =
-            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), DEPOSIT_FLOOR);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), DEPOSIT_FLOOR, bytes32(0));
         MockDepositFloor(BRIDGE).setMinFundsInAmount(DEPOSIT_FLOOR * 2);
 
         (uint256 tok,, uint256 net) =
-            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), DEPOSIT_FLOOR);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), DEPOSIT_FLOOR, bytes32(0));
         assertEq(tok, 0);
         assertEq(tok, beforeFee, "zero fee is unchanged by the higher floor");
         assertEq(net, beforeNet, "net quote is unchanged by the higher floor");
@@ -253,7 +260,8 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         vm.expectRevert(ICommissionManager.AmountFloorUnavailable.selector);
         cm.depositFloor();
 
-        (tok,, net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), DEPOSIT_FLOOR);
+        (tok,, net) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), DEPOSIT_FLOOR, bytes32(0));
         assertEq(tok, beforeFee, "zero fee does not require a readable floor");
         assertEq(net, beforeNet, "unavailable floor preserves the full net quote");
     }
@@ -269,7 +277,7 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         cm.setBridgeAddress(makeAddr("floorless-bridge"));
 
         (uint256 tok,, uint256 net) =
-            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000, bytes32(0));
         assertEq(tok, 400_000, "percentage still quoted");
         assertEq(net, 9_600_000);
     }
@@ -308,7 +316,7 @@ contract CommissionManagerBaseFeesTest is CommissionManagerTestBase {
         cm.setBridgeAddress(makeAddr("not-a-contract-either"));
 
         vm.expectRevert(ICommissionManager.AmountFloorUnavailable.selector);
-        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000);
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 10_000_000, bytes32(0));
     }
 
     function test_amountFloor_revertsWhenBridgeGetterFails() public {

@@ -28,7 +28,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
     }
 
     function _nativeQuote(uint256 amount) private view returns (uint256 quote) {
-        (, quote,) = cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
+        (, quote,) = cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount, bytes32(0));
     }
 
     // ========================================================================
@@ -295,7 +295,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         _setFundsInNativeRule(percent);
 
         (uint256 tokenC, uint256 nativeC, uint256 net) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT, bytes32(0));
         assertEq(tokenC, 0);
         assertGt(nativeC, 0);
         assertEq(net, AMOUNT);

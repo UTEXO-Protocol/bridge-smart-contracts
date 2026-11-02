@@ -9,7 +9,7 @@ contract ZeroNetCommissionManager {
         bridgeAddress = bridge_;
     }
 
-    function calculateFundsOutCommission(uint256, uint256, address, uint256 amount)
+    function calculateFundsOutCommission(uint256, uint256, address, uint256 amount, bytes32)
         external
         pure
         returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)

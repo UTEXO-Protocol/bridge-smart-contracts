@@ -137,7 +137,8 @@ contract BridgeProxyTest is Test {
                     proof: "",
                     settlementData: settlement,
                     sourceBurnTxId: bytes32(uint256(0xabcdef))
-                })
+                }),
+                bytes32(uint256(uint160(owner)))
             );
             vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidBurnId.selector, 0, expectedBurnId));
             vm.prank(owner);

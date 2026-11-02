@@ -21,7 +21,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         _configTokenCommissionRoutes(0, 0);
 
         (uint256 tInQuote,, uint256 netIn) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT, bytes32(0));
         assertEq(tInQuote, USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT, "quote in");
         assertEq(netIn, USER_DEPOSIT - tInQuote, "net in");
 
@@ -155,7 +155,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         );
 
         (, uint256 nativeQuote, uint256 netQuote) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), USER_DEPOSIT, bytes32(0));
         assertEq(netQuote, USER_DEPOSIT, "NATIVE: full amount bridges");
         // 2% of USER_DEPOSIT in token units, converted to wei via the feed.
         assertEq(nativeQuote, 10_000_000_000_000, "0.02 USD at 2000 USD per ETH quotes 1e13 wei");

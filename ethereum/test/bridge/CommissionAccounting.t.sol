@@ -130,7 +130,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         _setFundsInTokenRule(percent);
 
         (uint256 tokenCommission,, uint256 netAmount) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT, bytes32(0));
 
         // Snapshot every balance/pool/record this TOKEN-commission flow should touch.
         bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, netAmount);
@@ -192,7 +192,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         _setFundsInNativeRule(percent);
 
         (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT, bytes32(0));
         assertEq(tokenCommission, 0, "token fee is zero");
         assertGt(nativeCommission, 0, "native fee quoted");
         assertEq(netAmount, AMOUNT, "net token amount");
@@ -259,7 +259,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         _setFundsOutTokenRule(percent);
 
         (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
-            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(usdt0), releaseAmount);
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(usdt0), releaseAmount, bytes32(0));
         assertGt(tokenCommission, 0, "token fee quoted");
         assertEq(nativeCommission, 0, "native fee is zero");
         assertEq(netAmount, releaseAmount - tokenCommission, "net recipient amount");
@@ -327,7 +327,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         _setFundsInTokenRule(percent);
 
         (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT, bytes32(0));
         assertGt(tokenCommission, 0, "token fee quoted");
         assertEq(nativeCommission, 0, "native fee is zero");
 

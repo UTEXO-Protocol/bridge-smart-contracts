@@ -90,7 +90,8 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
                     proof,
                     settlementData,
                     SRC_BURN_TX_ID
-                )
+                ),
+                bytes32(uint256(uint160(recipient)))
             );
     }
 

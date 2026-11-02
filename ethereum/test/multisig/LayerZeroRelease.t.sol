@@ -76,7 +76,7 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
 
     function _quoteRelease() private view returns (ReleaseQuote memory quote) {
         (quote.tokenCommission, quote.nativeCommission, quote.netAmount) =
-            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT, bytes32(0));
     }
 
     function _authorizeRelease(IMultisigProxy.LzFundsOutParams memory params)
@@ -158,6 +158,27 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
             AMOUNT,
             "gross batch payout conserved"
         );
+    }
+
+    function test_lzFundsOutCall_pricesRealDestinationInsteadOfAdapter() public {
+        _setTokenCommission(500);
+        address mockOft = makeAddr("tier-mock-oft");
+        MockOutboundLZAdapter adapter = _deployLzAdapter(mockOft);
+        IMultisigProxy.LzFundsOutParams memory params =
+            _lzFundsOutParams(AMOUNT, keccak256("tier-lz-release"), _fundsInIds());
+
+        vm.startPrank(address(proxy));
+        cm.setPayerTier(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), params.recipient, 200);
+        cm.setPayerTier(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), bytes32(uint256(uint160(address(adapter)))), 0);
+        vm.stopPrank();
+
+        ReleaseAuthorization memory auth = _authorizeRelease(params);
+        vm.deal(address(this), LZ_NATIVE_FEE);
+        proxy.lzFundsOutCall{value: LZ_NATIVE_FEE}(params, auth.nonce, auth.deadline, auth.bitmap, auth.sigs);
+
+        uint256 expectedFee = AMOUNT * 200 / 10_000;
+        assertEq(cm.tokenCommissionPool(address(token)), expectedFee);
+        assertEq(token.balanceOf(mockOft), AMOUNT - expectedFee);
     }
 
     // Rollback: an insufficient LayerZero native fee reverts in

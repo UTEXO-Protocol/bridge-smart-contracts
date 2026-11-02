@@ -113,7 +113,7 @@ contract CommissionManagerFeePolicyTest is CommissionManagerTestBase {
                 ICommissionManager.CommissionRoundsToZero.selector, uint256(24), uint256(400), uint8(100)
             )
         );
-        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24);
+        cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24, bytes32(0));
     }
 
     /// @dev The same runtime invariant applies to outbound fee rules.
@@ -134,14 +134,14 @@ contract CommissionManagerFeePolicyTest is CommissionManagerTestBase {
                 ICommissionManager.CommissionRoundsToZero.selector, uint256(24), uint256(400), uint8(100)
             )
         );
-        cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24);
+        cm.calculateFundsOutCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 24, bytes32(0));
     }
 
     /// @dev A deliberately disabled fee remains valid; only active policies
     ///      promise a non-zero commission.
     function test_feePolicy_zeroFeePolicyStillAllowsSmallAmount() public view {
         (uint256 tokenFee, uint256 nativeFee, uint256 netAmount) =
-            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1, bytes32(0));
         assertEq(tokenFee, 0);
         assertEq(nativeFee, 0);
         assertEq(netAmount, 1);
@@ -173,7 +173,8 @@ contract CommissionManagerFeePolicyTest is CommissionManagerTestBase {
         vm.prank(owner);
         cm.setGlobalDefaults(90, 0, 10, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
 
-        (uint256 tok,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000);
+        (uint256 tok,,) =
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), 1_000_000, bytes32(0));
         assertEq(tok, 900_000, "90% charged");
     }
 
@@ -230,7 +231,7 @@ contract CommissionManagerFeePolicyTest is CommissionManagerTestBase {
         vm.prank(owner);
         cm.setGlobalDefaults(stablePercent, 0, multiplier, CommissionSide.FUNDS_IN, CommissionCurrency.TOKEN);
         (uint256 fee, uint256 nativeFee, uint256 net) =
-            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), amount);
+            cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, address(token), amount, bytes32(0));
         assertEq(cm.globalStablePercent(), stablePercent, "accepted numerator is stored");
         assertEq(cm.globalMultiplier(), multiplier, "accepted denominator is stored");
         assertEq(fee, amount * stablePercent / denominator, "quote uses the stored rate exactly");
