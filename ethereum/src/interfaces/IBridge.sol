@@ -29,6 +29,7 @@ interface IBridge {
     error ZeroAmount();
     error ZeroNetAmount();
     error InvalidRgbOpId();
+    error CirculatingSupplyOverflow(uint256 currentSupply, uint256 amount);
     error CommissionConservationBroken();
     error AmountBelowMinimum(uint256 amount, uint256 minimum);
     error InsufficientReceived(uint256 received, uint256 tokenCommission);
@@ -258,6 +259,10 @@ interface IBridge {
     ///      Bridge derives the claim id and reads the currently configured RGB
     ///      settlement module. Zero means that the module has no such record.
     function getFundsInBlock(uint256 rgbOpId, uint256 netAmount) external view returns (uint64 l2BlockPlusOne);
+
+    /// @notice Returns the accounted circulating supply for the canonical RGB network.
+    /// @dev The value is backed by `lockedLiquidity(827166)` and is always bounded to uint64.
+    function circulatingSupply() external view returns (uint64);
 
     /// @notice Deposits tokens from the configured adapter on behalf of a source-chain user.
     /// @dev The adapter authenticates `sourceChainId` and `sourceSender`. Native payment

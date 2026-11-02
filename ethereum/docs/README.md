@@ -87,6 +87,12 @@ zero means that a record is absent. This avoids historical `eth_getLogs` scans.
 The deadline is deliberately excluded from the backing id, so changing it
 cannot create another record for the same RGB mint.
 
+`circulatingSupply()` exposes the canonical RGB network's accounted liquidity
+as `uint64`. It is derived from `lockedLiquidity(827166)`, so deposits and RGB
+rebalance credits increase it, while releases and rebalances out of RGB decrease
+it. Every RGB credit is rejected if it would make its network supply exceed
+`uint64::MAX`; no duplicate supply state is stored.
+
 ### Releases and rebalances
 
 `fundsOut(FundsOutParams)` is owner-only. MultisigProxy exposes the typed
@@ -299,6 +305,10 @@ token, RGB operation and amount. `beforeBlock` is a call-time deadline rather
 than part of the permanent identity. Records are never deleted by `fundsOut`. A
 stored value of zero therefore means that the claim was not recorded; otherwise
 the value is the actual L2 block plus one.
+
+`circulatingSupply()` returns the accounted RGB supply as `uint64`. Successful
+locks increase it and releases decrease it; direct token transfers do not affect
+the counter. A lock that would make the supply exceed `uint64::MAX` is rejected.
 
 An RGB resolver can check one external anchor without scanning historical logs:
 

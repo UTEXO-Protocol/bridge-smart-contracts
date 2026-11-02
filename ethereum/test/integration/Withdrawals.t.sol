@@ -45,6 +45,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
         assertEq(bridge.availableGlobalOutflow(), 0, "full global burst consumed");
         assertEq(token.balanceOf(recipient), netOut, "recipient got net");
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), netIn * 9, "source liquidity debited by one");
+        assertEq(bridge.circulatingSupply(), netIn * 9, "circulating supply debited by one");
         assertTrue(bridge.consumedBurnIds(burnId), "burnId consumed");
         assertEq(rgbModule.fundsInRecords(opId), netIn, "mint record permanent");
         // Conservation: ten gross deposits are fully accounted for.

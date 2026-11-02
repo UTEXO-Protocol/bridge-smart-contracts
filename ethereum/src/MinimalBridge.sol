@@ -35,6 +35,11 @@ contract MinimalBridge is BridgeBase {
     /// @dev Zero means absent; otherwise the value is the actual L2 block plus one.
     mapping(bytes32 claimKey => uint64 l2BlockPlusOne) public fundsInRecords;
 
+    /// @notice Current amount of RGB units backed by this bridge.
+    /// @dev Increases on successful fundsIn and decreases on successful fundsOut.
+    ///      Direct token transfers do not affect this accounted supply.
+    uint64 public circulatingSupply;
+
     // =========================================================================
     // Events
     // =========================================================================
@@ -65,6 +70,12 @@ contract MinimalBridge is BridgeBase {
     /// @notice The lock was submitted at or after its exclusive maximum L2 block.
     error LockWindowExpired(uint256 l2Block, uint64 beforeBlock);
 
+    /// @notice A deposit would make the RGB circulating supply exceed uint64.
+    error CirculatingSupplyOverflow(uint64 currentSupply, uint256 amount);
+
+    /// @notice A release exceeds the accounted RGB circulating supply.
+    error AmountExceedsCirculatingSupply(uint256 amount, uint64 currentSupply);
+
     // =========================================================================
     // Constructor
     // =========================================================================
@@ -90,13 +101,20 @@ contract MinimalBridge is BridgeBase {
         bytes32 claimKey = rgbMintDepositId(operationId, amount);
         if (fundsInRecords[claimKey] != 0) revert DuplicateMintDeposit(claimKey);
 
+        uint256 newSupply = uint256(circulatingSupply) + amount;
+        if (newSupply > type(uint64).max) revert CirculatingSupplyOverflow(circulatingSupply, amount);
+
         // Safe after the explicit block-number bound above.
         // forge-lint: disable-next-line(unsafe-typecast)
         uint64 recordedBlockPlusOne = uint64(l2Block + 1);
 
         // Write before the token interaction so the same claim cannot be
-        // re-entered. A transfer failure reverts this write atomically.
+        // re-entered and supply remains consistent during the interaction.
+        // A transfer failure reverts both writes atomically.
         fundsInRecords[claimKey] = recordedBlockPlusOne;
+        // Safe after the explicit uint64 bound above.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        circulatingSupply = uint64(newSupply);
 
         IERC20(TOKEN).safeTransferFrom(msg.sender, address(this), amount);
 
@@ -136,6 +154,12 @@ contract MinimalBridge is BridgeBase {
     {
         if (recipient == address(0)) revert InvalidRecipientAddress();
         if (amount > IERC20(TOKEN).balanceOf(address(this))) revert AmountExceedBridgePool();
+        uint64 currentSupply = circulatingSupply;
+        if (amount > currentSupply) revert AmountExceedsCirculatingSupply(amount, currentSupply);
+
+        // Safe because amount cannot exceed the uint64 supply.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        circulatingSupply = currentSupply - uint64(amount);
 
         IERC20(TOKEN).safeTransfer(recipient, amount);
 
