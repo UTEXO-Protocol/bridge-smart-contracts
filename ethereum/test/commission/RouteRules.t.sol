@@ -25,7 +25,7 @@ contract CommissionManagerRouteRulesTest is CommissionManagerTestBase {
         vm.prank(owner);
         cm.setCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t, cfg);
 
-        (uint256 tok,, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 50_000);
+        (uint256 tok,, uint256 net) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 50_000, bytes32(0));
         assertEq(tok, 5000); // 10%
         assertEq(net, 45_000);
 
@@ -54,7 +54,7 @@ contract CommissionManagerRouteRulesTest is CommissionManagerTestBase {
         CommissionConfig memory stored = cm.getCommissionRule(SRC_CHAIN_ID, DST_CHAIN_ID, t);
         assertFalse(stored.isSet);
 
-        (uint256 tok,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 50_000);
+        (uint256 tok,,) = cm.calculateFundsInCommission(SRC_CHAIN_ID, DST_CHAIN_ID, t, 50_000, bytes32(0));
         assertEq(tok, 2000); // back to global 4%
     }
 

@@ -41,7 +41,7 @@ contract RouteRotatingCommissionManager {
         return _bridge;
     }
 
-    function calculateFundsInCommission(uint256, uint256, address, uint256 amount)
+    function calculateFundsInCommission(uint256, uint256, address, uint256 amount, bytes32)
         external
         pure
         returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)

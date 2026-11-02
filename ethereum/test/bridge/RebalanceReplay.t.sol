@@ -149,7 +149,8 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
                 proof: p.proof,
                 settlementData: bytes.concat(p.settlementDataOut, hex"00"),
                 sourceBurnTxId: p.sourceBurnTxId
-            })
+            }),
+            bytes32(uint256(uint160(recipient)))
         );
     }
 
@@ -165,7 +166,7 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, p.burnId));
         vm.prank(multisig);
-        bridge.fundsOut(release);
+        bridge.fundsOut(release, bytes32(uint256(uint160(release.recipient))));
     }
 
     /// @notice A physical release prevents rebalance of the same burn toward
@@ -174,7 +175,7 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         (IBridge.RebalanceParams memory p, IBridge.FundsOutParams memory release) = _seedMintBurnBurnOnBothPaths();
 
         vm.prank(multisig);
-        bridge.fundsOut(release);
+        bridge.fundsOut(release, bytes32(uint256(uint160(release.recipient))));
         assertTrue(bridge.consumedBurnIds(release.burnId), "fundsOut consumed the id");
         p.settlementDataOut = bytes.concat(p.settlementDataOut, hex"00");
         assertEq(_deriveRebalanceBurnId(p), release.burnId);

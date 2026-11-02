@@ -44,7 +44,7 @@ contract BridgeNullRoutesTest is BridgeTestBase {
             uint64(1)
         );
         vm.prank(multisig);
-        bridge.fundsOut(params);
+        bridge.fundsOut(params, bytes32(uint256(uint160(params.recipient))));
         assertEq(usdt0.balanceOf(recipient), AMOUNT, "attested release pays the recipient");
         assertEq(bridge.getContractBalance(), AMOUNT * 9, "attested release debits custody");
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT * 9, "attested release debits chain liquidity");
@@ -52,7 +52,7 @@ contract BridgeNullRoutesTest is BridgeTestBase {
         assertTrue(bridge.consumedBurnIds(params.burnId), "null hooks retain the common burn guard");
         vm.expectRevert(abi.encodeWithSelector(IBridge.BurnIdAlreadyConsumed.selector, params.burnId));
         vm.prank(multisig);
-        bridge.fundsOut(params);
+        bridge.fundsOut(params, bytes32(uint256(uint160(params.recipient))));
         assertEq(usdt0.balanceOf(recipient), AMOUNT, "replay pays no second release");
         assertEq(bridge.totalLockedLiquidity(), AMOUNT * 9, "replay debits no second release");
     }

@@ -89,11 +89,15 @@ cannot create another record for the same RGB mint.
 
 ### Releases and rebalances
 
-`fundsOut(FundsOutParams)` is owner-only. MultisigProxy exposes the typed
+`fundsOut(FundsOutParams, feeSubject)` is owner-only. MultisigProxy exposes the typed
 `fundsOutCall` and `lzFundsOutCall` enclave paths. The latter releases to the
 LayerZero adapter, then sends onward the measured token receipt. Bridge checks
 source liquidity, the burn replay key, outflow limits, route plugins and token
 commission conservation before paying the recipient.
+
+The proxy derives `feeSubject` rather than accepting it from the backend. Direct
+releases use the signed EVM recipient left-padded to `bytes32`; LayerZero releases
+use the signed final destination recipient, not the adapter address.
 
 `rebalanceLiquidity(RebalanceParams)` is reached through `rebalanceCall`.
 It debits one network's liquidity and credits another without moving tokens or
@@ -162,6 +166,22 @@ The token-denominated fee is `amount * stablePercent / multiplier^2 + baseFee`.
 The effective proportional rate is capped at 90%. Both components zero disable
 commission; an enabled fee must not round to zero.
 
+TOKEN rules may have a client-specific `stablePercent` for an exact
+`(sourceChainId, destChainId, token, feeSubject)` route. The effective fee is:
+
+```text
+amount * min(defaultStablePercent, clientStablePercent) / multiplier^2 + baseFee
+```
+
+A client rate may be zero and therefore waive only the proportional component;
+the route's `baseFee` still applies. Tiers never increase the default rate and do
+not apply to NATIVE commission. For deposits, direct calls use the caller padded
+to `bytes32`, while adapter deposits use the authenticated source sender.
+`SetPayerTier` with `isSet = false` removes the override and restores the default
+route rate; its supplied percentage is ignored and normalized to zero in the
+signed proposal. This differs from `{stablePercent: 0, isSet: true}`, which keeps
+an explicit zero-rate client tier.
+
 Deposits support TOKEN fees deducted from principal or NATIVE fees paid separately.
 Releases support TOKEN only. Native conversion assumes the bridge token is
 USD-pegged and uses the configured ETH/USD feed, heartbeat, sequencer status,
@@ -210,6 +230,7 @@ consume the regular proposal nonce.
 | `AdminExecuteAdapter` | Allowed calls to the current adapter |
 | `UpdateEnclaveSigners` / `UpdateFederationSigners` | Signer-set changes |
 | `WithdrawTokenCommissionCM` / `WithdrawNativeCommissionCM` | Withdraw commissions to the fixed recipient |
+| `SetPayerTier` | Set or clear a route-scoped TOKEN client rate; token is derived from Bridge |
 | `UpdateCommissionManager` | Update Bridge and proxy CM pointers atomically |
 | `SetRoute` / `UpdateRouteRegistry` | Route configuration / Bridge registry pointer |
 | `UpdateLZAdapter` / `DisableLZAdapter` | Set / clear the proxy's adapter target |
@@ -220,7 +241,7 @@ consume the regular proposal nonce.
 | `SetTimelockDuration` / `SetEmergencyGuardian` | Governance delay / guardian settings |
 
 Generic calls reject selectors reserved for enclave operations, proxy control,
-CM rotation, ownership transfer and typed commission withdrawals. Use the typed
+CM rotation, ownership transfer, payer-tier administration and typed commission withdrawals. Use the typed
 operations for those actions. `acceptOwnership()` remains available through the
 relevant generic lane.
 

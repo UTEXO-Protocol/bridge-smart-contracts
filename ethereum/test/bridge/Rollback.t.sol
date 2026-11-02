@@ -86,7 +86,8 @@ contract BridgeRollbackTest is BridgeTestBase {
 
         uint256 expectedNet = amount;
         if (failureMode == MODE_COMMISSION_FORWARDING_REVERT) {
-            (,, expectedNet) = cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
+            (,, expectedNet) =
+                cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount, bytes32(0));
         }
         bytes32 expectedOpId = failureMode == MODE_SETTLEMENT_MODULE_REVERT
             ? _deriveOpId(
@@ -141,7 +142,7 @@ contract BridgeRollbackTest is BridgeTestBase {
         _setFundsInTokenRule(percent);
 
         (uint256 tokenCommission,, uint256 netAmount) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT, bytes32(0));
         assertGt(tokenCommission, 0, "token fee quoted");
         assertLt(netAmount, AMOUNT, "net below gross");
 

@@ -102,7 +102,8 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
                 proof: _proof(),
                 settlementData: settlementData,
                 sourceBurnTxId: bytes32(0)
-            })
+            }),
+            bytes32(uint256(uint160(recipient)))
         );
     }
 

@@ -290,7 +290,8 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                 proof: proof,
                 settlementData: settlementData,
                 sourceBurnTxId: sourceBurnTxId
-            })
+            }),
+            bytes32(uint256(uint160(payoutRecipient)))
         );
     }
 
@@ -315,7 +316,8 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                 proof,
                 settlementData,
                 SRC_BURN_TX_ID
-            )
+            ),
+            bytes32(uint256(uint160(recipient_)))
         );
     }
 

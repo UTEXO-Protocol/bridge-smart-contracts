@@ -319,7 +319,8 @@ interface IBridge {
     ///      token-bucket library; bucket state is exposed via the `chainBuckets`
     ///      / `globalBucket` getters and the `availableOutflow` previews.
     ///      Requires token commission + net payout == gross amount, with a non-zero net payout.
-    function fundsOut(FundsOutParams calldata params) external;
+    /// @param feeSubject Authenticated destination identity used for an optional payer tier.
+    function fundsOut(FundsOutParams calldata params, bytes32 feeSubject) external;
 
     /// @notice Accounting migration parameters for a rebalance.
     /// @param amount                 Token amount moved between liquidity buckets, without

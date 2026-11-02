@@ -440,7 +440,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     // =========================================================================
 
     /// @inheritdoc IBridge
-    function fundsOut(FundsOutParams calldata fundsOutParams)
+    function fundsOut(FundsOutParams calldata fundsOutParams, bytes32 feeSubject)
         external
         override
         onlyOwner
@@ -476,7 +476,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         // Releases charge only token commission. Enforce conservation here
         // independently of the replaceable manager's quote implementation.
         (uint256 tokenCommission,, uint256 netAmount) = commissionManager.calculateFundsOutCommission(
-            fundsOutParams.sourceChainId, fundsOutParams.destinationChainId, TOKEN, fundsOutParams.amount
+            fundsOutParams.sourceChainId, fundsOutParams.destinationChainId, TOKEN, fundsOutParams.amount, feeSubject
         );
 
         // Equivalent to tokenCommission + netAmount == amount, without risking
@@ -774,7 +774,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
 
         // Quote on the requested amount; derive net liquidity from the actual token receipt.
         (uint256 tokenCommission, uint256 nativeCommission,) =
-            commissionManager.calculateFundsInCommission(sourceChainId, destinationChainId, TOKEN, amount);
+            commissionManager.calculateFundsInCommission(sourceChainId, destinationChainId, TOKEN, amount, sourceSender);
 
         // Direct deposits pay the quote and receive a surplus refund.
         // Adapter deposits pay the full supplied value within the symmetric tolerance.

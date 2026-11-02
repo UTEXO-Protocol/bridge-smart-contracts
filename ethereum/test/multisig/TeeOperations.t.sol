@@ -2,7 +2,12 @@
 pragma solidity 0.8.35;
 
 import {IBridge} from "../../src/interfaces/IBridge.sol";
-import {CommissionConfig, CommissionCurrency, CommissionSide} from "../../src/interfaces/ICommissionManager.sol";
+import {
+    CommissionConfig,
+    CommissionCurrency,
+    CommissionSide,
+    PayerTier
+} from "../../src/interfaces/ICommissionManager.sol";
 import {IMultisigProxy} from "../../src/interfaces/IMultisigProxy.sol";
 import {MultisigHelper} from "../helpers/MultisigHelper.sol";
 import {MultisigProxyTestBase} from "./MultisigProxyTestBase.sol";
@@ -37,7 +42,7 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
         );
 
         (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) =
-            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT);
+            cm.calculateFundsOutCommission(RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), AMOUNT, bytes32(0));
         assertGt(tokenCommission, 0, "token fee quoted");
         assertEq(nativeCommission, 0, "native fee is zero");
         assertEq(netAmount, AMOUNT - tokenCommission, "net recipient amount");
@@ -97,6 +102,42 @@ contract MultisigTeeOperationsTest is MultisigProxyTestBase {
             AMOUNT,
             "gross fundsOut conserved"
         );
+    }
+
+    function test_fundsOutCall_pricesSignedRecipient() public {
+        vm.startPrank(address(proxy));
+        cm.setCommissionRule(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            CommissionConfig(500, 0, 100, CommissionSide.FUNDS_OUT, CommissionCurrency.TOKEN, true)
+        );
+        cm.setPayerTier(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            bytes32(uint256(uint160(recipient))),
+            PayerTier({stablePercent: 200, isSet: true})
+        );
+        cm.setPayerTier(
+            RGB_CHAIN_ID,
+            SOURCE_CHAIN_ID,
+            address(token),
+            bytes32(uint256(uint160(address(proxy)))),
+            PayerTier({stablePercent: 0, isSet: true})
+        );
+        vm.stopPrank();
+
+        IBridge.FundsOutParams memory params = _fundsOutParams();
+        uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
+        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
+        bytes32 digest = MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline);
+        (uint256[] memory pks, uint256 bitmap) = _encSigSet2of3();
+        proxy.fundsOutCall(params, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks));
+
+        uint256 expectedFee = AMOUNT * 200 / 10_000;
+        assertEq(cm.tokenCommissionPool(address(token)), expectedFee);
+        assertEq(token.balanceOf(recipient), AMOUNT - expectedFee);
     }
 
     function test_fundsOutCall_releasesViaBridge() public {

@@ -2,6 +2,7 @@
 pragma solidity 0.8.35;
 
 import {IBridge} from "./IBridge.sol";
+import {PayerTier} from "./ICommissionManager.sol";
 
 /// @title IMultisigProxy
 /// @notice Enclave authorization and federation governance for the bridge contracts.
@@ -88,7 +89,8 @@ interface IMultisigProxy {
         AdminExecuteRouteRegistry, // 16 — generic call into RouteRegistry (acceptOwnership, config, …)
         TransferManagedOwnership, // 17 — typed Ownable2Step transfer for an allowlisted governance target
         SetEmergencyGuardian, // 18 — rotate or disable the direct emergency guardian
-        UpgradeBridgeImplementation // 19 — upgrade the canonical ERC-1967 Bridge proxy
+        UpgradeBridgeImplementation, // 19 — upgrade the canonical ERC-1967 Bridge proxy
+        SetPayerTier // 20 — set or clear a route-scoped client commission ceiling
     }
 
     enum ProposalStatus {
@@ -334,6 +336,21 @@ interface IMultisigProxy {
     ///      Generic selector restrictions apply. `opData` is the raw ABI-encoded call.
     function proposeAdminExecuteCommissionManager(
         bytes calldata callData,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 fedBitmap,
+        bytes[] calldata fedSigs
+    ) external returns (bytes32);
+
+    /// @notice Proposes setting or clearing a client proportional-fee ceiling for one directional route.
+    /// @dev The token is resolved from the current Bridge and included in the signed proposal;
+    ///      callers cannot choose an alternate token. `tier.isSet == false` clears the override
+    ///      and normalizes `tier.stablePercent` to zero before signing and storing proposal data.
+    function proposeSetPayerTier(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        bytes32 feeSubject,
+        PayerTier calldata tier,
         uint256 nonce,
         uint256 deadline,
         uint256 fedBitmap,

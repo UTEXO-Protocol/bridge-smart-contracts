@@ -70,7 +70,7 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         _setFundsInTokenRule(percent);
 
         (uint256 tokenCommission,, uint256 netAmount) =
-            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount);
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), amount, bytes32(0));
 
         assertGt(tokenCommission, 0, "pre positive token fee");
         assertGt(netAmount, 0, "pre positive net");
@@ -225,7 +225,8 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
 
     function test_fundsIn_duplicateRgbMintRestoresNativeCommission() public {
         _setFundsInNativeRule(100);
-        (, uint256 fee,) = cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
+        (, uint256 fee,) =
+            cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT, bytes32(0));
         vm.deal(user, fee * 3);
         vm.prank(user);
         bytes32 original = bridge.fundsIn{value: fee}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());

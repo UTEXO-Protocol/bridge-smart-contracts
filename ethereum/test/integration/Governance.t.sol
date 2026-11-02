@@ -77,7 +77,8 @@ contract IntegrationGovernanceTest is IntegrationTestBase {
         vm.mockCall(
             address(replacement),
             abi.encodeCall(
-                ICommissionManager.calculateFundsOutCommission, (RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), amount)
+                ICommissionManager.calculateFundsOutCommission,
+                (RGB_CHAIN_ID, SOURCE_CHAIN_ID, address(token), amount, bytes32(uint256(uint160(params.recipient))))
             ),
             abi.encode(uint256(0), uint256(0), amount * 2)
         );

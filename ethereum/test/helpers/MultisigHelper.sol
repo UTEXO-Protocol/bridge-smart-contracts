@@ -3,6 +3,7 @@ pragma solidity 0.8.35;
 
 import {Vm} from "forge-std/Vm.sol";
 import {IBridge} from "../../src/interfaces/IBridge.sol";
+import {PayerTier} from "../../src/interfaces/ICommissionManager.sol";
 import {IMultisigProxy} from "../../src/interfaces/IMultisigProxy.sol";
 
 /// @notice EIP-712 digest builders and deterministic signature helpers.
@@ -77,6 +78,10 @@ library MultisigHelper {
 
     bytes32 internal constant PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH =
         keccak256("ProposeWithdrawNativeCommissionCM(address target,uint256 amount,uint256 nonce,uint256 deadline)");
+
+    bytes32 internal constant PROPOSE_SET_PAYER_TIER_TYPEHASH = keccak256(
+        "ProposeSetPayerTier(address target,address bridge,uint256 sourceChainId,uint256 destChainId,address token,bytes32 feeSubject,uint256 stablePercent,bool isSet,uint256 nonce,uint256 deadline)"
+    );
 
     bytes32 internal constant PROPOSE_UPDATE_COMMISSION_MANAGER_TYPEHASH = keccak256(
         "ProposeUpdateCommissionManager(address target,address newCommissionManager,uint256 nonce,uint256 deadline)"
@@ -451,6 +456,39 @@ library MultisigHelper {
         return toTypedDataHash(
             domainSep,
             keccak256(abi.encode(PROPOSE_WITHDRAW_NATIVE_COMMISSION_CM_TYPEHASH, target, amount, nonce, deadline))
+        );
+    }
+
+    function digestProposeSetPayerTier(
+        bytes32 domainSep,
+        address target,
+        address bridge,
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        bytes32 feeSubject,
+        PayerTier memory tier,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        uint256 stablePercent = tier.isSet ? tier.stablePercent : 0;
+        return toTypedDataHash(
+            domainSep,
+            keccak256(
+                abi.encode(
+                    PROPOSE_SET_PAYER_TIER_TYPEHASH,
+                    target,
+                    bridge,
+                    sourceChainId,
+                    destChainId,
+                    token,
+                    feeSubject,
+                    stablePercent,
+                    tier.isSet,
+                    nonce,
+                    deadline
+                )
+            )
         );
     }
 
