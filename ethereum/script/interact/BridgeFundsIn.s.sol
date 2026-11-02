@@ -37,7 +37,9 @@ contract BridgeFundsIn is Script {
         address token = bridge.TOKEN();
 
         ICommissionManager cm = bridge.commissionManager();
-        (, uint256 nativeCommission,) = cm.calculateFundsInCommission(block.chainid, destChainId, token, amount);
+        bytes32 feeSubject = bytes32(uint256(uint160(vm.addr(pk))));
+        (, uint256 nativeCommission,) =
+            cm.calculateFundsInCommission(block.chainid, destChainId, token, amount, feeSubject);
 
         // Attach a buffer; Bridge refunds any excess over its execution-time quote.
         uint256 nativeValue = nativeCommission + (nativeCommission * NATIVE_BUFFER_BPS) / 10_000;
