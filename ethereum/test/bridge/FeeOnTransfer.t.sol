@@ -141,7 +141,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
                 block.chainid,
                 address(s.token),
                 RGB_CHAIN_ID,
-                RGB_OP_ID,
+                RGB_LOCK_ID,
                 received
             )
         );
@@ -149,7 +149,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
 
         // BridgeFundsIn must carry gross `amount == AMOUNT` and `netAmount == received`.
         vm.expectEmit(true, true, false, true, address(s.bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(received));
+        emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(received));
         vm.expectEmit(true, true, true, true, address(s.bridge));
         emit IBridge.BridgeFundsIn(
             expectedOperationId,
@@ -190,7 +190,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
 
         assertEq(
             opId,
-            s.bridge.rgbMintDepositId(RGB_CHAIN_ID, RGB_OP_ID, received - tokenCommission),
+            s.bridge.rgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, received - tokenCommission),
             "id uses actual received minus nominal commission"
         );
 
@@ -233,7 +233,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
         // the 10% bucket burst.
         for (uint256 i = 1; i < 10; i++) {
             vm.prank(user);
-            s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + i));
+            s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + i));
         }
 
         // Ten equal deposits back the release, so `received` is ~10% of chain

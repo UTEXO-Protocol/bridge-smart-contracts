@@ -101,7 +101,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant MAX_REFILL_BPS = 1_000;
 
-    uint256 internal constant RGB_OP_ID = 0xABCDEF;
+    uint256 internal constant RGB_LOCK_ID = 0xABCDEF;
 
     uint256 internal constant ARBITRUM_L2_BLOCK = 1_000_000;
 
@@ -230,7 +230,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
         vm.stopPrank();
 
         vm.prank(user);
-        seedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
+        seedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK));
     }
 
     function _encSigSet2of3() internal pure returns (uint256[] memory pks, uint256 bitmap) {
@@ -355,7 +355,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
 
     /// @dev Rebalance params over the registered (RGB → SECONDARY_RGB) route: debit
     ///      leg is burn-backed (BtcRelay proof + seed record check), credit leg
-    ///      writes a record and threads a fresh RGB OpId. Canonical burnId is
+    ///      writes a record and threads a fresh RGB lock ID. Canonical burnId is
     ///      derived purely from the intent (no nonce), mirroring the Bridge formula.
     function _rebalanceParams() internal view returns (IBridge.RebalanceParams memory p) {
         bytes memory proof = abi.encode(BLOCK_HEIGHT, COMMITMENT_HASH, LATEST_HEIGHT, LATEST_COMMIT);
@@ -368,7 +368,7 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
             destinationAddress: DST_ADDR,
             proof: proof,
             settlementDataOut: _settlementFromRecords(_fundsInIds()),
-            settlementDataIn: abi.encode(RGB_OP_ID + 7, RGB_BEFORE_BLOCK),
+            settlementDataIn: abi.encode(RGB_LOCK_ID + 7, RGB_BEFORE_BLOCK),
             sourceBurnTxId: SRC_BURN_TX_ID
         });
 

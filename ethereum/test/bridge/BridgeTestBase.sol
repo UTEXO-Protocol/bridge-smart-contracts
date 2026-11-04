@@ -54,8 +54,8 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant AMOUNT = 1e18;
 
-    /// @notice Non-zero RGB OpId threaded through the RGB-route settlementData.
-    uint256 internal constant RGB_OP_ID = 0xABCDEF;
+    /// @notice Non-zero RGB lock ID threaded through the RGB-route settlementData.
+    uint256 internal constant RGB_LOCK_ID = 0xABCDEF;
 
     uint256 internal constant ARBITRUM_L2_BLOCK = 1_000_000;
 
@@ -185,19 +185,19 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     }
 
     /// @dev RGB-route `settlementData` for `fundsIn`: the module decodes a
-    ///      a non-zero `uint256 rgbOpId` and exclusive `uint64 beforeBlock`.
+    ///      a non-zero `uint256 lockId` and exclusive `uint64 beforeBlock`.
     function _rgbData() internal pure returns (bytes memory) {
-        return abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK);
+        return abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK);
     }
 
-    /// @dev RGB-route `settlementData` with an explicit rgbOpId (for tests that
+    /// @dev RGB-route `settlementData` with an explicit lock ID (for tests that
     ///      need distinct ids or the zero-id revert path).
-    function _rgbData(uint256 rgbOpId) internal pure returns (bytes memory) {
-        return abi.encode(rgbOpId, RGB_BEFORE_BLOCK);
+    function _rgbData(uint256 lockId) internal pure returns (bytes memory) {
+        return abi.encode(lockId, RGB_BEFORE_BLOCK);
     }
 
-    function _rgbData(uint256 rgbOpId, uint64 beforeBlock) internal pure returns (bytes memory) {
-        return abi.encode(rgbOpId, beforeBlock);
+    function _rgbData(uint256 lockId, uint64 beforeBlock) internal pure returns (bytes memory) {
+        return abi.encode(lockId, beforeBlock);
     }
 
     function _setArbitrumL2Block(uint256 l2Block) internal {
@@ -240,7 +240,11 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     }
 
     /// @dev The published RGB formula, independent of Bridge's helper.
-    function _deriveRgbOpId(uint256 rgbNetwork, uint256 rgbOpId, uint256 netAmount) internal view returns (bytes32) {
+    function _deriveRgbMintDepositId(uint256 rgbNetwork, uint256 lockId, uint256 netAmount)
+        internal
+        view
+        returns (bytes32)
+    {
         return keccak256(
             abi.encode(
                 keccak256(
@@ -250,7 +254,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                 block.chainid,
                 address(usdt0),
                 rgbNetwork,
-                rgbOpId,
+                lockId,
                 netAmount
             )
         );
@@ -380,7 +384,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
             uint256 topUp = requiredLiquidity - currentLiquidity;
             usdt0.mint(user, topUp);
             vm.prank(user);
-            bridge.fundsIn(topUp, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 1_000_000));
+            bridge.fundsIn(topUp, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1_000_000));
         }
 
         _configureMaxSafeBuckets();

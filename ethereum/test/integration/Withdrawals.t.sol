@@ -24,7 +24,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
     function test_fundsOut_burnReleasesAgainstRecordedDeposit() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         uint256 netIn = _netIn();
         uint256 inFee = USER_DEPOSIT - netIn;
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
@@ -62,7 +62,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
     function test_fundsOut_burnSameBurnCannotReplay() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         uint256 netIn = _netIn();
 
         (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", _validProof());
@@ -86,7 +86,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
     function test_fundsOut_burnBelowQuorumRejected() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         uint256 netIn = _netIn();
 
         (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", _validProof());
@@ -105,7 +105,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
     function test_fundsOut_burnExceedsBridgePoolRejected() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         uint256 poolPlusOne = token.balanceOf(address(bridge)) + 1;
 
         (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, poolPlusOne, "", _validProof());
@@ -123,7 +123,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
     function test_fundsOut_burnInvalidBtcProofRejected() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         uint256 netIn = _netIn();
 
         // Use the fresh (1-confirmation) block as the source: below the 6 required.
@@ -144,7 +144,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
     function test_fundsOut_burnUnknownDepositRejected() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        _depositN(10, RGB_OP_ID);
+        _depositN(10, RGB_LOCK_ID);
         uint256 netIn = _netIn();
 
         bytes32 fakeOpId = keccak256("nonexistent-deposit");
@@ -162,7 +162,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
     function test_fundsOut_burnEmergencyPauseStopsWithdrawals() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         uint256 netIn = _netIn();
 
         vm.prank(address(proxy));
@@ -183,7 +183,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
     function test_guardianPause_federationUnpauseRetriesSameSignedRelease() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         uint256 netIn = _netIn();
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
         (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", _validProof());
@@ -204,7 +204,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
 
         vm.prank(user);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID + 100, RGB_BEFORE_BLOCK));
+        bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_LOCK_ID + 100, RGB_BEFORE_BLOCK));
         _assertReleaseUnchanged(burnId, beforeState);
 
         uint256 unpauseNonce = proxy.emergencyNonce();

@@ -47,7 +47,7 @@ contract IntegrationGovernanceTest is IntegrationTestBase {
     function test_rotatedCommissionManager_inflatedQuoteRejectsSignedReleaseAndAllowsRetry() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         uint256 amount = _netIn();
         CommissionManager replacement = new CommissionManager(address(bridge), commissionReceiver);
         replacement.setCommissionRule(
