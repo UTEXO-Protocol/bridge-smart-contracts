@@ -133,7 +133,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
             cm.calculateFundsInCommission(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0), AMOUNT);
 
         // Snapshot every balance/pool/record this TOKEN-commission flow should touch.
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, netAmount);
+        bytes32 expectedOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, netAmount);
         LedgerSnapshot memory beforeState = _snapshotLedger(expectedOpId);
 
         assertEq(beforeState.bridgeToken, 0, "pre bridge token");
@@ -143,7 +143,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         assertEq(beforeState.record, 0, "pre record");
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(netAmount));
+        emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(netAmount));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit IBridge.BridgeFundsIn(
             expectedOpId,
@@ -200,7 +200,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         vm.deal(user, nativeCommission);
 
         // Snapshot token/native balances, pools, and RGB record touched by native-fee fundsIn.
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, netAmount);
+        bytes32 expectedOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, netAmount);
         LedgerSnapshot memory beforeState = _snapshotLedger(expectedOpId);
 
         assertEq(beforeState.bridgeToken, 0, "pre bridge token");
@@ -210,7 +210,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         assertEq(beforeState.record, 0, "pre record");
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(netAmount));
+        emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(netAmount));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit IBridge.BridgeFundsIn(
             expectedOpId,
@@ -334,7 +334,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         MockSettlementModule observingModule = new MockSettlementModule();
         observingModule.setFundsInBalanceProbe(address(usdt0), address(bridge));
         // Return a non-zero external id so Bridge emits the RGB-only FundsIn event.
-        observingModule.setExternalIdToReturn(RGB_OP_ID);
+        observingModule.setExternalIdToReturn(RGB_LOCK_ID);
 
         vm.prank(deployer);
         routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(observingModule));
@@ -352,7 +352,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         );
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(netAmount));
+        emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(netAmount));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit IBridge.BridgeFundsIn(
             expectedOpId,

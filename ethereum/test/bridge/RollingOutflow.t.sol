@@ -160,7 +160,7 @@ contract BridgeRollingOutflowTest is BridgeTestBase {
 
         usdt0.mint(user, 1_000e6);
         vm.prank(user);
-        bytes32 otherOpId = bridge.fundsIn(1_000e6, otherChain, DST_ADDR, _rgbData(RGB_OP_ID + otherChain));
+        bytes32 otherOpId = bridge.fundsIn(1_000e6, otherChain, DST_ADDR, _rgbData(RGB_LOCK_ID + otherChain));
 
         _seedRGB(100e6); // 1000 RGB + 1000 other; 10% bucket bursts
         vm.prank(multisig);
@@ -235,7 +235,7 @@ contract BridgeRollingOutflowTest is BridgeTestBase {
 
         usdt0.mint(user, 1_000e6);
         vm.prank(user);
-        bytes32 otherOpId = bridge.fundsIn(1_000e6, otherChain, DST_ADDR, _rgbData(RGB_OP_ID + otherChain));
+        bytes32 otherOpId = bridge.fundsIn(1_000e6, otherChain, DST_ADDR, _rgbData(RGB_LOCK_ID + otherChain));
 
         _seedRGB(100e6); // 1,000 RGB + 1,000 other
         vm.startPrank(multisig);

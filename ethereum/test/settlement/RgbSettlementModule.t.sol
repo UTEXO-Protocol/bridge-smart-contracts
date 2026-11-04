@@ -39,8 +39,8 @@ contract RgbSettlementModuleTest is Test {
 
     uint256 internal constant BURN_ID = 9_001;
 
-    /// @dev Non-zero RGB OpId threaded through `onFundsIn`'s settlementData.
-    uint256 internal constant RGB_OP_ID = 0xABCDEF;
+    /// @dev Non-zero RGB lock ID threaded through `onFundsIn`'s settlementData.
+    uint256 internal constant RGB_LOCK_ID = 0xABCDEF;
 
     uint256 internal constant L2_BLOCK = 1_000_000;
 
@@ -115,14 +115,14 @@ contract RgbSettlementModuleTest is Test {
         arr[1] = b;
     }
 
-    function _fundsInData(uint256 rgbOpId, uint64 beforeBlock) private pure returns (bytes memory) {
-        return abi.encode(rgbOpId, beforeBlock);
+    function _fundsInData(uint256 lockId, uint64 beforeBlock) private pure returns (bytes memory) {
+        return abi.encode(lockId, beforeBlock);
     }
 
-    /// @dev `onFundsIn` settlementData must decode to a non-zero RGB OpId.
+    /// @dev `onFundsIn` settlementData must decode to a non-zero RGB lock ID.
     function _record(bytes32 operationId, uint256 netAmount) private {
         vm.prank(routeRegistry);
-        module.onFundsIn(_fundsInCtx(operationId, netAmount), _fundsInData(RGB_OP_ID, BEFORE_BLOCK));
+        module.onFundsIn(_fundsInCtx(operationId, netAmount), _fundsInData(RGB_LOCK_ID, BEFORE_BLOCK));
     }
 
     function test_constructor_setsRouteRegistry() public view {
@@ -149,10 +149,10 @@ contract RgbSettlementModuleTest is Test {
         assertEq(module.fundsInRecordChainIds(TX_ID_1), RGB_CHAIN_ID, "record tagged with the RGB network");
     }
 
-    function test_onFundsIn_returnsRgbOpId() public {
+    function test_onFundsIn_returnsLockId() public {
         vm.prank(routeRegistry);
-        uint256 returned = module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_OP_ID, BEFORE_BLOCK));
-        assertEq(returned, RGB_OP_ID, "returns decoded rgb op id");
+        uint256 returned = module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_LOCK_ID, BEFORE_BLOCK));
+        assertEq(returned, RGB_LOCK_ID, "returns decoded RGB lock ID");
     }
 
     function test_onFundsIn_acceptsBlockImmediatelyBeforeDeadline() public {
@@ -160,7 +160,7 @@ contract RgbSettlementModuleTest is Test {
         _setL2Block(lastValidBlock);
 
         vm.prank(routeRegistry);
-        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_OP_ID, BEFORE_BLOCK));
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_LOCK_ID, BEFORE_BLOCK));
 
         assertEq(module.fundsInRecords(TX_ID_1), AMOUNT);
     }
@@ -170,7 +170,7 @@ contract RgbSettlementModuleTest is Test {
         _setL2Block(lastUint64Block);
 
         vm.prank(routeRegistry);
-        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_OP_ID, type(uint64).max));
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_LOCK_ID, type(uint64).max));
 
         assertEq(module.fundsInRecordL2Blocks(TX_ID_1), type(uint64).max);
     }
@@ -182,7 +182,7 @@ contract RgbSettlementModuleTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(RgbSettlementModule.LockWindowExpired.selector, BEFORE_BLOCK, BEFORE_BLOCK)
         );
-        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_OP_ID, BEFORE_BLOCK));
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_LOCK_ID, BEFORE_BLOCK));
 
         assertEq(module.fundsInRecords(TX_ID_1), 0);
         assertEq(module.fundsInRecordChainIds(TX_ID_1), 0);
@@ -195,7 +195,7 @@ contract RgbSettlementModuleTest is Test {
 
         vm.prank(routeRegistry);
         vm.expectRevert(abi.encodeWithSelector(RgbSettlementModule.LockWindowExpired.selector, lateBlock, BEFORE_BLOCK));
-        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_OP_ID, BEFORE_BLOCK));
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_LOCK_ID, BEFORE_BLOCK));
 
         assertEq(module.fundsInRecords(TX_ID_1), 0);
         assertEq(module.fundsInRecordChainIds(TX_ID_1), 0);
@@ -205,7 +205,7 @@ contract RgbSettlementModuleTest is Test {
     function test_onFundsIn_revertsOnLegacyOneWordPayload() public {
         vm.prank(routeRegistry);
         vm.expectRevert();
-        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), abi.encode(RGB_OP_ID));
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), abi.encode(RGB_LOCK_ID));
     }
 
     function test_getFundsInRecords_returnsAmountsInOrderAndZeroForMissing() public {
@@ -224,7 +224,7 @@ contract RgbSettlementModuleTest is Test {
         assertEq(amounts[2], AMOUNT);
     }
 
-    function test_onFundsIn_revertsOnZeroRgbOpId() public {
+    function test_onFundsIn_revertsOnZeroLockId() public {
         vm.prank(routeRegistry);
         vm.expectRevert(RgbSettlementModule.InvalidRgbOpId.selector);
         module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(0, BEFORE_BLOCK));
@@ -240,7 +240,7 @@ contract RgbSettlementModuleTest is Test {
 
         vm.prank(routeRegistry);
         vm.expectRevert(RgbSettlementModule.UnexpectedDestinationAddress.selector);
-        module.onFundsIn(ctx, _fundsInData(RGB_OP_ID, BEFORE_BLOCK));
+        module.onFundsIn(ctx, _fundsInData(RGB_LOCK_ID, BEFORE_BLOCK));
 
         assertEq(module.fundsInRecords(TX_ID_1), 0, "record not written");
         assertEq(module.fundsInRecordChainIds(TX_ID_1), 0, "network tag not written");
@@ -255,7 +255,7 @@ contract RgbSettlementModuleTest is Test {
 
         vm.prank(routeRegistry);
         vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
-        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_OP_ID, BEFORE_BLOCK));
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_LOCK_ID, BEFORE_BLOCK));
 
         assertEq(module.fundsInRecordL2Blocks(TX_ID_1), recordedBlock, "first block preserved");
     }
@@ -263,7 +263,7 @@ contract RgbSettlementModuleTest is Test {
     function test_onFundsIn_revertsIfNotRouteRegistry() public {
         vm.prank(attacker);
         vm.expectRevert(RgbSettlementModule.NotRouteRegistry.selector);
-        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_OP_ID, BEFORE_BLOCK));
+        module.onFundsIn(_fundsInCtx(TX_ID_1, AMOUNT), _fundsInData(RGB_LOCK_ID, BEFORE_BLOCK));
     }
 
     function test_beforeFundsOut_acceptsOneValidPair() public {
@@ -359,7 +359,7 @@ contract RgbSettlementModuleTest is Test {
         // A single module instance serving two RGB networks: a record minted to
         // OTHER_RGB_CHAIN_ID is citable by a burn from OTHER_RGB_CHAIN_ID.
         vm.prank(routeRegistry);
-        module.onFundsIn(_fundsInCtx(TX_ID_2, AMOUNT, OTHER_RGB_CHAIN_ID), _fundsInData(RGB_OP_ID, BEFORE_BLOCK));
+        module.onFundsIn(_fundsInCtx(TX_ID_2, AMOUNT, OTHER_RGB_CHAIN_ID), _fundsInData(RGB_LOCK_ID, BEFORE_BLOCK));
 
         vm.prank(routeRegistry);
         module.beforeFundsOut(_fundsOutCtx(OTHER_RGB_CHAIN_ID), _settlementData(_single(TX_ID_2)));

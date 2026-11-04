@@ -32,10 +32,10 @@ contract BridgeDepositsTest is BridgeTestBase {
 
     function test_fundsIn_rgbAcceptsEmptyDestinationAddressAndEmitsNonce() public {
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        bytes32 expectedOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT);
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
+        emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit IBridge.BridgeFundsIn(
             expectedOpId, sourceSender, user, 0, AMOUNT, AMOUNT, 0, 0, SOURCE_CHAIN_ID, RGB_CHAIN_ID, "", _rgbData()
@@ -70,9 +70,9 @@ contract BridgeDepositsTest is BridgeTestBase {
         uint256 balanceBefore = usdt0.balanceOf(user);
         vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID, RGB_BEFORE_BLOCK + 1));
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID, RGB_BEFORE_BLOCK + 1));
 
-        assertEq(opId1, _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT));
+        assertEq(opId1, _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT));
         assertEq(rgbModule.fundsInRecords(opId1), AMOUNT, "original record unchanged");
         assertEq(usdt0.balanceOf(user), balanceBefore, "duplicate token pull rolled back");
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT, "only one liquidity credit");
@@ -83,14 +83,14 @@ contract BridgeDepositsTest is BridgeTestBase {
         uint64 beforeBlock = RGB_BEFORE_BLOCK;
         _setArbitrumL2Block(beforeBlock);
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
-        bytes32 operationId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        bytes32 operationId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT);
         uint256 userBalance = usdt0.balanceOf(user);
 
         vm.expectRevert(
             abi.encodeWithSelector(RgbSettlementModule.LockWindowExpired.selector, beforeBlock, beforeBlock)
         );
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID, beforeBlock));
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID, beforeBlock));
 
         assertEq(usdt0.balanceOf(user), userBalance, "token pull rolled back");
         assertEq(usdt0.balanceOf(address(bridge)), 0, "bridge custody unchanged");

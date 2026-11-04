@@ -32,7 +32,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
 
         // Ten equal deposits make the release below exactly 10% of isolated
         // and global TVL — the configured bucket burst.
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
 
         uint256 tokenCommissionIn = tInQuote * 10;
         uint256 netBridgedIn = netIn;
@@ -163,8 +163,9 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         vm.deal(user, nativeQuote);
 
         vm.prank(user);
-        bytes32 opId =
-            bridge.fundsIn{value: nativeQuote}(USER_DEPOSIT, RGB_CHAIN_ID, "", abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
+        bytes32 opId = bridge.fundsIn{value: nativeQuote}(
+            USER_DEPOSIT, RGB_CHAIN_ID, "", abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK)
+        );
 
         assertEq(token.balanceOf(address(bridge)), USER_DEPOSIT, "bridge got full token amount");
         assertEq(token.balanceOf(address(cm)), 0, "cm no token commission");
@@ -208,7 +209,7 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
 
         uint256 inFee = USER_DEPOSIT * FUNDS_IN_PERCENT / FUNDS_IN_MULT / FUNDS_IN_MULT + inBaseFee;
         uint256 netIn = USER_DEPOSIT - inFee;
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         assertEq(token.balanceOf(user), 0, "user paid ten gross deposits");
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), netIn * 10, "chain credited net after both fee components");
         assertEq(bridge.totalLockedLiquidity(), netIn * 10, "total credited net after both fee components");

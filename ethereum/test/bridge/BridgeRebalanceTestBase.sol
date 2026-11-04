@@ -81,7 +81,7 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
 
     uint256 internal constant MAX_REFILL_BPS = 1_000;
 
-    uint256 internal constant RGB_OP_ID = 0xABCDEF;
+    uint256 internal constant RGB_LOCK_ID = 0xABCDEF;
 
     uint256 internal constant ARBITRUM_L2_BLOCK = 1_000_000;
 
@@ -180,12 +180,12 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
         vm.prank(user);
         usdt0.approve(address(bridge), type(uint256).max);
         vm.prank(user);
-        rgbSeedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
+        rgbSeedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK));
         vm.prank(user);
         bridge.fundsIn(AMOUNT * 10, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
         vm.prank(user);
         secondaryRgbSeedOpId = bridge.fundsIn(
-            AMOUNT * 10, SECONDARY_RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 100, RGB_BEFORE_BLOCK)
+            AMOUNT * 10, SECONDARY_RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 100, RGB_BEFORE_BLOCK)
         );
     }
 
@@ -252,7 +252,7 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
 
     /// @dev chain A → RGB rebalance params (credit-RGB: mint record + FundsIn),
     ///      canonical burnId filled in from the intent.
-    function _chainAToRgbParams(uint256 amount, uint256 rgbOpId)
+    function _chainAToRgbParams(uint256 amount, uint256 lockId)
         internal
         view
         returns (IBridge.RebalanceParams memory p)
@@ -266,8 +266,8 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
             destinationAddress: RGB_DST_ADDR,
             proof: "",
             settlementDataOut: _emptySettlement(),
-            settlementDataIn: abi.encode(rgbOpId, RGB_BEFORE_BLOCK),
-            sourceBurnTxId: bytes32(rgbOpId)
+            settlementDataIn: abi.encode(lockId, RGB_BEFORE_BLOCK),
+            sourceBurnTxId: bytes32(lockId)
         });
         p.burnId = _deriveRebalanceBurnId(p);
     }
@@ -321,8 +321,8 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
 
     /// @dev Burn-backed rebalance between two RGB mint/burn networks sharing
     ///      one canonical ledger. The source record is checked before minting
-    ///      a new destination record with its own RGB OpId.
-    function _secondaryRgbToRgbParams(uint256 amount, bytes32 referencedOpId, uint256 rgbOpId)
+    ///      a new destination record with its own RGB lock ID.
+    function _secondaryRgbToRgbParams(uint256 amount, bytes32 referencedOpId, uint256 lockId)
         internal
         view
         returns (IBridge.RebalanceParams memory p)
@@ -336,7 +336,7 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
             destinationAddress: RGB_DST_ADDR,
             proof: _proof(),
             settlementDataOut: _settlementFromRecord(referencedOpId),
-            settlementDataIn: abi.encode(rgbOpId, RGB_BEFORE_BLOCK),
+            settlementDataIn: abi.encode(lockId, RGB_BEFORE_BLOCK),
             sourceBurnTxId: referencedOpId
         });
         p.burnId = _deriveRebalanceBurnId(p);

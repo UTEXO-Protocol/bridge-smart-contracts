@@ -55,7 +55,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
         // valid RGB data, so the deposit clears the guard and records normally
         // under the bridge-derived operationId.
         uint256 max = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH();
-        bytes memory prefix = abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK);
+        bytes memory prefix = abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK);
         bytes memory atMax = bytes.concat(prefix, PayloadHelper.filledBytes(max - prefix.length));
 
         vm.prank(user);

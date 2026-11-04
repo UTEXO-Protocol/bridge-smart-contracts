@@ -124,17 +124,17 @@ interface IBridge {
 
     /// @notice RGB-route deposit event. Emitted only when the route's settlement
     ///         module returns a non-zero external correlation id — in practice
-    ///         the RGB OpId, which the RGB side consumes as `uint256`. Routes
+    ///         the RGB lock ID, which the RGB side consumes as `uint256`. Routes
     ///         whose module returns 0 (e.g. `NullSettlementModule`) do not emit
     ///         it. The canonical, route-agnostic id is `BridgeFundsIn.operationId`
     ///         (bytes32); this event exists for the RGB integration only.
     /// @param sender                 EVM caller Bridge saw (user, or the LZ adapter).
-    /// @param rgbOpId                RGB operation id, decoded by the route module from its
-    ///                               `settlementData`. Included in the RGB mint backing id
+    /// @param lockId                 Hash binding the RGB mint operation to its witness transaction,
+    ///                               decoded by the route module from `settlementData` and included in the backing id
     ///                               together with the network and actual net amount.
     /// @param amount                 Net amount bridged (post-commission), bounded to the RGB `u64`
     ///                               range.
-    event FundsIn(address indexed sender, uint256 indexed rgbOpId, uint64 amount);
+    event FundsIn(address indexed sender, uint256 indexed lockId, uint64 amount);
 
     /// @param operationId            Canonical bridge-side operation id, derived
     ///                               on-chain by Bridge. RGB uses the mint identity;
@@ -199,7 +199,7 @@ interface IBridge {
     ///         record of an accounting-only liquidity migration between two
     ///         chain buckets — no tokens move on this chain. When the
     ///         destination route's settlement module returns a non-zero RGB
-    ///         OpId, the standard `FundsIn` event is emitted alongside (the RGB
+    ///         lock ID, the standard `FundsIn` event is emitted alongside (the RGB
     ///         side consumes `FundsIn` only and needs no rebalance awareness).
     /// @param operationId            Credit-leg canonical id, derived on-chain (keys
     ///                               the destination route's settlement record).
@@ -240,7 +240,7 @@ interface IBridge {
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
     /// @param settlementData         Route payload; RGB uses
-    ///                               `abi.encode(uint256 rgbOpId, uint64 beforeBlock)`.
+    ///                               `abi.encode(uint256 lockId, uint64 beforeBlock)`.
     /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,
@@ -252,13 +252,13 @@ interface IBridge {
     /// @notice Canonical RGB mint backing id, reproducible from a validated
     ///         consignment and pinned Bridge, chain and token configuration.
     /// @dev Shared by deposits and RGB-destination rebalance credit legs.
-    function rgbMintDepositId(uint256 rgbNetwork, uint256 rgbOpId, uint256 netAmount) external view returns (bytes32);
+    function rgbMintDepositId(uint256 rgbNetwork, uint256 lockId, uint256 netAmount) external view returns (bytes32);
 
     /// @notice Returns the funded L2 height for one canonical RGB mint claim.
     /// @dev Matches rgb-lib's BFA resolver ABI for RGB network 827166. The
     ///      Bridge derives the claim id and reads the currently configured RGB
     ///      settlement module. Zero means that the module has no such record.
-    function getFundsInBlock(uint256 rgbOpId, uint256 netAmount) external view returns (uint64 l2BlockPlusOne);
+    function getFundsInBlock(uint256 lockId, uint256 netAmount) external view returns (uint64 l2BlockPlusOne);
 
     /// @notice Returns the accounted circulating supply for the canonical RGB network.
     /// @dev The value is backed by `lockedLiquidity(827166)` and is always bounded to uint64.
@@ -274,7 +274,7 @@ interface IBridge {
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
     /// @param settlementData         Route payload; RGB uses
-    ///                               `abi.encode(uint256 rgbOpId, uint64 beforeBlock)`.
+    ///                               `abi.encode(uint256 lockId, uint64 beforeBlock)`.
     /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,

@@ -92,7 +92,7 @@ contract BridgeRollbackTest is BridgeTestBase {
             ? _deriveOpId(
                 SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, amount, RGB_CHAIN_ID, DST_ADDR, _rgbData()
             )
-            : _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, expectedNet);
+            : _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, expectedNet);
         LedgerSnapshot memory before = _snapshotLedger(expectedOpId);
 
         vm.expectRevert(expectedRevert);
@@ -152,7 +152,7 @@ contract BridgeRollbackTest is BridgeTestBase {
         vm.prank(deployer);
         cm.setBridgeAddress(wrongBridge);
 
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, netAmount);
+        bytes32 expectedOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, netAmount);
         LedgerSnapshot memory beforeState = _snapshotLedger(expectedOpId);
 
         assertEq(beforeState.bridgeToken, 0, "pre bridge token");
