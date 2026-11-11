@@ -33,12 +33,12 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         routeRegistry.setRoute(customSrc, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
 
         // The nonce for this (sourceChainId, sourceSender) starts at 0.
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        bytes32 expectedOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT);
 
         // RGB deposits emit FundsIn with the adapter as sender, followed by
         // BridgeFundsIn with the authenticated source sender.
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(mockAdapter, RGB_OP_ID, uint64(AMOUNT));
+        emit IBridge.FundsIn(mockAdapter, RGB_LOCK_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit IBridge.BridgeFundsIn(
             expectedOpId,
@@ -78,10 +78,10 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         usdt0.approve(address(bridge), 1);
 
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
-        bytes32 secondOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID + 1, 1);
+        bytes32 secondOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID + 1, 1);
         vm.expectRevert(abi.encodeWithSelector(IBridge.CirculatingSupplyOverflow.selector, maxSupply, uint256(1)));
         vm.prank(adapter);
-        bridge.fundsIn(1, ADAPTER_SOURCE_CHAIN_ID, sourceSender, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 1));
+        bridge.fundsIn(1, ADAPTER_SOURCE_CHAIN_ID, sourceSender, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1));
 
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), maxSupply, "RGB supply unchanged");
         assertEq(bridge.totalLockedLiquidity(), maxSupply, "total liquidity unchanged");
@@ -122,7 +122,7 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         vm.prank(adapter);
         usdt0.approve(address(bridge), AMOUNT);
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
-        bytes32 operationId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        bytes32 operationId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT);
         _setArbitrumL2Block(RGB_BEFORE_BLOCK);
 
         vm.expectRevert(
@@ -130,7 +130,12 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         );
         vm.prank(adapter);
         bridge.fundsIn(
-            AMOUNT, ADAPTER_SOURCE_CHAIN_ID, sourceSender, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID, RGB_BEFORE_BLOCK)
+            AMOUNT,
+            ADAPTER_SOURCE_CHAIN_ID,
+            sourceSender,
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData(RGB_LOCK_ID, RGB_BEFORE_BLOCK)
         );
 
         assertEq(usdt0.balanceOf(adapter), AMOUNT, "adapter token pull rolled back");

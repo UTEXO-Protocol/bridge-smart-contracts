@@ -54,7 +54,7 @@ fundsIn(amount, destinationChainId, destinationAddress, settlementData)
 Bridge derives the source network from `block.chainid`, pulls tokens from the
 caller and credits destination liquidity with the actual receipt minus token
 commission. For RGB,
-`settlementData = abi.encode(uint256 rgbOpId, uint64 beforeBlock)` and
+`settlementData = abi.encode(uint256 lockId, uint64 beforeBlock)` and
 `destinationAddress` must be empty: the destination is carried in the RGB
 consignment, not supplied again as an EVM argument. `beforeBlock` is an
 exclusive Arbitrum L2 deadline: the deposit reverts when
@@ -72,12 +72,12 @@ cross-chain refunds. A zero native quote requires zero native payment.
 `BridgeFundsIn` includes the derived operation id and settlement payload. A
 non-zero correlation id from the settlement module also produces `FundsIn`, with
 an amount bounded by `uint64`. The RGB id is derived from the Bridge address,
-local chain id, token, RGB network, mint OpId and actual net amount. Other routes
+local chain id, token, RGB network, lock ID and actual net amount. Other routes
 use the sender/nonce deposit context.
 
 `RgbSettlementModule` permanently stores the net amount, destination RGB
 network and funded Arbitrum L2 block plus one for each RGB backing id. Bridge's
-two-argument `getFundsInBlock(rgbOpId, netAmount)` view matches rgb-lib's BFA
+two-argument `getFundsInBlock(lockId, netAmount)` view matches rgb-lib's BFA
 resolver ABI for the canonical RGB network `827166`; zero means no record in
 the currently configured settlement module. The BFA `bridgeLocation` points to
 the stable Bridge proxy.
@@ -294,14 +294,14 @@ requires different REJECT_LIST_OWNER and REJECT_LIST_APPENDER values.
 
 ### MinimalBridge RGB mint records
 
-`MinimalBridge.fundsIn(amount, operationId, beforeBlock)` accepts a funded RGB
+`MinimalBridge.fundsIn(amount, lockId, beforeBlock)` accepts a funded RGB
 mint only while the current Arbitrum L2 block is strictly less than
 `beforeBlock`. It reads the child-chain height from the Arbitrum `ArbSys`
 precompile rather than Solidity's approximate L1 `block.number`.
 
 Each successful lock creates one permanent height record under the key returned
-by `rgbMintDepositId(operationId, amount)`. The key binds the bridge, EVM chain,
-token, RGB operation and amount. `beforeBlock` is a call-time deadline rather
+by `rgbMintDepositId(lockId, amount)`, where `lockId = H(opId || txid)`. The key
+binds the bridge, EVM chain, token, RGB mint transaction and amount. `beforeBlock` is a call-time deadline rather
 than part of the permanent identity. Records are never deleted by `fundsOut`. A
 stored value of zero therefore means that the claim was not recorded; otherwise
 the value is the actual L2 block plus one.
@@ -314,10 +314,10 @@ An RGB resolver can check one external anchor without scanning historical logs:
 
 ```javascript
 const abi = [
-  "function getFundsInBlock(uint256 operationId,uint256 amount) view returns (uint64 l2BlockPlusOne)"
+  "function getFundsInBlock(uint256 lockId,uint256 amount) view returns (uint64 l2BlockPlusOne)"
 ];
 const bridge = new ethers.Contract(bridgeAddress, abi, provider);
-const l2BlockPlusOne = await bridge.getFundsInBlock(operationId, amount, {
+const l2BlockPlusOne = await bridge.getFundsInBlock(lockId, amount, {
   blockTag: "finalized"
 });
 ```
@@ -327,16 +327,16 @@ The equivalent direct `eth_call` with Foundry's `cast` is:
 ```bash
 cast call "$MINIMAL_BRIDGE" \
   "getFundsInBlock(uint256,uint256)(uint64)" \
-  "$OPERATION_ID" "$AMOUNT" \
+  "$LOCK_ID" "$AMOUNT" \
   --rpc-url "$ARBITRUM_RPC_URL" \
   --block finalized
 ```
 
-The resolver supplies the operation id and amount from validated RGB history.
+The resolver supplies the lock ID and amount from validated RGB history.
 It requires a nonzero result, decodes the creation height as
 `l2BlockPlusOne - 1`, and checks that height against the `beforeBlock` committed
-by the RGB transition. The legacy `FundsIn` event remains unchanged for
-compatibility.
+by the RGB transition. The legacy `FundsIn` event topic and parameter types
+remain unchanged for compatibility.
 
 ### LayerZero adapter wiring
 

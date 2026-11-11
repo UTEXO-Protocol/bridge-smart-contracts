@@ -35,8 +35,8 @@ contract RgbSettlementModule is ISettlementModule {
     ///         silently overwrite the previous net amount and is rejected.
     error DuplicateOperationId();
 
-    /// @notice `onFundsIn` `settlementData` decoded to a zero RGB OpId. The RGB
-    ///         route requires a non-zero OpId (it is threaded to the RGB side).
+    /// @notice `onFundsIn` `settlementData` decoded to a zero RGB lock ID. The RGB
+    ///         route requires a non-zero lock ID. The legacy error name is ABI-compatible.
     error InvalidRgbOpId();
 
     /// @notice The lock was submitted at or after its exclusive maximum L2 block.
@@ -111,23 +111,23 @@ contract RgbSettlementModule is ISettlementModule {
 
     /// @inheritdoc ISettlementModule
     /// @dev Records `netAmount` and destination network once per `operationId`.
-    ///      Bridge ids bind (network, mint OpId, net amount), excluding sender and nonce;
+    ///      Bridge ids bind (network, mint lock ID, net amount), excluding sender and nonce;
     ///      deposits and rebalance credits for the same tuple hit the duplicate guard.
-    ///      settlementData is abi.encode(uint256 rgbOpId, uint64 beforeBlock).
+    ///      settlementData is abi.encode(uint256 lockId, uint64 beforeBlock).
     ///      `beforeBlock` is an exclusive maximum Arbitrum L2 block. destAddress must be empty:
     ///      the RGB destination is carried in the consignment, not this argument.
-    /// @return rgbOpId Mint OpId decoded from `settlementData`.
+    /// @return lockId Hash binding the mint operation to its witness transaction.
     function onFundsIn(FundsInContext calldata ctx, bytes calldata settlementData)
         external
         override
         onlyRouteRegistry
-        returns (uint256 rgbOpId)
+        returns (uint256 lockId)
     {
         if (bytes(ctx.destAddress).length != 0) revert UnexpectedDestinationAddress();
 
         uint64 beforeBlock;
-        (rgbOpId, beforeBlock) = abi.decode(settlementData, (uint256, uint64));
-        if (rgbOpId == 0) revert InvalidRgbOpId();
+        (lockId, beforeBlock) = abi.decode(settlementData, (uint256, uint64));
+        if (lockId == 0) revert InvalidRgbOpId();
 
         uint256 l2Block = ARBSYS.arbBlockNumber();
         if (l2Block >= beforeBlock) revert LockWindowExpired(l2Block, beforeBlock);

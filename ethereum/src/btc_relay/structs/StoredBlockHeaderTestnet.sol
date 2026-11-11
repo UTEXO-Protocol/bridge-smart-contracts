@@ -203,7 +203,7 @@ library StoredBlockHeaderImpl {
 
         //Check PoW
         blockHash = writeHeaderAndGetDblSha256Hash(self, headers, offset);
-        require(uint256(Endianness.reverseBytes32(blockHash)) < Nbits.toTarget(newNbits), "updateChain: invalid PoW");
+        require(uint256(Endianness.reverseBytes32(blockHash)) <= Nbits.toTarget(newNbits), "updateChain: invalid PoW");
 
         //Verify timestamp is larger than median of last 11 block timestamps
         uint256 count = 0;
