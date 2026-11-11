@@ -169,7 +169,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
             (, uint256 maximum) = _directNativeBounds(quote);
             vm.deal(user, maximum);
             vm.prank(user);
-            bridge.fundsIn{value: maximum}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 900 + i));
+            bridge.fundsIn{value: maximum}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 900 + i));
             expected += quote;
         }
 
@@ -197,7 +197,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         vm.expectRevert(
             abi.encodeWithSelector(IBridge.NativeRefundFailed.selector, address(depositor), attached - quote)
         );
-        depositor.deposit(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 951), attached);
+        depositor.deposit(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 951), attached);
     }
 
     function test_fundsInFromAdapter_collectsComposeValueWithinSymmetricBand() public {
@@ -228,7 +228,12 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         vm.deal(adapter, maximum);
         vm.prank(adapter);
         bridge.fundsIn{value: maximum}(
-            AMOUNT, SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 961)
+            AMOUNT,
+            SOURCE_CHAIN_ID,
+            bytes32(uint256(uint160(user))),
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData(RGB_LOCK_ID + 961)
         );
         assertEq(cm.nativeCommissionPool(), minimum + maximum, "upper bound also collected in full");
         assertEq(adapter.balance, 0, "adapter still not refunded");
@@ -318,7 +323,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
     function test_fundsIn_nativeForwardFailureRestoresCustodyNonceAndLiquidity() public {
         _setFundsInNativeRule(100);
         uint256 quote = _nativeQuote(AMOUNT);
-        bytes32 expectedId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        bytes32 expectedId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT);
         vm.deal(user, quote);
         LedgerSnapshot memory beforeState = _snapshotLedger(expectedId);
         vm.mockCallRevert(address(cm), quote, bytes(""), bytes("native receive rejected"));

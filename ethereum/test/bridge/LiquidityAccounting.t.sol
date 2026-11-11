@@ -178,7 +178,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
     function test_fundsIn_directTokenTransferDoesNotCreditLiquidity() public {
         address donor = makeAddr("directTransferDonor");
         uint256 directAmount = 17e18;
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        bytes32 expectedOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT);
 
         usdt0.mint(donor, directAmount);
 
@@ -207,7 +207,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
         assertEq(bridge.totalLockedLiquidity(), 0, "direct transfer creates no total liquidity");
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(AMOUNT));
+        emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit IBridge.BridgeFundsIn(
             expectedOpId,

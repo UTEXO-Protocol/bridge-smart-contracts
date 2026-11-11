@@ -27,7 +27,9 @@ contract MinimalBridgeTest is Test {
 
     uint256 internal constant AMOUNT = 1e18;
 
-    uint256 internal constant OPERATION_ID = 42;
+    uint256 internal constant LOCK_ID = 42;
+
+    uint256 internal constant RELEASE_OPERATION_ID = 43;
 
     uint256 internal constant L2_BLOCK = 1_000_000;
 
@@ -73,7 +75,7 @@ contract MinimalBridgeTest is Test {
         uint256 userBefore = token.balanceOf(user);
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         assertEq(token.balanceOf(address(bridge)), AMOUNT);
         assertEq(token.balanceOf(user), userBefore - AMOUNT);
@@ -81,10 +83,10 @@ contract MinimalBridgeTest is Test {
     }
 
     function test_fundsIn_recordsL2Block() public {
-        bytes32 claimKey = bridge.rgbMintDepositId(OPERATION_ID, AMOUNT);
+        bytes32 claimKey = bridge.rgbMintDepositId(LOCK_ID, AMOUNT);
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         uint64 l2BlockPlusOne = bridge.fundsInRecords(claimKey);
         assertEq(l2BlockPlusOne, L2_BLOCK + 1);
@@ -98,25 +100,25 @@ contract MinimalBridgeTest is Test {
         assertEq(bridge.RGB_MINT_DEPOSIT_TYPEHASH(), typehash);
 
         bytes32 expected =
-            keccak256(abi.encode(typehash, address(bridge), block.chainid, address(token), OPERATION_ID, AMOUNT));
+            keccak256(abi.encode(typehash, address(bridge), block.chainid, address(token), LOCK_ID, AMOUNT));
 
-        assertEq(bridge.rgbMintDepositId(OPERATION_ID, AMOUNT), expected);
+        assertEq(bridge.rgbMintDepositId(LOCK_ID, AMOUNT), expected);
     }
 
-    function test_rgbMintDepositId_bindsOperationIdAndAmount() public view {
-        bytes32 claimKey = bridge.rgbMintDepositId(OPERATION_ID, AMOUNT);
+    function test_rgbMintDepositId_bindsLockIdAndAmount() public view {
+        bytes32 claimKey = bridge.rgbMintDepositId(LOCK_ID, AMOUNT);
 
-        assertNotEq(claimKey, bridge.rgbMintDepositId(OPERATION_ID + 1, AMOUNT));
-        assertNotEq(claimKey, bridge.rgbMintDepositId(OPERATION_ID, AMOUNT + 1));
+        assertNotEq(claimKey, bridge.rgbMintDepositId(LOCK_ID + 1, AMOUNT));
+        assertNotEq(claimKey, bridge.rgbMintDepositId(LOCK_ID, AMOUNT + 1));
     }
 
     function test_fundsIn_acceptsBlockImmediatelyBeforeDeadline() public {
         uint256 lastValidBlock = uint256(BEFORE_BLOCK) - 1;
         _setL2Block(lastValidBlock);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
-        assertEq(bridge.getFundsInBlock(OPERATION_ID, AMOUNT), BEFORE_BLOCK);
+        assertEq(bridge.getFundsInBlock(LOCK_ID, AMOUNT), BEFORE_BLOCK);
     }
 
     function test_fundsIn_revertsAtDeadlineWithoutPullingTokensOrWritingRecord() public {
@@ -125,10 +127,10 @@ contract MinimalBridgeTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(MinimalBridge.LockWindowExpired.selector, l2Block, BEFORE_BLOCK));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         assertEq(token.balanceOf(address(bridge)), 0);
-        assertEq(bridge.getFundsInBlock(OPERATION_ID, AMOUNT), 0);
+        assertEq(bridge.getFundsInBlock(LOCK_ID, AMOUNT), 0);
         assertEq(bridge.circulatingSupply(), 0);
     }
 
@@ -138,10 +140,10 @@ contract MinimalBridgeTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(MinimalBridge.LockWindowExpired.selector, l2Block, BEFORE_BLOCK));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         assertEq(token.balanceOf(address(bridge)), 0);
-        assertEq(bridge.getFundsInBlock(OPERATION_ID, AMOUNT), 0);
+        assertEq(bridge.getFundsInBlock(LOCK_ID, AMOUNT), 0);
         assertEq(bridge.circulatingSupply(), 0);
     }
 
@@ -150,36 +152,36 @@ contract MinimalBridgeTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(MinimalBridge.LockWindowExpired.selector, 0, 0));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, 0);
+        bridge.fundsIn(AMOUNT, LOCK_ID, 0);
     }
 
     function test_fundsIn_revertsDuplicateClaimWithDifferentDeadlineWithoutPullingMoreTokens() public {
-        bytes32 claimKey = bridge.rgbMintDepositId(OPERATION_ID, AMOUNT);
+        bytes32 claimKey = bridge.rgbMintDepositId(LOCK_ID, AMOUNT);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         uint256 bridgeBalance = token.balanceOf(address(bridge));
         vm.expectRevert(abi.encodeWithSelector(MinimalBridge.DuplicateMintDeposit.selector, claimKey));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK + 1);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK + 1);
 
         assertEq(token.balanceOf(address(bridge)), bridgeBalance);
     }
 
     function test_fundsIn_failedTransferRollsBackRecord() public {
-        bytes32 claimKey = bridge.rgbMintDepositId(OPERATION_ID, AMOUNT);
+        bytes32 claimKey = bridge.rgbMintDepositId(LOCK_ID, AMOUNT);
         vm.prank(user);
         token.approve(address(bridge), 0);
 
         vm.expectRevert();
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         assertEq(bridge.fundsInRecords(claimKey), 0);
         assertEq(bridge.circulatingSupply(), 0);
     }
 
-    function test_fundsIn_revertsZeroOperationId() public {
+    function test_fundsIn_revertsZeroLockId() public {
         vm.expectRevert(MinimalBridge.InvalidOperationId.selector);
         vm.prank(user);
         bridge.fundsIn(AMOUNT, 0, BEFORE_BLOCK);
@@ -187,33 +189,33 @@ contract MinimalBridgeTest is Test {
 
     function test_getFundsInBlock_returnsExistingAndMissingClaims() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
-        assertEq(bridge.getFundsInBlock(OPERATION_ID, AMOUNT), L2_BLOCK + 1);
-        assertEq(bridge.getFundsInBlock(OPERATION_ID + 1, AMOUNT), 0);
-        assertEq(bridge.getFundsInBlock(OPERATION_ID, AMOUNT + 1), 0);
+        assertEq(bridge.getFundsInBlock(LOCK_ID, AMOUNT), L2_BLOCK + 1);
+        assertEq(bridge.getFundsInBlock(LOCK_ID + 1, AMOUNT), 0);
+        assertEq(bridge.getFundsInBlock(LOCK_ID, AMOUNT + 1), 0);
     }
 
     function test_fundsIn_emitsFundsIn() public {
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit MinimalBridge.FundsIn(user, OPERATION_ID, uint64(AMOUNT));
+        emit MinimalBridge.FundsIn(user, LOCK_ID, uint64(AMOUNT));
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
     }
 
-    function test_fundsIn_operationIdIsIndexedTopic() public {
+    function test_fundsIn_lockIdIsIndexedTopic() public {
         bytes32 fundsInTopic = keccak256("FundsIn(address,uint256,uint64)");
         vm.recordLogs();
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].emitter == address(bridge) && logs[i].topics[0] == fundsInTopic) {
-                assertEq(logs[i].topics.length, 3, "signature, sender and operation id are indexed");
+                assertEq(logs[i].topics.length, 3, "signature, sender and lock ID are indexed");
                 assertEq(address(uint160(uint256(logs[i].topics[1]))), user, "sender topic");
-                assertEq(uint256(logs[i].topics[2]), OPERATION_ID, "operation id topic");
+                assertEq(uint256(logs[i].topics[2]), LOCK_ID, "lock ID topic");
                 assertEq(logs[i].data.length, 32, "only amount is event data");
                 assertEq(abi.decode(logs[i].data, (uint64)), AMOUNT, "amount is event data");
                 return;
@@ -227,10 +229,10 @@ contract MinimalBridgeTest is Test {
         token.mint(user, amount);
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit MinimalBridge.FundsIn(user, OPERATION_ID, type(uint64).max);
+        emit MinimalBridge.FundsIn(user, LOCK_ID, type(uint64).max);
 
         vm.prank(user);
-        bridge.fundsIn(amount, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(amount, LOCK_ID, BEFORE_BLOCK);
 
         assertEq(bridge.circulatingSupply(), type(uint64).max);
     }
@@ -240,15 +242,15 @@ contract MinimalBridgeTest is Test {
         token.mint(user, maxSupply);
 
         vm.prank(user);
-        bridge.fundsIn(maxSupply, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(maxSupply, LOCK_ID, BEFORE_BLOCK);
 
         uint256 userBefore = token.balanceOf(user);
-        bytes32 secondClaim = bridge.rgbMintDepositId(OPERATION_ID + 1, 1);
+        bytes32 secondClaim = bridge.rgbMintDepositId(LOCK_ID + 1, 1);
         vm.expectRevert(
             abi.encodeWithSelector(MinimalBridge.CirculatingSupplyOverflow.selector, type(uint64).max, uint256(1))
         );
         vm.prank(user);
-        bridge.fundsIn(1, OPERATION_ID + 1, BEFORE_BLOCK);
+        bridge.fundsIn(1, LOCK_ID + 1, BEFORE_BLOCK);
 
         assertEq(bridge.circulatingSupply(), type(uint64).max);
         assertEq(token.balanceOf(user), userBefore);
@@ -262,7 +264,7 @@ contract MinimalBridgeTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(BridgeBase.AmountExceedsUint64.selector, amount));
         vm.prank(user);
-        bridge.fundsIn(amount, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(amount, LOCK_ID, BEFORE_BLOCK);
 
         assertEq(token.balanceOf(user), userBefore);
         assertEq(token.balanceOf(address(bridge)), 0);
@@ -275,7 +277,7 @@ contract MinimalBridgeTest is Test {
         token.approve(address(bridge), AMOUNT);
 
         vm.prank(stranger);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         assertEq(token.balanceOf(address(bridge)), AMOUNT);
     }
@@ -286,18 +288,18 @@ contract MinimalBridgeTest is Test {
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
     }
 
     function test_fundsOut_transfersAndEmits() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit MinimalBridge.FundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+        emit MinimalBridge.FundsOut(recipient, AMOUNT, RELEASE_OPERATION_ID, SRC_ADDR);
 
         vm.prank(owner);
-        bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+        bridge.fundsOut(recipient, AMOUNT, RELEASE_OPERATION_ID, SRC_ADDR);
 
         assertEq(token.balanceOf(recipient), AMOUNT);
         assertEq(token.balanceOf(address(bridge)), 0);
@@ -306,11 +308,11 @@ contract MinimalBridgeTest is Test {
 
     function test_fundsOut_decrementsCirculatingSupplyByReleasedAmount() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         uint256 releaseAmount = AMOUNT / 4;
         vm.prank(owner);
-        bridge.fundsOut(recipient, releaseAmount, OPERATION_ID, SRC_ADDR);
+        bridge.fundsOut(recipient, releaseAmount, RELEASE_OPERATION_ID, SRC_ADDR);
 
         assertEq(bridge.circulatingSupply(), AMOUNT - releaseAmount);
     }
@@ -322,7 +324,7 @@ contract MinimalBridgeTest is Test {
             abi.encodeWithSelector(MinimalBridge.AmountExceedsCirculatingSupply.selector, AMOUNT, uint64(0))
         );
         vm.prank(owner);
-        bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+        bridge.fundsOut(recipient, AMOUNT, RELEASE_OPERATION_ID, SRC_ADDR);
 
         assertEq(bridge.circulatingSupply(), 0);
         assertEq(token.balanceOf(address(bridge)), AMOUNT);
@@ -331,29 +333,29 @@ contract MinimalBridgeTest is Test {
 
     function test_fundsOut_revertsForNonOwner() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
-        bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+        bridge.fundsOut(recipient, AMOUNT, RELEASE_OPERATION_ID, SRC_ADDR);
     }
 
     function test_fundsOut_revertsOnZeroRecipient() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         vm.expectRevert(BridgeBase.InvalidRecipientAddress.selector);
         vm.prank(owner);
-        bridge.fundsOut(address(0), AMOUNT, OPERATION_ID, SRC_ADDR);
+        bridge.fundsOut(address(0), AMOUNT, RELEASE_OPERATION_ID, SRC_ADDR);
     }
 
     function test_fundsOut_revertsIfAmountExceedsPool() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         vm.expectRevert(BridgeBase.AmountExceedBridgePool.selector);
         vm.prank(owner);
-        bridge.fundsOut(recipient, AMOUNT + 1, OPERATION_ID, SRC_ADDR);
+        bridge.fundsOut(recipient, AMOUNT + 1, RELEASE_OPERATION_ID, SRC_ADDR);
     }
 
     function test_unpauseInflow_revertsForNonOwner() public {
@@ -373,7 +375,7 @@ contract MinimalBridgeTest is Test {
 
         // fundsIn works again
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
         assertEq(token.balanceOf(address(bridge)), AMOUNT);
     }
 
@@ -387,14 +389,14 @@ contract MinimalBridgeTest is Test {
     ///      pause modifier before the release body runs.
     function test_fundsOut_revertsWhenOutflowPaused() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK); // seed the pool
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK); // seed the pool
 
         vm.prank(owner);
         bridge.emergencyPauseAll();
 
         vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
         vm.prank(owner);
-        bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+        bridge.fundsOut(recipient, AMOUNT, RELEASE_OPERATION_ID, SRC_ADDR);
     }
 
     /// @dev The planned inflow-only pause blocks deposits but leaves
@@ -402,7 +404,7 @@ contract MinimalBridgeTest is Test {
     ///      migrated out while new deposits are frozen).
     function test_fundsOut_succeedsWhenOnlyInflowPaused() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK); // seed before freezing inflow
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK); // seed before freezing inflow
 
         vm.prank(owner);
         bridge.pauseInflow();
@@ -410,18 +412,18 @@ contract MinimalBridgeTest is Test {
         // Deposits are frozen...
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         // ...but withdrawals still work.
         vm.prank(owner);
-        bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+        bridge.fundsOut(recipient, AMOUNT, RELEASE_OPERATION_ID, SRC_ADDR);
         assertEq(token.balanceOf(recipient), AMOUNT);
     }
 
     /// @dev Emergency pause freezes BOTH paths.
     function test_emergencyPauseAll_freezesBothPaths() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK); // seed the pool
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK); // seed the pool
 
         vm.prank(owner);
         bridge.emergencyPauseAll();
@@ -431,11 +433,11 @@ contract MinimalBridgeTest is Test {
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
         vm.prank(owner);
-        bridge.fundsOut(recipient, AMOUNT, OPERATION_ID, SRC_ADDR);
+        bridge.fundsOut(recipient, AMOUNT, RELEASE_OPERATION_ID, SRC_ADDR);
     }
 
     /// @dev Emergency unpause lifts BOTH freezes.
@@ -449,7 +451,7 @@ contract MinimalBridgeTest is Test {
         assertFalse(bridge.outflowPaused(), "outflow resumed");
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
         assertEq(token.balanceOf(address(bridge)), AMOUNT);
     }
 
@@ -492,7 +494,7 @@ contract MinimalBridgeTest is Test {
 
     function test_getContractBalance_returnsCustodiedBalance() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(AMOUNT, LOCK_ID, BEFORE_BLOCK);
 
         assertEq(bridge.getContractBalance(), AMOUNT);
     }
@@ -505,7 +507,7 @@ contract MinimalBridgeTest is Test {
         token.mint(user, amount);
 
         vm.prank(user);
-        bridge.fundsIn(amount, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(amount, LOCK_ID, BEFORE_BLOCK);
 
         assertEq(token.balanceOf(address(bridge)), uint256(amount));
         assertEq(bridge.circulatingSupply(), amount);
@@ -517,10 +519,10 @@ contract MinimalBridgeTest is Test {
         token.mint(user, lockAmount);
 
         vm.prank(user);
-        bridge.fundsIn(lockAmount, OPERATION_ID, BEFORE_BLOCK);
+        bridge.fundsIn(lockAmount, LOCK_ID, BEFORE_BLOCK);
 
         vm.prank(owner);
-        bridge.fundsOut(recipient, releaseAmount, OPERATION_ID, SRC_ADDR);
+        bridge.fundsOut(recipient, releaseAmount, RELEASE_OPERATION_ID, SRC_ADDR);
 
         assertEq(token.balanceOf(recipient), uint256(releaseAmount));
         assertEq(token.balanceOf(address(bridge)), uint256(lockAmount) - uint256(releaseAmount));
