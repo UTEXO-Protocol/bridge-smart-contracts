@@ -14,14 +14,14 @@ import {BridgeRebalanceTestBase} from "./BridgeRebalanceTestBase.sol";
 /// @notice Rebalance authorization, payload bounds and route checks.
 contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     function test_rebalanceLiquidity_revertsForNonOwner() public {
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         bridge.rebalanceLiquidity(p);
     }
 
     function test_rebalanceLiquidity_revertsInvalidBurnId() public {
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         uint256 expected = p.burnId;
         p.burnId = expected + 1;
         vm.prank(multisig);
@@ -31,7 +31,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
 
     function test_rebalanceLiquidity_revertsInsufficientChainLiquidity() public {
         uint256 available = bridge.lockedLiquidity(CHAIN_A_ID);
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(available + 1, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(available + 1, RGB_LOCK_ID + 1);
         vm.prank(multisig);
         vm.expectRevert(
             abi.encodeWithSelector(IBridge.InsufficientChainLiquidity.selector, CHAIN_A_ID, available + 1, available)
@@ -40,7 +40,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_revertsZeroAmount() public {
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         p.amount = 0;
         vm.prank(multisig);
         vm.expectRevert(IBridge.ZeroAmount.selector);
@@ -48,7 +48,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_revertsSameChain() public {
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         p.destinationChainId = CHAIN_A_ID;
         vm.prank(multisig);
         vm.expectRevert(abi.encodeWithSelector(IBridge.RebalanceSameChain.selector, CHAIN_A_ID));
@@ -56,13 +56,13 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_revertsZeroChainIds() public {
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         p.sourceChainId = 0;
         vm.prank(multisig);
         vm.expectRevert(IBridge.InvalidSourceChainId.selector);
         bridge.rebalanceLiquidity(p);
 
-        p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         p.destinationChainId = 0;
         vm.prank(multisig);
         vm.expectRevert(IBridge.InvalidDestinationChainId.selector);
@@ -71,7 +71,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
 
     function test_rebalanceLiquidity_revertsLocalDestinationOnArbitrum() public {
         vm.chainId(42161);
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         p.destinationChainId = block.chainid;
         vm.prank(multisig);
         vm.expectRevert(IBridge.InvalidDestinationChainId.selector);
@@ -79,7 +79,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_revertsSettlementDataOutTooLong() public {
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
         p.settlementDataOut = PayloadHelper.filledBytes(max + 1);
         vm.prank(multisig);
@@ -88,7 +88,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_settlementDataOutAtMaxLengthPassesLengthGuard() public {
-        IBridge.RebalanceParams memory params = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory params = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         bytes memory settlementData = _emptySettlement();
         params.settlementDataOut =
             bytes.concat(settlementData, new bytes(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH() - settlementData.length));
@@ -100,7 +100,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
 
     function test_rebalanceLiquidity_revertsSettlementDataInTooLong() public {
         // The credit leg shares the outbound cap, not the deposit one.
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
         p.settlementDataIn = PayloadHelper.filledBytes(max + 1);
         vm.prank(multisig);
@@ -109,11 +109,13 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_acceptsSettlementDataInAtMaxLength() public {
-        // A max-length blob still decodes as a non-zero RGB OpId (its first
-        // 32 bytes), so the credit leg records normally. The length is far
-        // above the deposit cap: the rebalance credit leg is not bound by it.
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
-        p.settlementDataIn = PayloadHelper.filledBytes(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH());
+        // A max-length blob with a canonical tuple prefix still decodes as
+        // valid RGB data, so the credit leg records normally. The length is
+        // far above the deposit cap: the rebalance credit leg is not bound by it.
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
+        bytes memory prefix = abi.encode(RGB_LOCK_ID + 1, RGB_BEFORE_BLOCK);
+        p.settlementDataIn =
+            bytes.concat(prefix, PayloadHelper.filledBytes(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH() - prefix.length));
         assertGt(p.settlementDataIn.length, bridge.MAX_SETTLEMENT_DATA_IN_LENGTH());
         bytes32 expectedOperationId = _deriveRebalanceOpId(p);
 
@@ -123,7 +125,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_rgbCreditAcceptsEmptyDestinationAddress() public {
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         p.destinationAddress = "";
         bytes32 expectedOperationId = _deriveRebalanceOpId(p);
 
@@ -137,7 +139,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
 
     function test_rebalanceLiquidity_revertsRouteNotEnabled() public {
         // (CHAIN_A_ID → SECONDARY_RGB) was never registered as a route.
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         p.destinationChainId = SECONDARY_RGB_CHAIN_ID;
         vm.prank(multisig);
         vm.expectRevert(
@@ -149,7 +151,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     function test_rebalanceLiquidity_revertsWhenOutflowPaused() public {
         vm.prank(multisig);
         bridge.emergencyPauseAll();
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         vm.prank(multisig);
         vm.expectRevert(BridgeBaseUpgradeable.OutflowEnforcedPause.selector);
         bridge.rebalanceLiquidity(p);
@@ -166,7 +168,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         uint256 capacityShares = 500 * shareUnit / bridge.BPS_DENOMINATOR();
         uint256 requestedShares = AMOUNT * shareUnit / bridge.lockedLiquidity(CHAIN_A_ID);
 
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         vm.prank(multisig);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -187,8 +189,8 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
     function test_rebalanceLiquidity_secondaryRgbToRgbRevertsOnCrossNetworkRecord() public {
         // A secondary-network burn cannot cite a primary-network mint record.
         // The shared canonical ledger must enforce the source network tag.
-        uint256 destinationOpId = RGB_OP_ID + 201;
-        IBridge.RebalanceParams memory p = _secondaryRgbToRgbParams(AMOUNT, rgbSeedOpId, destinationOpId);
+        uint256 destinationLockId = RGB_LOCK_ID + 201;
+        IBridge.RebalanceParams memory p = _secondaryRgbToRgbParams(AMOUNT, rgbSeedOpId, destinationLockId);
 
         vm.prank(multisig);
         vm.expectRevert(
@@ -226,7 +228,7 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         uint256 totalBefore = bridge.totalLockedLiquidity();
         for (uint256 field; field < 3; ++field) {
             IBridge.RebalanceParams memory params =
-                field == 1 ? _rgbToChainAParams(AMOUNT, rgbSeedOpId) : _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+                field == 1 ? _rgbToChainAParams(AMOUNT, rgbSeedOpId) : _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
             uint256 maximum = field == 2 ? bridge.MAX_PROOF_LENGTH() : bridge.MAX_ADDRESS_LENGTH();
             bytes memory oversized = PayloadHelper.filledBytes(maximum + 1);
             if (field == 0) {

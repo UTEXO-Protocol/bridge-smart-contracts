@@ -122,7 +122,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
             SOURCE_CHAIN_ID,
             SRC_ADDR,
             _proof(),
-            _settlementWithAmounts(ids, _one(_seedAmt)),
+            _settlement(ids),
             SRC_BURN_TX_ID
         );
     }
@@ -136,7 +136,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
 
         usdt0.mint(user, 500e6);
         vm.prank(user);
-        bridge.fundsIn(500e6, other, DST_ADDR, _rgbData(RGB_OP_ID + 888));
+        bridge.fundsIn(500e6, other, DST_ADDR, _rgbData(RGB_LOCK_ID + 888));
 
         uint256 otherBps = _bpsOfChain(other, 50e6);
         vm.prank(multisig);
@@ -204,16 +204,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         bytes32[] memory ids = _ids(opId);
         vm.expectRevert(OutflowRateLimiter.LimitNotConfigured.selector);
         vm.prank(multisig);
-        _fundsOut(
-            recipient,
-            100e6,
-            unconfigured,
-            SOURCE_CHAIN_ID,
-            SRC_ADDR,
-            _proof(),
-            _settlementWithAmounts(ids, _one(100e6)),
-            SRC_BURN_TX_ID
-        );
+        _fundsOut(recipient, 100e6, unconfigured, SOURCE_CHAIN_ID, SRC_ADDR, _proof(), _settlement(ids), SRC_BURN_TX_ID);
     }
 
     function test_outflow_downstreamRevertRestoresBuckets() public {
@@ -227,16 +218,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
 
         vm.expectRevert("verify: block commitment");
         vm.prank(multisig);
-        _fundsOut(
-            recipient,
-            50e6,
-            RGB_CHAIN_ID,
-            SOURCE_CHAIN_ID,
-            SRC_ADDR,
-            badProof,
-            _settlementWithAmounts(ids, _one(_seedAmt)),
-            SRC_BURN_TX_ID
-        );
+        _fundsOut(recipient, 50e6, RGB_CHAIN_ID, SOURCE_CHAIN_ID, SRC_ADDR, badProof, _settlement(ids), SRC_BURN_TX_ID);
 
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 100e6, "per-chain restored");
         assertEq(bridge.availableGlobalOutflow(), globalBefore, "global restored");
@@ -366,11 +348,11 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
 
         usdt0.mint(user, 1_100e6);
         vm.prank(user);
-        bridge.fundsIn(100e6, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 4_001));
+        bridge.fundsIn(100e6, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 4_001));
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 5e6, "5% of 100e6");
 
         vm.prank(user);
-        bridge.fundsIn(900e6, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 4_002));
+        bridge.fundsIn(900e6, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 4_002));
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 50e6, "5% of 1000e6, no reconfiguration");
     }
 

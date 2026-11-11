@@ -20,7 +20,7 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         vm.prank(preemptor);
         usdt0.approve(address(bridge), preemptAmount);
 
-        // Preemptor deposits first, reusing the SAME rgbOpId the victim will use.
+        // Preemptor deposits first, reusing the SAME lock ID the victim will use.
         vm.prank(preemptor);
         bytes32 preemptOpId = bridge.fundsIn(preemptAmount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(rgbModule.fundsInRecords(preemptOpId), preemptAmount, "preemptor record");
@@ -40,7 +40,7 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
     // the canonical empty destination address.
     function test_fundsIn_rgbRejectsNonEmptyDestinationAddress() public {
         string memory invalidDestination = "not-rgb-destination";
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        bytes32 expectedOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT);
 
         uint256 userBefore = usdt0.balanceOf(user);
         uint256 bridgeBefore = usdt0.balanceOf(address(bridge));
@@ -81,10 +81,10 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         uint256 cmPoolBefore = cm.tokenCommissionPool(address(usdt0));
         uint256 nativePoolBefore = cm.nativeCommissionPool();
 
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, netAmount);
+        bytes32 expectedOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, netAmount);
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(netAmount));
+        emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(netAmount));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit IBridge.BridgeFundsIn(
             expectedOpId,
@@ -168,7 +168,7 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         vm.prank(user);
         bytes32 actual = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        assertEq(actual, _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT * 9 / 10));
+        assertEq(actual, _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT * 9 / 10));
         assertEq(rgbModule.fundsInRecords(actual), AMOUNT * 9 / 10);
         assertEq(rgbModule.fundsInRecords(legacyId), 0, "no stale legacy id in the RGB ledger");
         assertEq(legacyModule.onFundsInCount(), 0);
@@ -202,8 +202,8 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         bytes32 first = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         vm.prank(user);
         bytes32 second = bridge.fundsIn(AMOUNT / 2, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-        assertEq(first, _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT));
-        assertEq(second, _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT / 2));
+        assertEq(first, _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT));
+        assertEq(second, _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT / 2));
         assertTrue(first != second);
         assertEq(rgbModule.fundsInRecords(first), AMOUNT);
         assertEq(rgbModule.fundsInRecords(second), AMOUNT / 2);
@@ -217,7 +217,7 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         bytes32 first = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         vm.prank(user);
         bytes32 second = bridge.fundsIn(AMOUNT, otherNetwork, DST_ADDR, _rgbData());
-        assertEq(second, _deriveRgbOpId(otherNetwork, RGB_OP_ID, AMOUNT));
+        assertEq(second, _deriveRgbMintDepositId(otherNetwork, RGB_LOCK_ID, AMOUNT));
         assertTrue(first != second);
         assertEq(rgbModule.fundsInRecordChainIds(first), RGB_CHAIN_ID);
         assertEq(rgbModule.fundsInRecordChainIds(second), otherNetwork);
@@ -303,15 +303,15 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, sourceSender), 0, "nonce not consumed on revert");
 
         // A subsequent successful deposit records its canonical RGB id.
-        bytes32 expectedId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, 1000);
+        bytes32 expectedId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, 1000);
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(1000, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(opId, expectedId, "first success records the RGB mint");
         assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, sourceSender), 1, "nonce now 1");
     }
 
-    /// @dev Bridge rejects a zero RGB operation ID before module dispatch.
-    function test_fundsIn_zeroRgbOpIdReverts() public {
+    /// @dev Bridge rejects a zero RGB lock ID before module dispatch.
+    function test_fundsIn_zeroLockIdReverts() public {
         vm.expectRevert(IBridge.InvalidRgbOpId.selector, address(bridge));
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(0));
@@ -322,7 +322,7 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         usdt0.mint(user, amount);
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, type(uint64).max);
+        emit IBridge.FundsIn(user, RGB_LOCK_ID, type(uint64).max);
 
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
@@ -331,11 +331,55 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), amount);
     }
 
+    function test_fundsIn_rgbRouteRejectsCumulativeSupplyAboveUint64() public {
+        uint256 maxSupply = type(uint64).max;
+        usdt0.mint(user, maxSupply);
+
+        vm.prank(user);
+        bridge.fundsIn(maxSupply, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        uint256 userBefore = usdt0.balanceOf(user);
+        bytes32 sourceSender = bytes32(uint256(uint160(user)));
+        bytes32 secondOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID + 1, 1);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.CirculatingSupplyOverflow.selector, maxSupply, uint256(1)));
+        vm.prank(user);
+        bridge.fundsIn(1, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1));
+
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), maxSupply, "RGB supply remains at the maximum");
+        assertEq(bridge.totalLockedLiquidity(), maxSupply, "total liquidity unchanged");
+        assertEq(rgbModule.fundsInRecords(secondOpId), 0, "settlement record rolled back");
+        assertEq(usdt0.balanceOf(user), userBefore, "token pull rolled back");
+        assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, sourceSender), 1, "failed credit restores nonce");
+    }
+
+    function test_fundsIn_canonicalRgbBucketEnforcesSupplyCapWithZeroIdModule() public {
+        uint256 canonicalRgbNetwork = bridge.RGB_NETWORK();
+        MockSettlementModule zeroIdModule = new MockSettlementModule();
+        vm.prank(deployer);
+        routeRegistry.setRoute(SOURCE_CHAIN_ID, canonicalRgbNetwork, true, address(rgbVerifier), address(zeroIdModule));
+
+        uint256 maxSupply = type(uint64).max;
+        usdt0.mint(user, maxSupply);
+        vm.prank(user);
+        bridge.fundsIn(maxSupply, canonicalRgbNetwork, DST_ADDR, bytes(""));
+
+        uint256 userBefore = usdt0.balanceOf(user);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.CirculatingSupplyOverflow.selector, maxSupply, uint256(1)));
+        vm.prank(user);
+        bridge.fundsIn(1, canonicalRgbNetwork, DST_ADDR, bytes(""));
+
+        assertEq(bridge.circulatingSupply(), type(uint64).max, "getter cannot truncate canonical supply");
+        assertEq(bridge.lockedLiquidity(canonicalRgbNetwork), maxSupply, "canonical supply unchanged");
+        assertEq(bridge.totalLockedLiquidity(), maxSupply, "total liquidity unchanged");
+        assertEq(zeroIdModule.onFundsInCount(), 1, "module callback rolled back");
+        assertEq(usdt0.balanceOf(user), userBefore, "token pull rolled back");
+    }
+
     function test_fundsIn_rgbRouteRejectsNetAmountAboveUint64WithoutTruncation() public {
         uint256 amount = uint256(type(uint64).max) + 1;
         usdt0.mint(user, amount);
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, amount);
+        bytes32 expectedOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, amount);
         uint256 userBefore = usdt0.balanceOf(user);
 
         vm.expectRevert(abi.encodeWithSelector(BridgeBaseUpgradeable.AmountExceedsUint64.selector, amount));
@@ -359,7 +403,7 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         assertLe(expectedNet, type(uint64).max, "test setup: net fits RGB u64");
 
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(user, RGB_OP_ID, uint64(expectedNet));
+        emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(expectedNet));
 
         vm.prank(user);
         bytes32 opId = bridge.fundsIn(grossAmount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
@@ -368,7 +412,7 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), expectedNet);
     }
 
-    function test_fundsIn_rgbOpIdIsIndexedTopic() public {
+    function test_fundsIn_lockIdIsIndexedTopic() public {
         bytes32 fundsInTopic = keccak256("FundsIn(address,uint256,uint64)");
         vm.recordLogs();
         vm.prank(user);
@@ -377,9 +421,9 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].emitter == address(bridge) && logs[i].topics[0] == fundsInTopic) {
-                assertEq(logs[i].topics.length, 3, "signature, sender and rgb op id are indexed");
+                assertEq(logs[i].topics.length, 3, "signature, sender and RGB lock ID are indexed");
                 assertEq(address(uint160(uint256(logs[i].topics[1]))), user, "sender topic");
-                assertEq(uint256(logs[i].topics[2]), RGB_OP_ID, "rgb op id topic");
+                assertEq(uint256(logs[i].topics[2]), RGB_LOCK_ID, "RGB lock ID topic");
                 assertEq(logs[i].data.length, 32, "only amount is event data");
                 assertEq(abi.decode(logs[i].data, (uint64)), AMOUNT, "amount is event data");
                 return;

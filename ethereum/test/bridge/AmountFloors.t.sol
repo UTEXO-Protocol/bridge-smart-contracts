@@ -206,7 +206,7 @@ contract BridgeAmountFloorsTest is BridgeTestBase {
         _setFundsOutTokenRule(400);
 
         bytes memory proof = _proof();
-        bytes memory settlementData = _settlementWithAmounts(_ids(opId), _one(dustAmount));
+        bytes memory settlementData = _settlement(_ids(opId));
         uint256 burnId = _deriveBurnId(dustAmount, RGB_CHAIN_ID, SRC_ADDR, SRC_BURN_TX_ID);
 
         vm.expectRevert(

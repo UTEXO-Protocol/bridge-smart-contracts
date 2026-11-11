@@ -16,15 +16,22 @@ contract IntegrationDepositsTest is IntegrationTestBase {
 
         uint256 userBefore = token.balanceOf(user);
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID));
+        bytes32 opId =
+            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK));
 
         assertEq(token.balanceOf(user), userBefore - USER_DEPOSIT, "user debited gross");
         assertEq(token.balanceOf(address(bridge)), netIn, "bridge keeps net");
         assertEq(token.balanceOf(address(cm)), fee, "commission to CM");
         assertEq(cm.tokenCommissionPool(address(token)), fee, "CM recorded inbound fee");
         assertEq(rgbModule.fundsInRecords(opId), netIn, "mint record stores net");
-        assertEq(opId, bridge.rgbMintDepositId(RGB_CHAIN_ID, RGB_OP_ID, netIn), "consignment-derived backing id");
+        assertEq(opId, bridge.rgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, netIn), "consignment-derived backing id");
+        assertEq(
+            bridge.getFundsInBlock(RGB_LOCK_ID, netIn),
+            ARBITRUM_L2_BLOCK + 1,
+            "rgb-lib lookup returns funded L2 block plus one"
+        );
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), netIn, "destination liquidity credited");
+        assertEq(bridge.circulatingSupply(), netIn, "circulating supply credited");
         assertEq(bridge.totalLockedLiquidity(), netIn, "total liquidity credited");
         assertEq(
             bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))), 1, "deposit nonce consumed"
@@ -33,13 +40,14 @@ contract IntegrationDepositsTest is IntegrationTestBase {
         assertEq(token.balanceOf(address(bridge)) + token.balanceOf(address(cm)), USER_DEPOSIT, "deposit conserved");
     }
 
-    /// @notice Different RGB mint OpIds remain distinct deposits.
+    /// @notice Different RGB lock IDs remain distinct deposits.
     function test_fundsIn_mintDistinctDepositsGetDistinctOperationIds() public {
         _configTokenCommissionRoutes();
         vm.prank(user);
-        bytes32 op1 = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID));
+        bytes32 op1 = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK));
         vm.prank(user);
-        bytes32 op2 = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID + 1));
+        bytes32 op2 =
+            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_LOCK_ID + 1, RGB_BEFORE_BLOCK));
 
         assertTrue(op1 != op2, "operationIds distinct");
         assertEq(rgbModule.fundsInRecords(op1), _netIn(), "first recorded");
@@ -53,8 +61,12 @@ contract IntegrationDepositsTest is IntegrationTestBase {
         );
     }
 
-    /// @notice A mint route must carry a non-zero RGB OpId in settlementData.
-    function test_fundsIn_mintZeroRgbOpIdReverts() public {
+    function test_getFundsInBlock_returnsZeroForMissingMint() public view {
+        assertEq(bridge.getFundsInBlock(RGB_LOCK_ID, _netIn()), 0, "missing mint returns zero");
+    }
+
+    /// @notice A mint route must carry a non-zero RGB lock ID in settlementData.
+    function test_fundsIn_mintZeroLockIdReverts() public {
         _configTokenCommissionRoutes();
         ReleaseState memory beforeState = _releaseState(0);
         uint256 userBefore = token.balanceOf(user);
@@ -62,7 +74,7 @@ contract IntegrationDepositsTest is IntegrationTestBase {
         uint256 nonceBefore = bridge.sourceSenderNonces(SOURCE_CHAIN_ID, sourceSender);
         vm.prank(user);
         vm.expectRevert(IBridge.InvalidRgbOpId.selector, address(bridge));
-        bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(uint256(0)));
+        bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(uint256(0), RGB_BEFORE_BLOCK));
         _assertReleaseUnchanged(0, beforeState);
         assertEq(token.balanceOf(user), userBefore, "failed deposit does not debit user");
         assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, sourceSender), nonceBefore, "failed deposit restores nonce");
@@ -73,7 +85,7 @@ contract IntegrationDepositsTest is IntegrationTestBase {
     function test_fundsIn_mintInflowPauseStopsDepositsReleasesStillFlow() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         uint256 netIn = _netIn();
 
         vm.prank(address(proxy));
@@ -81,10 +93,10 @@ contract IntegrationDepositsTest is IntegrationTestBase {
 
         vm.prank(user);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_OP_ID + 100));
+        bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_LOCK_ID + 100, RGB_BEFORE_BLOCK));
 
         // Outflow is a separate flag - a withdraw still succeeds.
-        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, netIn, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, netIn, "", _validProof());
         ReleaseState memory beforeState = _releaseState(burnId);
         _submitFundsOut(params);
         uint256 outFee = netIn * FUNDS_OUT_PERCENT / FUNDS_OUT_MULT / FUNDS_OUT_MULT;
