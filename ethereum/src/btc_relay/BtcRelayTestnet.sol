@@ -86,6 +86,9 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
     //Mutating functions
     function submitMainBlockheaders(bytes calldata data) external {
         require(data.length >= StoredBlockHeaderByteLength + CompactBlockHeaderByteLength, "submitMain: no headers");
+        require(
+            (data.length - StoredBlockHeaderByteLength) % CompactBlockHeaderByteLength == 0, "submitMain: bad length"
+        );
 
         StoredBlockHeader memory storedHeader = StoredBlockHeaderImpl.fromCalldata(data, 0); //160-byte previous blockheader
 
@@ -116,6 +119,9 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
 
     function submitShortForkBlockheaders(bytes calldata data) external {
         require(data.length >= StoredBlockHeaderByteLength + CompactBlockHeaderByteLength, "submitMain: no headers");
+        require(
+            (data.length - StoredBlockHeaderByteLength) % CompactBlockHeaderByteLength == 0, "shortFork: bad length"
+        );
 
         StoredBlockHeader memory storedHeader = StoredBlockHeaderImpl.fromCalldata(data, 0);
 
@@ -160,6 +166,7 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
 
     function submitForkBlockheaders(uint256 forkId, bytes calldata data) external {
         require(data.length >= StoredBlockHeaderByteLength + CompactBlockHeaderByteLength, "fork: no headers");
+        require((data.length - StoredBlockHeaderByteLength) % CompactBlockHeaderByteLength == 0, "fork: bad length");
         require(forkId != 0, "fork: forkId 0 reserved");
         Fork storage fork = _forks[msg.sender][forkId];
 
@@ -213,6 +220,7 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
             uint256 blockHeight = forkStartBlockheight - 1;
 
             //Make sure that the fork's root block is still committed
+            require(blockHeight <= tipBlockHeight, "fork: root above tip");
             require(_mainChain[blockHeight] == forkChain[blockHeight], "fork: reorg block commitment");
             delete forkChain[blockHeight];
 
@@ -258,6 +266,7 @@ contract BtcRelayTestnet is IBtcRelay, IBtcRelayView {
     }
 
     function getCommitHash(uint256 height) external view returns (bytes32) {
+        if (height > _relayState.blockHeight) return bytes32(0);
         return _mainChain[height];
     }
 
