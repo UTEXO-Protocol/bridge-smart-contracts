@@ -45,7 +45,7 @@ contract BridgeSettlementCallbacksTest is BridgeRebalanceTestBase {
 
     function test_rebalanceLiquidity_callbacksSeeDebitBeforeCreditAndRejectReentry() public {
         SettlementCallbackObserver observer = _installCallbackObserver(CHAIN_A_ID, RGB_CHAIN_ID);
-        IBridge.RebalanceParams memory params = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory params = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         vm.prank(multisig);
         bridge.rebalanceLiquidity(params);
 
@@ -85,7 +85,7 @@ contract BridgeSettlementCallbacksTest is BridgeRebalanceTestBase {
     function test_rebalanceLiquidity_creditHookFailureRollsBackDebitReplayAndRateLimit() public {
         SettlementCallbackObserver observer = _installCallbackObserver(CHAIN_A_ID, RGB_CHAIN_ID);
         observer.setFailOnInbound(true);
-        IBridge.RebalanceParams memory params = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory params = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         uint256 availableBefore = bridge.availableOutflow(CHAIN_A_ID);
         vm.prank(multisig);
         vm.expectRevert(SettlementCallbackObserver.HookFailed.selector);

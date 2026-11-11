@@ -186,6 +186,7 @@ contract BridgeFlowPausesTest is BridgeTestBase {
     }
 
     function test_unpauseInflow_keepsMinimalBridgeOutflowFrozen() public {
+        uint256 releaseOperationId = uint256(keccak256("release-operation"));
         vm.startPrank(multisig);
         minimalBridge.emergencyPauseAll();
         minimalBridge.unpauseInflow();
@@ -193,23 +194,23 @@ contract BridgeFlowPausesTest is BridgeTestBase {
         assertFalse(minimalBridge.paused(), "planned resume opens inflow");
         assertTrue(minimalBridge.outflowPaused(), "planned resume preserves emergency outflow freeze");
         vm.prank(user);
-        minimalBridge.fundsIn(AMOUNT, RGB_OP_ID, MINIMAL_BEFORE_BLOCK);
+        minimalBridge.fundsIn(AMOUNT, RGB_LOCK_ID, MINIMAL_BEFORE_BLOCK);
         assertEq(usdt0.balanceOf(address(minimalBridge)), AMOUNT, "deposit succeeds with outflow frozen");
         vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
         vm.prank(multisig);
-        minimalBridge.fundsOut(recipient, AMOUNT, RGB_OP_ID, SRC_ADDR);
+        minimalBridge.fundsOut(recipient, AMOUNT, releaseOperationId, SRC_ADDR);
         assertEq(usdt0.balanceOf(address(minimalBridge)), AMOUNT, "frozen release preserves custody");
         assertEq(usdt0.balanceOf(recipient), 0, "frozen release pays nothing");
         vm.prank(multisig);
         minimalBridge.emergencyUnpauseAll();
         vm.prank(multisig);
-        minimalBridge.fundsOut(recipient, AMOUNT, RGB_OP_ID, SRC_ADDR);
+        minimalBridge.fundsOut(recipient, AMOUNT, releaseOperationId, SRC_ADDR);
         assertEq(usdt0.balanceOf(recipient), AMOUNT, "same release succeeds after emergency resume");
     }
 
     function test_unpauseInflow_keepsProxyOutflowFrozen() public {
         _seedRGB(AMOUNT);
-        bytes memory settlementData = _settlementWithAmounts(_ids(_seedOpId), _one(_seedAmt));
+        bytes memory settlementData = _settlement(_ids(_seedOpId));
         vm.startPrank(multisig);
         bridge.emergencyPauseAll();
         bridge.unpauseInflow();
@@ -217,7 +218,7 @@ contract BridgeFlowPausesTest is BridgeTestBase {
         assertFalse(bridge.paused(), "planned resume opens proxy inflow");
         assertTrue(bridge.outflowPaused(), "planned resume preserves proxy outflow freeze");
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_OP_ID + 1));
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1));
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT * 11, "deposit credits the frozen-outflow chain");
         vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
         vm.prank(multisig);

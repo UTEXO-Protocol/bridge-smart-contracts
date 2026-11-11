@@ -47,7 +47,7 @@ contract IntegrationGovernanceTest is IntegrationTestBase {
     function test_rotatedCommissionManager_inflatedQuoteRejectsSignedReleaseAndAllowsRetry() public {
         _configTokenCommissionRoutes();
         _openOutflowLimits();
-        bytes32 opId = _depositN(10, RGB_OP_ID);
+        bytes32 opId = _depositN(10, RGB_LOCK_ID);
         uint256 amount = _netIn();
         CommissionManager replacement = new CommissionManager(address(bridge), commissionReceiver);
         replacement.setCommissionRule(
@@ -69,7 +69,7 @@ contract IntegrationGovernanceTest is IntegrationTestBase {
         assertEq(address(bridge.commissionManager()), address(replacement));
         assertEq(proxy.commissionManager(), address(replacement));
 
-        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, amount, amount, "", _validProof());
+        (IBridge.FundsOutParams memory params, uint256 burnId) = _buildFundsOut(opId, amount, "", _validProof());
         uint256 nonce = proxy.teeNonce(RGB_CHAIN_ID);
         uint256 deadline = vm.getBlockTimestamp() + 1 hours;
         bytes[] memory sigs = _signEnclave2of3(MultisigHelper.digestTeeFundsOut(domainSep, params, nonce, deadline));

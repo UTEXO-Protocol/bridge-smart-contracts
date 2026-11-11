@@ -17,15 +17,20 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         private
         returns (IBridge.RebalanceParams memory p, IBridge.FundsOutParams memory release)
     {
-        usdt0.mint(user, AMOUNT * 19);
+        usdt0.mint(user, AMOUNT * 17);
         vm.prank(user);
-        bytes32 backingOperationId =
-            bridge.fundsIn(AMOUNT, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_000));
+        bytes32 backingOperationId = bridge.fundsIn(
+            AMOUNT, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 3_000, RGB_BEFORE_BLOCK)
+        );
         // Headroom under the 10% bucket burst; each deposit stays within uint64.
         vm.prank(user);
-        bridge.fundsIn(AMOUNT * 9, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_001));
+        bridge.fundsIn(
+            AMOUNT * 8, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 3_001, RGB_BEFORE_BLOCK)
+        );
         vm.prank(user);
-        bridge.fundsIn(AMOUNT * 9, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 3_002));
+        bridge.fundsIn(
+            AMOUNT * 8, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 3_002, RGB_BEFORE_BLOCK)
+        );
 
         p = _mintBurnToChainAParams(AMOUNT, backingOperationId);
         release = IBridge.FundsOutParams({
@@ -46,7 +51,7 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         // An identical rebalance intent derives the SAME burnId (no nonce), so
         // the second attempt is rejected as a consumed replay — matching
         // fundsOut's replay model exactly.
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_LOCK_ID + 1);
         _rebalance(p);
 
         vm.prank(multisig);
@@ -78,7 +83,8 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         // Second RGB deposit → a distinct record to reference for the 2nd burn.
         usdt0.mint(user, AMOUNT);
         vm.prank(user);
-        bytes32 secondSeedOpId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 50));
+        bytes32 secondSeedOpId =
+            bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 50, RGB_BEFORE_BLOCK));
 
         IBridge.RebalanceParams memory first = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
         IBridge.RebalanceParams memory second = _rgbToChainAParams(AMOUNT, secondSeedOpId);
@@ -180,7 +186,8 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
     function test_rebalanceLiquidity_changedBackingRecordsCannotReplaySameBurn() public {
         usdt0.mint(user, AMOUNT);
         vm.prank(user);
-        bytes32 otherRecord = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 51));
+        bytes32 otherRecord =
+            bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 51, RGB_BEFORE_BLOCK));
         IBridge.RebalanceParams memory first = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
         IBridge.RebalanceParams memory second = _rgbToChainAParams(AMOUNT, otherRecord);
         second.sourceBurnTxId = first.sourceBurnTxId;
@@ -259,11 +266,11 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
     }
 
     function test_rebalanceLiquidity_duplicateRgbMintAfterDepositRestoresDebitAndReplayState() public {
-        uint256 mintOpId = RGB_OP_ID + 500;
+        uint256 lockId = RGB_LOCK_ID + 500;
         usdt0.mint(user, AMOUNT);
         vm.prank(user);
-        bytes32 depositId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(mintOpId));
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, mintOpId);
+        bytes32 depositId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(lockId, RGB_BEFORE_BLOCK));
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, lockId);
         assertEq(_deriveRebalanceOpId(p), depositId, "deposit and credit leg share the identity");
         uint256 sourceBefore = bridge.lockedLiquidity(CHAIN_A_ID);
         uint256 destinationBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
@@ -284,8 +291,8 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
     }
 
     function test_fundsIn_duplicateRgbMintAfterRebalanceReverts() public {
-        uint256 mintOpId = RGB_OP_ID + 501;
-        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, mintOpId);
+        uint256 lockId = RGB_LOCK_ID + 501;
+        IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, lockId);
         _rebalance(p);
         usdt0.mint(user, AMOUNT);
         uint256 balanceBefore = usdt0.balanceOf(user);
@@ -293,7 +300,7 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         uint256 nonceBefore = bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))));
         vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(mintOpId));
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(lockId, RGB_BEFORE_BLOCK));
         assertEq(usdt0.balanceOf(user), balanceBefore);
         assertEq(bridge.totalLockedLiquidity(), totalBefore);
         assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))), nonceBefore);
@@ -302,7 +309,7 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
 
     function test_rebalanceLiquidity_distinctBurnCannotBackTheSameRgbMintTwice() public {
         // Keep room for both debit attempts under the source bucket limit.
-        IBridge.RebalanceParams memory first = _chainAToRgbParams(AMOUNT / 4, RGB_OP_ID + 502);
+        IBridge.RebalanceParams memory first = _chainAToRgbParams(AMOUNT / 4, RGB_LOCK_ID + 502);
         _rebalance(first);
         IBridge.RebalanceParams memory second = first;
         second.sourceBurnTxId = keccak256("different-debit-burn-same-credit-mint");

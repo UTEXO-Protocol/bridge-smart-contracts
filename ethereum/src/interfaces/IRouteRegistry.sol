@@ -76,6 +76,9 @@ interface IRouteRegistry {
     // Views
     // =========================================================================
 
+    /// @notice Bridge deployment permanently paired with this registry.
+    function bridge() external view returns (address);
+
     /// @notice Returns the current `RouteConfig` for the route key
     ///         `(sourceChainId, destChainId)`. Unset routes return the zero
     ///         struct (`enabled == false`).

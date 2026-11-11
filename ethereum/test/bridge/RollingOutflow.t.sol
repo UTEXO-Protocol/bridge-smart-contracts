@@ -160,7 +160,7 @@ contract BridgeRollingOutflowTest is BridgeTestBase {
 
         usdt0.mint(user, 1_000e6);
         vm.prank(user);
-        bytes32 otherOpId = bridge.fundsIn(1_000e6, otherChain, DST_ADDR, _rgbData(RGB_OP_ID + otherChain));
+        bytes32 otherOpId = bridge.fundsIn(1_000e6, otherChain, DST_ADDR, _rgbData(RGB_LOCK_ID + otherChain));
 
         _seedRGB(100e6); // 1000 RGB + 1000 other; 10% bucket bursts
         vm.prank(multisig);
@@ -170,7 +170,7 @@ contract BridgeRollingOutflowTest is BridgeTestBase {
         assertEq(bridge.availableGlobalSafetyOutflow(), 400e6, "global hard cap is 20% of aggregate TVL");
 
         bytes32[] memory otherIds = _ids(otherOpId);
-        bytes memory otherSettlement = _settlementWithAmounts(otherIds, _one(1_000e6));
+        bytes memory otherSettlement = _settlement(otherIds);
 
         uint256 firstRgb = 100e6;
         uint256 firstOther = 95e6;
@@ -235,7 +235,7 @@ contract BridgeRollingOutflowTest is BridgeTestBase {
 
         usdt0.mint(user, 1_000e6);
         vm.prank(user);
-        bytes32 otherOpId = bridge.fundsIn(1_000e6, otherChain, DST_ADDR, _rgbData(RGB_OP_ID + otherChain));
+        bytes32 otherOpId = bridge.fundsIn(1_000e6, otherChain, DST_ADDR, _rgbData(RGB_LOCK_ID + otherChain));
 
         _seedRGB(100e6); // 1,000 RGB + 1,000 other
         vm.startPrank(multisig);
@@ -263,7 +263,7 @@ contract BridgeRollingOutflowTest is BridgeTestBase {
         uint256 capacityShares = 500 * bridge.SHARE_UNIT() / bridge.BPS_DENOMINATOR();
         uint256 requestedShares = (quotedForOther * bridge.SHARE_UNIT() + bridge.globalOutflowReference() - 1)
             / bridge.globalOutflowReference();
-        bytes memory otherSettlement = _settlementWithAmounts(_ids(otherOpId), _one(1_000e6));
+        bytes memory otherSettlement = _settlement(_ids(otherOpId));
 
         vm.expectRevert(
             abi.encodeWithSelector(

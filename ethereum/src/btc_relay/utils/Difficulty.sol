@@ -29,7 +29,7 @@ library Difficulty {
         pure
         returns (uint256 newTarget, uint32 newNbitsLE)
     {
-        uint256 timespan = uint256(prevTimestamp) - uint256(startTimestamp);
+        uint256 timespan = prevTimestamp > startTimestamp ? uint256(prevTimestamp) - uint256(startTimestamp) : 0;
         //Difficulty increase/decrease multiples are clamped between 0.25 (-75%) and 4 (+300%)
         if (timespan < TARGET_TIMESPAN_DIV_4) timespan = TARGET_TIMESPAN_DIV_4;
         if (timespan > TARGET_TIMESPAN_MUL_4) timespan = TARGET_TIMESPAN_MUL_4;

@@ -33,12 +33,12 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         routeRegistry.setRoute(customSrc, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
 
         // The nonce for this (sourceChainId, sourceSender) starts at 0.
-        bytes32 expectedOpId = _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT);
+        bytes32 expectedOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT);
 
         // RGB deposits emit FundsIn with the adapter as sender, followed by
         // BridgeFundsIn with the authenticated source sender.
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit IBridge.FundsIn(mockAdapter, RGB_OP_ID, uint64(AMOUNT));
+        emit IBridge.FundsIn(mockAdapter, RGB_LOCK_ID, uint64(AMOUNT));
         vm.expectEmit(true, true, true, true, address(bridge));
         emit IBridge.BridgeFundsIn(
             expectedOpId,
@@ -62,6 +62,34 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "record stored on module");
     }
 
+    function test_fundsInFromAdapter_revertsWhenCumulativeRgbSupplyExceedsUint64() public {
+        uint256 maxSupply = type(uint64).max;
+        usdt0.mint(user, maxSupply);
+        vm.prank(user);
+        bridge.fundsIn(maxSupply, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+
+        address adapter = makeAddr("supply-cap-adapter");
+        vm.prank(multisig);
+        bridge.setLZAdapter(adapter);
+        vm.prank(deployer);
+        routeRegistry.setRoute(ADAPTER_SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+        usdt0.mint(adapter, 1);
+        vm.prank(adapter);
+        usdt0.approve(address(bridge), 1);
+
+        bytes32 sourceSender = bytes32(uint256(uint160(user)));
+        bytes32 secondOpId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID + 1, 1);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.CirculatingSupplyOverflow.selector, maxSupply, uint256(1)));
+        vm.prank(adapter);
+        bridge.fundsIn(1, ADAPTER_SOURCE_CHAIN_ID, sourceSender, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1));
+
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), maxSupply, "RGB supply unchanged");
+        assertEq(bridge.totalLockedLiquidity(), maxSupply, "total liquidity unchanged");
+        assertEq(rgbModule.fundsInRecords(secondOpId), 0, "settlement record rolled back");
+        assertEq(usdt0.balanceOf(adapter), 1, "adapter token pull rolled back");
+        assertEq(bridge.sourceSenderNonces(ADAPTER_SOURCE_CHAIN_ID, sourceSender), 0, "adapter nonce rolled back");
+    }
+
     function test_fundsInFromAdapter_sameRgbMintAcrossSourceRoutesReverts() public {
         vm.prank(user);
         bytes32 original = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
@@ -82,6 +110,40 @@ contract BridgeAdapterDepositsTest is BridgeTestBase {
         assertEq(usdt0.balanceOf(adapter), AMOUNT);
         assertEq(bridge.totalLockedLiquidity(), AMOUNT);
         assertEq(bridge.sourceSenderNonces(customSource, sourceSender), 0);
+    }
+
+    function test_fundsInFromAdapter_expiredRgbMintRollsBackDeposit() public {
+        address adapter = makeAddr("expired-adapter");
+        vm.prank(multisig);
+        bridge.setLZAdapter(adapter);
+        vm.prank(deployer);
+        routeRegistry.setRoute(ADAPTER_SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(rgbModule));
+        usdt0.mint(adapter, AMOUNT);
+        vm.prank(adapter);
+        usdt0.approve(address(bridge), AMOUNT);
+        bytes32 sourceSender = bytes32(uint256(uint160(user)));
+        bytes32 operationId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT);
+        _setArbitrumL2Block(RGB_BEFORE_BLOCK);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(RgbSettlementModule.LockWindowExpired.selector, RGB_BEFORE_BLOCK, RGB_BEFORE_BLOCK)
+        );
+        vm.prank(adapter);
+        bridge.fundsIn(
+            AMOUNT,
+            ADAPTER_SOURCE_CHAIN_ID,
+            sourceSender,
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData(RGB_LOCK_ID, RGB_BEFORE_BLOCK)
+        );
+
+        assertEq(usdt0.balanceOf(adapter), AMOUNT, "adapter token pull rolled back");
+        assertEq(usdt0.balanceOf(address(bridge)), 0, "bridge custody unchanged");
+        assertEq(bridge.sourceSenderNonces(ADAPTER_SOURCE_CHAIN_ID, sourceSender), 0, "nonce rolled back");
+        assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 0, "liquidity unchanged");
+        assertEq(bridge.totalLockedLiquidity(), 0, "total liquidity unchanged");
+        assertEq(rgbModule.fundsInRecords(operationId), 0, "amount record absent");
     }
 
     function test_fundsInFromAdapter_revertsOnZeroSourceChain() public {

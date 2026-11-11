@@ -17,7 +17,7 @@ contract MockSettlementModule is ISettlementModule {
     uint256 public onFundsInCount;
     uint256 public beforeFundsOutCount;
 
-    /// @notice Correlation id returned from `onFundsIn` (mirrors the RGB OpId a
+    /// @notice Correlation id returned from `onFundsIn` (mirrors the RGB lock ID a
     ///         real settlement module would surface). Defaults to 0.
     uint256 public externalIdToReturn;
 

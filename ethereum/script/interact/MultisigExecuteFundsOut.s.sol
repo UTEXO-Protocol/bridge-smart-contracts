@@ -21,7 +21,7 @@ interface IBridgeFundsOutView {
 ///      Inputs (see the matching .env example for values):
 ///      `RECIPIENT`, `AMOUNT`, `SOURCE_CHAIN_ID`, `DESTINATION_CHAIN_ID`, `SOURCE_ADDRESS`,
 ///      `SOURCE_BURN_TX_ID`, `SOURCE_BLOCK_HEIGHT`, `SOURCE_COMMITMENT_HASH`,
-///      `LATEST_BLOCK_HEIGHT`, `LATEST_COMMITMENT_HASH`, `FUNDS_IN_IDS`, `FUNDS_IN_AMOUNTS`,
+///      `LATEST_BLOCK_HEIGHT`, `LATEST_COMMITMENT_HASH`, `FUNDS_IN_IDS`,
 ///      `PROXY_ADDRESS`, `DEADLINE_OFFSET`, `ENCLAVE_BITMAP`, `ENCLAVE_PKS`, `PRIVATE_KEY`.
 contract MultisigExecuteFundsOut is Script {
     function _loadParams(address bridgeAddress) internal view returns (IBridge.FundsOutParams memory p) {
@@ -41,12 +41,10 @@ contract MultisigExecuteFundsOut is Script {
             vm.envBytes32("LATEST_COMMITMENT_HASH")
         );
 
-        // RgbSettlementModule checks exact, network-scoped mint records using
-        // equal-length parallel arrays.
+        // RgbSettlementModule checks that every referenced mint exists on the
+        // source RGB network.
         bytes32[] memory operationIds = vm.envBytes32("FUNDS_IN_IDS", ",");
-        uint256[] memory amounts = vm.envUint("FUNDS_IN_AMOUNTS", ",");
-        require(operationIds.length == amounts.length, "FUNDS_IN_IDS/FUNDS_IN_AMOUNTS length mismatch");
-        p.settlementData = abi.encode(operationIds, amounts);
+        p.settlementData = abi.encode(operationIds);
 
         // Shared Bridge settlement replay key. The Bridge recomputes the same
         // canonical value for fundsOut and rebalanceLiquidity. The moving

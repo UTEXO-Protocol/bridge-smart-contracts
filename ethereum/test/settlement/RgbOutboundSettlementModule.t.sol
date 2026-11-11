@@ -33,39 +33,25 @@ contract RgbOutboundSettlementModuleTest is BridgeRebalanceTestBase {
         IBridge.RebalanceParams memory p = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
         bytes32[] memory ids = new bytes32[](1);
         ids[0] = bogus;
-        uint256[] memory amounts = new uint256[](1);
-        amounts[0] = AMOUNT;
-        p.settlementDataOut = abi.encode(ids, amounts);
+        p.settlementDataOut = abi.encode(ids);
         p.burnId = _deriveRebalanceBurnId(p);
         vm.prank(multisig);
         vm.expectRevert(abi.encodeWithSelector(RgbOutboundSettlementModule.FundsInNotFound.selector, bogus));
         bridge.rebalanceLiquidity(p);
     }
 
-    function test_outboundModule_revertsAmountMismatch() public {
-        uint256 recorded = rgbModule.fundsInRecords(rgbSeedOpId);
-        IBridge.RebalanceParams memory p = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
-        bytes32[] memory ids = new bytes32[](1);
-        ids[0] = rgbSeedOpId;
-        uint256[] memory amounts = new uint256[](1);
-        amounts[0] = recorded - 1;
-        p.settlementDataOut = abi.encode(ids, amounts);
-        p.burnId = _deriveRebalanceBurnId(p);
+    function test_outboundModule_revertsOnCrossNetworkRecord() public {
+        IBridge.RebalanceParams memory p = _rgbToChainAParams(AMOUNT, secondaryRgbSeedOpId);
+
         vm.prank(multisig);
         vm.expectRevert(
             abi.encodeWithSelector(
-                RgbOutboundSettlementModule.AmountMismatch.selector, rgbSeedOpId, recorded - 1, recorded
+                RgbOutboundSettlementModule.FundsInRecordChainMismatch.selector,
+                secondaryRgbSeedOpId,
+                RGB_CHAIN_ID,
+                SECONDARY_RGB_CHAIN_ID
             )
         );
-        bridge.rebalanceLiquidity(p);
-    }
-
-    function test_outboundModule_revertsLengthMismatch() public {
-        IBridge.RebalanceParams memory p = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
-        p.settlementDataOut = abi.encode(new bytes32[](2), new uint256[](1));
-        p.burnId = _deriveRebalanceBurnId(p);
-        vm.prank(multisig);
-        vm.expectRevert(RgbOutboundSettlementModule.SettlementDataLengthMismatch.selector);
         bridge.rebalanceLiquidity(p);
     }
 

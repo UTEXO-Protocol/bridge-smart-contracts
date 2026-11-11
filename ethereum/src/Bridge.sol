@@ -10,7 +10,8 @@ import {BridgeBaseUpgradeable} from "./BridgeBaseUpgradeable.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
 import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
-import {FundsInContext, FundsOutContext} from "./interfaces/RouteTypes.sol";
+import {IRgbSettlementModule} from "./interfaces/IRgbSettlementModule.sol";
+import {FundsInContext, FundsOutContext, RouteConfig} from "./interfaces/RouteTypes.sol";
 import {OutflowRateLimiter} from "./libraries/OutflowRateLimiter.sol";
 import {RollingOutflowLimiter} from "./libraries/RollingOutflowLimiter.sol";
 
@@ -42,12 +43,12 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     uint256 public constant MAX_PROOF_LENGTH = 1024;
 
     /// @notice Maximum byte length of deposit settlement data.
-    /// @dev RGB deposits encode one uint256 mint OpId.
+    /// @dev RGB deposits encode `(uint256 lockId, uint64 beforeBlock)` in 64 bytes.
     uint256 public constant MAX_SETTLEMENT_DATA_IN_LENGTH = 128;
 
     /// @notice Maximum byte length of each release or rebalance settlement payload.
-    /// @dev Two parallel arrays encode as 128 + 64 * n bytes; 90,000 bytes allows
-    ///      up to 1,404 RGB record pairs and bounds module processing.
+    /// @dev One dynamic bytes32 array encodes as 64 + 32 * n bytes; 90,000 bytes
+    ///      allows up to 2,810 RGB record ids and bounds module processing.
     uint256 public constant MAX_SETTLEMENT_DATA_OUT_LENGTH = 90_000;
 
     /// @notice Basis-point denominator for outflow policies, safety limits and native-fee
@@ -88,12 +89,15 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         "UtexoFundsInOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,uint256 senderNonce,address token,uint256 grossAmount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataHash,uint256 chainId)"
     );
 
-    /// @notice RGB backing identity derived only from a mint and pinned config.
+    /// @notice RGB backing identity derived only from a mint lock and pinned config.
     /// @dev Both deposits and rebalances into RGB use this formula,
     ///      so the mint has one backing record.
     bytes32 public constant RGB_MINT_DEPOSIT_TYPEHASH = keccak256(
         "UtexoRgbMintDeposit(address bridge,uint256 chainId,address token,uint256 rgbNetwork,uint256 rgbOpId,uint256 netAmount)"
     );
+
+    /// @notice Canonical RGB network used by rgb-lib's two-argument BFA lookup.
+    uint256 public constant RGB_NETWORK = 827166;
 
     /// @notice Type hash for the replay key shared by releases and rebalances.
     /// @dev Excludes destination, recipient, proof and settlement data so changing them
@@ -365,6 +369,13 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     }
 
     /// @inheritdoc IBridge
+    function circulatingSupply() external view override returns (uint64) {
+        // Every RGB credit is bounded by `_creditChainLiquidity`.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint64(lockedLiquidity[RGB_NETWORK]);
+    }
+
+    /// @inheritdoc IBridge
     function effectiveAvailableOutflow(uint256 chainId) external view override returns (uint256) {
         uint256 chainSpent = _chainSafetyWindows[chainId].current();
         uint256 chainLiquidity = lockedLiquidity[chainId];
@@ -585,9 +596,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         // Derive the credit id and record the destination settlement.
         bytes32 operationId = IRouteRegistry(routeRegistry)
             .usesRgbMintDepositId(params.sourceChainId, params.destinationChainId)
-            ? rgbMintDepositId(params.destinationChainId, _decodeRgbOpId(params.settlementDataIn), params.amount)
+            ? rgbMintDepositId(params.destinationChainId, _decodeLockId(params.settlementDataIn), params.amount)
             : _deriveRebalanceOperationId(params, sourceSender, expectedBurnId);
-        uint256 rgbOpId = IRouteRegistry(routeRegistry)
+        uint256 lockId = IRouteRegistry(routeRegistry)
             .onFundsIn(
                 FundsInContext({
                 token: TOKEN,
@@ -604,7 +615,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
                 params.settlementDataIn
             );
 
-        lockedLiquidity[params.destinationChainId] += params.amount;
+        _creditChainLiquidity(
+            params.destinationChainId, params.amount, lockId != 0 || params.destinationChainId == RGB_NETWORK
+        );
 
         // Rebalance moves release capacity away from the source chain and
         // therefore consumes the same immutable per-chain safety allowance as a
@@ -617,7 +630,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         // RGB-only correlation event, same contract as `_fundsIn`: the RGB
         // listener authorizes a mint against `FundsIn` and needs no awareness
         // of the rebalance mechanics.
-        if (rgbOpId != 0) _emitRgbFundsIn(_msgSender(), rgbOpId, params.amount);
+        if (lockId != 0) _emitRgbFundsIn(_msgSender(), lockId, params.amount);
         emit BridgeRebalance(
             operationId,
             params.burnId,
@@ -642,10 +655,23 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
 
     /// @dev Emit the RGB compatibility event without silently truncating an
     ///      EVM-native `uint256` token amount to RGB's `u64` amount range.
-    function _emitRgbFundsIn(address sender, uint256 rgbOpId, uint256 amount) private {
-        if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
+    function _emitRgbFundsIn(address sender, uint256 lockId, uint256 amount) private {
+        // `_creditChainLiquidity` has already bounded every RGB credit to uint64.
         // forge-lint: disable-next-line(unsafe-typecast)
-        emit FundsIn(sender, rgbOpId, uint64(amount));
+        emit FundsIn(sender, lockId, uint64(amount));
+    }
+
+    /// @dev Credits one destination bucket and enforces RGB's cumulative u64 supply bound.
+    ///      `isRgb` covers both non-zero RGB correlation ids and the canonical RGB network.
+    function _creditChainLiquidity(uint256 chainId, uint256 amount, bool isRgb) private {
+        uint256 currentLiquidity = lockedLiquidity[chainId];
+        if (isRgb) {
+            if (amount > type(uint64).max) revert AmountExceedsUint64(amount);
+            if (currentLiquidity > type(uint64).max - amount) {
+                revert CirculatingSupplyOverflow(currentLiquidity, amount);
+            }
+        }
+        lockedLiquidity[chainId] = currentLiquidity + amount;
     }
 
     function _validateFundsOutParams(FundsOutParams calldata params) private view {
@@ -829,10 +855,10 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         ctx.operationId = _deriveOperationId(ctx, settlementData);
 
         // Record the deposit and obtain the optional RGB event id.
-        uint256 rgbOpId = IRouteRegistry(routeRegistry).onFundsIn(ctx, settlementData);
+        uint256 lockId = IRouteRegistry(routeRegistry).onFundsIn(ctx, settlementData);
 
         // Credit only the net tokens retained by Bridge.
-        lockedLiquidity[destinationChainId] += ctx.netAmount;
+        _creditChainLiquidity(destinationChainId, ctx.netAmount, lockId != 0 || destinationChainId == RGB_NETWORK);
         totalLockedLiquidity += ctx.netAmount;
 
         // Forward the accepted native fee; refund any direct-deposit surplus below.
@@ -842,8 +868,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         }
 
         // RGB-only correlation event: emitted only when the route module
-        // returned a non-zero external id (the RGB OpId). Other routes skip it.
-        if (rgbOpId != 0) _emitRgbFundsIn(ctx.sender, rgbOpId, ctx.netAmount);
+        // returned a non-zero external id (the RGB lock ID). Other routes skip it.
+        if (lockId != 0) _emitRgbFundsIn(ctx.sender, lockId, ctx.netAmount);
         emit BridgeFundsIn(
             ctx.operationId,
             ctx.sourceSender,
@@ -944,20 +970,27 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     }
 
     /// @inheritdoc IBridge
-    function rgbMintDepositId(uint256 rgbNetwork, uint256 rgbOpId, uint256 netAmount)
+    function rgbMintDepositId(uint256 rgbNetwork, uint256 lockId, uint256 netAmount)
         public
         view
         override
         returns (bytes32)
     {
         return keccak256(
-            abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, address(this), block.chainid, TOKEN, rgbNetwork, rgbOpId, netAmount)
+            abi.encode(RGB_MINT_DEPOSIT_TYPEHASH, address(this), block.chainid, TOKEN, rgbNetwork, lockId, netAmount)
         );
     }
 
-    function _decodeRgbOpId(bytes calldata settlementData) private pure returns (uint256 rgbOpId) {
-        rgbOpId = abi.decode(settlementData, (uint256));
-        if (rgbOpId == 0) revert InvalidRgbOpId();
+    /// @inheritdoc IBridge
+    function getFundsInBlock(uint256 lockId, uint256 netAmount) external view override returns (uint64 l2BlockPlusOne) {
+        bytes32 operationId = rgbMintDepositId(RGB_NETWORK, lockId, netAmount);
+        RouteConfig memory route = IRouteRegistry(routeRegistry).getRoute(block.chainid, RGB_NETWORK);
+        return IRgbSettlementModule(route.settlementModule).fundsInRecordL2Blocks(operationId);
+    }
+
+    function _decodeLockId(bytes calldata settlementData) private pure returns (uint256 lockId) {
+        (lockId,) = abi.decode(settlementData, (uint256, uint64));
+        if (lockId == 0) revert InvalidRgbOpId();
     }
 
     /// @dev RGB ids bind the mint and actual net amount; all other routes retain
@@ -969,7 +1002,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         returns (bytes32)
     {
         if (IRouteRegistry(routeRegistry).usesRgbMintDepositId(ctx.sourceChainId, ctx.destChainId)) {
-            return rgbMintDepositId(ctx.destChainId, _decodeRgbOpId(settlementData), ctx.netAmount);
+            return rgbMintDepositId(ctx.destChainId, _decodeLockId(settlementData), ctx.netAmount);
         }
         return keccak256(
             abi.encode(

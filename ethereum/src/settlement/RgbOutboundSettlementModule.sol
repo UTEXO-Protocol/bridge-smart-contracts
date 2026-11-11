@@ -9,7 +9,7 @@ import {RgbSettlementModule} from "./RgbSettlementModule.sol";
 /// @notice Checks RGB backing records for routes with a non-RGB credit leg.
 /// @dev A route has one module slot: this wrapper reads the canonical ledger instead
 ///      of duplicating its history. Debit checks do not consume records.
-///      Debits require non-empty record references with exact amounts and network tags.
+///      Debits require non-empty record references with matching network tags.
 ///      Credits create no record or RGB event.
 ///      Both hooks accept calls only from the paired registry.
 contract RgbOutboundSettlementModule is ISettlementModule {
@@ -30,18 +30,10 @@ contract RgbOutboundSettlementModule is ISettlementModule {
     ///         record in the wrapped module's ledger.
     error FundsInNotFound(bytes32 operationId);
 
-    /// @notice A referenced operation id exists, but the supplied amount does
-    ///         not match the recorded mint amount exactly.
-    error AmountMismatch(bytes32 operationId, uint256 provided, uint256 recorded);
-
     /// @notice A referenced operation id exists in the wrapped ledger, but it was
     ///         minted to a different RGB network than the one this release burns
     ///         from. Mirrors `RgbSettlementModule`'s same-network scope check.
     error FundsInRecordChainMismatch(bytes32 operationId, uint256 expected, uint256 recorded);
-
-    /// @notice `beforeFundsOut` `settlementData` decoded to `operationIds` and
-    ///         `amounts` arrays of different lengths.
-    error SettlementDataLengthMismatch();
 
     /// @notice The outbound RGB debit supplied no FundsIn accounting record.
     error EmptySettlementRecords();
@@ -105,24 +97,22 @@ contract RgbOutboundSettlementModule is ISettlementModule {
     }
 
     /// @inheritdoc ISettlementModule
-    /// @dev Reads `(bytes32[] operationIds, uint256[] amounts)` from settlementData.
-    ///      Requires at least one pair even for rebalances. Every record must exist in
-    ///      the wrapped ledger with an exact amount and the source RGB network tag.
+    /// @dev Reads `bytes32[] operationIds` from settlementData. Requires at least
+    ///      one id even for rebalances. Every record must exist in the wrapped
+    ///      ledger with the source RGB network tag.
     function beforeFundsOut(FundsOutContext calldata ctx, bytes calldata settlementData)
         external
         view
         override
         onlyRouteRegistry
     {
-        (bytes32[] memory operationIds, uint256[] memory amounts) = abi.decode(settlementData, (bytes32[], uint256[]));
+        bytes32[] memory operationIds = abi.decode(settlementData, (bytes32[]));
 
-        if (operationIds.length != amounts.length) revert SettlementDataLengthMismatch();
         if (operationIds.length == 0) revert EmptySettlementRecords();
 
         for (uint256 i = 0; i < operationIds.length; i++) {
             uint256 recorded = rgbModule.fundsInRecords(operationIds[i]);
             if (recorded == 0) revert FundsInNotFound(operationIds[i]);
-            if (recorded != amounts[i]) revert AmountMismatch(operationIds[i], amounts[i], recorded);
             uint256 recordChainId = rgbModule.fundsInRecordChainIds(operationIds[i]);
             if (recordChainId != ctx.sourceChainId) {
                 revert FundsInRecordChainMismatch(operationIds[i], ctx.sourceChainId, recordChainId);
