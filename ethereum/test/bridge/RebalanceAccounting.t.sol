@@ -36,7 +36,10 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         usdt0.mint(user, AMOUNT * 10);
         vm.prank(user);
         bytes32 backing = bridge.fundsIn(
-            AMOUNT * 10, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(backingMint, RGB_BEFORE_BLOCK)
+            AMOUNT * 10,
+            MINT_BURN_FIXTURE_CHAIN_ID,
+            RGB_DST_ADDR,
+            bytes.concat(abi.encode(backingMint, RGB_BEFORE_BLOCK), hex"00")
         );
         IBridge.RebalanceParams memory p = _mintBurnToChainAParams(AMOUNT, backing);
         p.destinationChainId = SOURCE_CHAIN_ID;

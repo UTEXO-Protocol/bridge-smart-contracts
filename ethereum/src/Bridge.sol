@@ -8,7 +8,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {BridgeBaseUpgradeable} from "./BridgeBaseUpgradeable.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
-import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
+import {FlatFeeType, ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
 import {IRgbSettlementModule} from "./interfaces/IRgbSettlementModule.sol";
 import {FundsInContext, FundsOutContext, RouteConfig} from "./interfaces/RouteTypes.sol";
@@ -43,8 +43,13 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     uint256 public constant MAX_PROOF_LENGTH = 1024;
 
     /// @notice Maximum byte length of deposit settlement data.
-    /// @dev RGB deposits encode `(uint256 rgbOpId, uint64 beforeBlock)` in 64 bytes.
+    /// @dev RGB deposits append one raw flat-fee selector byte to the 64-byte tuple.
     uint256 public constant MAX_SETTLEMENT_DATA_IN_LENGTH = 128;
+
+    /// @dev RGB rebalance credits retain the legacy two-word payload, while
+    ///      user deposits append one raw byte selecting BASE or WITNESS.
+    uint256 private constant _RGB_SETTLEMENT_FIELDS_LENGTH = 64;
+    uint256 private constant _RGB_FUNDS_IN_DATA_LENGTH = 65;
 
     /// @notice Maximum byte length of each release or rebalance settlement payload.
     /// @dev One dynamic bytes32 array encodes as 64 + 32 * n bytes; 90,000 bytes
@@ -589,7 +594,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         // Derive the credit id and record the destination settlement.
         bytes32 operationId = IRouteRegistry(routeRegistry)
             .usesRgbMintDepositId(params.sourceChainId, params.destinationChainId)
-            ? rgbMintDepositId(params.destinationChainId, _decodeRgbOpId(params.settlementDataIn), params.amount)
+            ? rgbMintDepositId(
+                params.destinationChainId, _decodeRgbRebalanceOpId(params.settlementDataIn), params.amount
+            )
             : _deriveRebalanceOperationId(params, sourceSender, expectedBurnId);
         uint256 rgbOpId = IRouteRegistry(routeRegistry)
             .onFundsIn(
@@ -772,9 +779,14 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (sourceChainId == 0) revert InvalidSourceChainId();
         if (destinationChainId == 0) revert InvalidDestinationChainId();
 
+        bool quoteUsesRgbMintId = IRouteRegistry(routeRegistry).usesRgbMintDepositId(sourceChainId, destinationChainId);
+        FlatFeeType flatFeeType = FlatFeeType.BASE;
+        if (quoteUsesRgbMintId) flatFeeType = _decodeRgbFlatFeeType(settlementData);
+
         // Quote on the requested amount; derive net liquidity from the actual token receipt.
-        (uint256 tokenCommission, uint256 nativeCommission,) =
-            commissionManager.calculateFundsInCommission(sourceChainId, destinationChainId, TOKEN, amount, sourceSender);
+        (uint256 tokenCommission, uint256 nativeCommission,) = commissionManager.calculateFundsInCommission(
+            sourceChainId, destinationChainId, TOKEN, amount, sourceSender, flatFeeType
+        );
 
         // Direct deposits pay the quote and receive a surplus refund.
         // Adapter deposits pay the full supplied value within the symmetric tolerance.
@@ -830,7 +842,12 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
 
         // Resolve identity after commission callbacks, immediately before the
         // record write.
-        ctx.operationId = _deriveOperationId(ctx, settlementData);
+        // Resolve again after commission callbacks: an authorized manager may
+        // rotate the route while receiving token commission.
+        bool currentUsesRgbMintId =
+            IRouteRegistry(routeRegistry).usesRgbMintDepositId(sourceChainId, destinationChainId);
+        if (currentUsesRgbMintId != quoteUsesRgbMintId) revert RouteFeeModeChanged();
+        ctx.operationId = _deriveOperationId(ctx, settlementData, currentUsesRgbMintId);
 
         // Record the deposit and obtain the optional RGB event id.
         uint256 rgbOpId = IRouteRegistry(routeRegistry).onFundsIn(ctx, settlementData);
@@ -972,19 +989,43 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     }
 
     function _decodeRgbOpId(bytes calldata settlementData) private pure returns (uint256 rgbOpId) {
-        (rgbOpId,) = abi.decode(settlementData, (uint256, uint64));
+        if (settlementData.length < _RGB_SETTLEMENT_FIELDS_LENGTH) {
+            revert InvalidRgbSettlementDataLength(settlementData.length);
+        }
+        (rgbOpId,) = abi.decode(settlementData[:_RGB_SETTLEMENT_FIELDS_LENGTH], (uint256, uint64));
         if (rgbOpId == 0) revert InvalidRgbOpId();
+    }
+
+    /// @dev Rebalance credits deliberately keep the legacy two-word payload and
+    ///      never carry a user-selected fee mode.
+    function _decodeRgbRebalanceOpId(bytes calldata settlementData) private pure returns (uint256 rgbOpId) {
+        if (settlementData.length != _RGB_SETTLEMENT_FIELDS_LENGTH) {
+            revert InvalidRgbSettlementDataLength(settlementData.length);
+        }
+        return _decodeRgbOpId(settlementData);
+    }
+
+    /// @dev RGB user deposits must append exactly one raw selector byte to the
+    ///      legacy `(rgbOpId, beforeBlock)` payload.
+    function _decodeRgbFlatFeeType(bytes calldata settlementData) private pure returns (FlatFeeType flatFeeType) {
+        if (settlementData.length != _RGB_FUNDS_IN_DATA_LENGTH) {
+            revert InvalidRgbSettlementDataLength(settlementData.length);
+        }
+
+        uint8 rawType = uint8(settlementData[_RGB_SETTLEMENT_FIELDS_LENGTH]);
+        if (rawType > uint8(FlatFeeType.WITNESS)) revert InvalidFlatFeeType(rawType);
+        flatFeeType = FlatFeeType(rawType);
     }
 
     /// @dev RGB ids bind the mint and actual net amount; all other routes retain
     ///      the sender/nonce/gross-amount formula. The route module chooses the
     ///      mode before the record is written. ctx.operationId is ignored.
-    function _deriveOperationId(FundsInContext memory ctx, bytes calldata settlementData)
+    function _deriveOperationId(FundsInContext memory ctx, bytes calldata settlementData, bool usesRgbMintId)
         private
         view
         returns (bytes32)
     {
-        if (IRouteRegistry(routeRegistry).usesRgbMintDepositId(ctx.sourceChainId, ctx.destChainId)) {
+        if (usesRgbMintId) {
             return rgbMintDepositId(ctx.destChainId, _decodeRgbOpId(settlementData), ctx.netAmount);
         }
         return keccak256(

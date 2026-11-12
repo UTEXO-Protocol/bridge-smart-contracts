@@ -49,18 +49,14 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, tooLong);
     }
 
-    function test_fundsIn_acceptsSettlementDataAtMaxLength() public {
-        // The length guard lives in Bridge, ahead of the route module. A
-        // maximal-length blob with a canonical tuple prefix still decodes as
-        // valid RGB data, so the deposit clears the guard and records normally
-        // under the bridge-derived operationId.
+    function test_fundsIn_rejectsNonCanonicalRgbSettlementDataBelowGlobalCap() public {
         uint256 max = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH();
         bytes memory prefix = abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK);
         bytes memory atMax = bytes.concat(prefix, PayloadHelper.filledBytes(max - prefix.length));
 
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidRgbSettlementDataLength.selector, max));
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, atMax);
-        assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "deposit at the settlement-data cap is accepted");
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, atMax);
     }
 
     function test_fundsOut_acceptsSettlementDataAboveInboundCap() public {

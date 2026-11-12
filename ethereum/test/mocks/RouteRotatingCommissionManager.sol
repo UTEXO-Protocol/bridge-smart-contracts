@@ -2,6 +2,7 @@
 pragma solidity 0.8.35;
 
 import {RouteRegistry} from "../../src/RouteRegistry.sol";
+import {FlatFeeType} from "../../src/interfaces/ICommissionManager.sol";
 
 /// @notice Models an authorized route rotation during commission forwarding.
 contract RouteRotatingCommissionManager {
@@ -42,6 +43,14 @@ contract RouteRotatingCommissionManager {
     }
 
     function calculateFundsInCommission(uint256, uint256, address, uint256 amount, bytes32)
+        external
+        pure
+        returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)
+    {
+        return (amount / 10, 0, amount - amount / 10);
+    }
+
+    function calculateFundsInCommission(uint256, uint256, address, uint256 amount, bytes32, FlatFeeType)
         external
         pure
         returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount)

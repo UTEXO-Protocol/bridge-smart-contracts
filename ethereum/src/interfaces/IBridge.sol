@@ -29,6 +29,9 @@ interface IBridge {
     error ZeroAmount();
     error ZeroNetAmount();
     error InvalidRgbOpId();
+    error InvalidRgbSettlementDataLength(uint256 length);
+    error InvalidFlatFeeType(uint8 value);
+    error RouteFeeModeChanged();
     error CommissionConservationBroken();
     error AmountBelowMinimum(uint256 amount, uint256 minimum);
     error InsufficientReceived(uint256 received, uint256 tokenCommission);
@@ -238,8 +241,9 @@ interface IBridge {
     /// @param destinationChainId     Destination network id.
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
-    /// @param settlementData         Route payload; RGB uses
-    ///                               `abi.encode(uint256 rgbOpId, uint64 beforeBlock)`.
+    /// @param settlementData         Route payload; RGB uses the 64-byte
+    ///                               `abi.encode(uint256 rgbOpId, uint64 beforeBlock)` followed
+    ///                               by one raw byte: `0` = BASE, `1` = WITNESS.
     /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,
@@ -268,8 +272,9 @@ interface IBridge {
     /// @param destinationChainId     Destination network id.
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
-    /// @param settlementData         Route payload; RGB uses
-    ///                               `abi.encode(uint256 rgbOpId, uint64 beforeBlock)`.
+    /// @param settlementData         Route payload; RGB uses the 64-byte
+    ///                               `abi.encode(uint256 rgbOpId, uint64 beforeBlock)` followed
+    ///                               by one raw byte: `0` = BASE, `1` = WITNESS.
     /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,

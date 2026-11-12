@@ -108,20 +108,16 @@ contract BridgeRebalanceValidationTest is BridgeRebalanceTestBase {
         bridge.rebalanceLiquidity(p);
     }
 
-    function test_rebalanceLiquidity_acceptsSettlementDataInAtMaxLength() public {
-        // A max-length blob with a canonical tuple prefix still decodes as
-        // valid RGB data, so the credit leg records normally. The length is
-        // far above the deposit cap: the rebalance credit leg is not bound by it.
+    function test_rebalanceLiquidity_rejectsNonCanonicalRgbSettlementDataBelowGlobalCap() public {
         IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, RGB_OP_ID + 1);
         bytes memory prefix = abi.encode(RGB_OP_ID + 1, RGB_BEFORE_BLOCK);
         p.settlementDataIn =
             bytes.concat(prefix, PayloadHelper.filledBytes(bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH() - prefix.length));
         assertGt(p.settlementDataIn.length, bridge.MAX_SETTLEMENT_DATA_IN_LENGTH());
-        bytes32 expectedOperationId = _deriveRebalanceOpId(p);
-
+        vm.expectRevert(
+            abi.encodeWithSelector(IBridge.InvalidRgbSettlementDataLength.selector, p.settlementDataIn.length)
+        );
         _rebalance(p);
-
-        assertEq(rgbModule.fundsInRecords(expectedOperationId), AMOUNT, "credit at the outbound cap is recorded");
     }
 
     function test_rebalanceLiquidity_rgbCreditAcceptsEmptyDestinationAddress() public {

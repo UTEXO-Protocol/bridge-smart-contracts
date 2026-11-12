@@ -149,7 +149,7 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(shadowSender)))), 0);
     }
 
-    function test_fundsIn_routeRotationDuringCommissionUsesCurrentIdentityMode() public {
+    function test_fundsIn_routeRotationDuringCommissionRevertsOnFeeModeChange() public {
         MockSettlementModule legacyModule = new MockSettlementModule();
         vm.prank(deployer);
         routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(legacyModule));
@@ -162,17 +162,15 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
         vm.prank(multisig);
         bridge.setCommissionManager(address(rotating));
 
-        bytes32 legacyId = _deriveOpId(
-            SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData()
-        );
+        vm.expectRevert(IBridge.RouteFeeModeChanged.selector);
         vm.prank(user);
-        bytes32 actual = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
-        assertEq(actual, _deriveRgbOpId(RGB_CHAIN_ID, RGB_OP_ID, AMOUNT * 9 / 10));
-        assertEq(rgbModule.fundsInRecords(actual), AMOUNT * 9 / 10);
-        assertEq(rgbModule.fundsInRecords(legacyId), 0, "no stale legacy id in the RGB ledger");
+        assertEq(usdt0.balanceOf(user), AMOUNT * 10, "token transfer rolled back");
+        assertEq(usdt0.balanceOf(address(rotating)), 0, "commission transfer rolled back");
+        assertEq(bridge.totalLockedLiquidity(), 0, "liquidity accounting rolled back");
+        assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))), 0);
         assertEq(legacyModule.onFundsInCount(), 0);
-        assertEq(usdt0.balanceOf(address(rotating)), AMOUNT / 10);
     }
 
     function test_fundsIn_sameMintAndNetWithDifferentGrossReverts() public {
@@ -190,7 +188,7 @@ contract BridgeDepositIdentityTest is BridgeTestBase {
     function test_fundsIn_sameMintWithPaddedSettlementDataReverts() public {
         vm.prank(user);
         bytes32 original = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
-        vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidRgbSettlementDataLength.selector, 97));
         vm.prank(user);
         bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encodePacked(_rgbData(), bytes32(uint256(7))));
         assertEq(rgbModule.fundsInRecords(original), AMOUNT);

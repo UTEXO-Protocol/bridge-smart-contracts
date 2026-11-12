@@ -13,7 +13,8 @@ import {
     CommissionCurrency,
     CommissionSide,
     ICommissionManager,
-    PayerTier
+    PayerTier,
+    WitnessFeeConfig
 } from "../../src/interfaces/ICommissionManager.sol";
 import {IMultisigProxy} from "../../src/interfaces/IMultisigProxy.sol";
 import {MultisigHelper} from "../helpers/MultisigHelper.sol";
@@ -343,7 +344,9 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
 
         uint256 depositAmount = 1e18;
         vm.prank(user);
-        bridge.fundsIn(depositAmount, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
+        bridge.fundsIn(
+            depositAmount, RGB_CHAIN_ID, DST_ADDR, bytes.concat(abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK), hex"00")
+        );
 
         uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
         assertEq(cm.tokenCommissionPool(address(token)), expectedCommission);
@@ -825,6 +828,28 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         assertTrue(id != bytes32(0), "CM config selector accepted on the generic path");
     }
 
+    function test_adminExecuteCommissionManager_setsWitnessFee() public {
+        WitnessFeeConfig memory config = WitnessFeeConfig({witnessFee: 0, isSet: true});
+        bytes memory callData =
+            abi.encodeCall(ICommissionManager.setWitnessFee, (SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token), config));
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = vm.getBlockTimestamp() + 1 days;
+        bytes32 digest = MultisigHelper.digestProposeAdminExecuteCM(
+            domainSep, proxy.commissionManager(), bytes4(callData), callData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 id = proxy.proposeAdminExecuteCommissionManager(
+            callData, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks)
+        );
+
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
+        proxy.executeProposal(id, callData);
+
+        WitnessFeeConfig memory stored = cm.getWitnessFee(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(token));
+        assertEq(stored.witnessFee, 0);
+        assertTrue(stored.isSet);
+    }
+
     /// @dev The proxy can complete pending ownership handoffs through signed generic proposals.
     function test_adminExecute_acceptsPendingOwnershipForManagedTargets() public {
         address[3] memory targets = [address(bridge), address(cm), address(routeRegistry)];
@@ -878,7 +903,7 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         // Deposits are frozen...
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, bytes.concat(abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK), hex"00"));
 
         // ...but the enclave release still executes.
         IBridge.FundsOutParams memory params = _fundsOutParams();

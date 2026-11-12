@@ -39,6 +39,12 @@ contract RgbSettlementModule is ISettlementModule {
     ///         route requires a non-zero OpId (it is threaded to the RGB side).
     error InvalidRgbOpId();
 
+    /// @notice Payload is neither the legacy rebalance form nor the user-deposit form.
+    error InvalidSettlementDataLength(uint256 length);
+
+    /// @notice The appended user-deposit flat-fee selector is outside the known enum range.
+    error InvalidFlatFeeType(uint8 value);
+
     /// @notice The lock was submitted at or after its exclusive maximum L2 block.
     error LockWindowExpired(uint256 l2Block, uint64 beforeBlock);
 
@@ -113,7 +119,8 @@ contract RgbSettlementModule is ISettlementModule {
     /// @dev Records `netAmount` and destination network once per `operationId`.
     ///      Bridge ids bind (network, mint OpId, net amount), excluding sender and nonce;
     ///      deposits and rebalance credits for the same tuple hit the duplicate guard.
-    ///      settlementData is abi.encode(uint256 rgbOpId, uint64 beforeBlock).
+    ///      Rebalances use `abi.encode(uint256 rgbOpId, uint64 beforeBlock)`.
+    ///      User deposits append one raw byte selecting BASE (0) or WITNESS (1).
     ///      `beforeBlock` is an exclusive maximum Arbitrum L2 block. destAddress must be empty:
     ///      the RGB destination is carried in the consignment, not this argument.
     /// @return rgbOpId Mint OpId decoded from `settlementData`.
@@ -125,8 +132,15 @@ contract RgbSettlementModule is ISettlementModule {
     {
         if (bytes(ctx.destAddress).length != 0) revert UnexpectedDestinationAddress();
 
+        uint256 dataLength = settlementData.length;
+        if (dataLength != 64 && dataLength != 65) revert InvalidSettlementDataLength(dataLength);
+        if (dataLength == 65) {
+            uint8 rawType = uint8(settlementData[64]);
+            if (rawType > 1) revert InvalidFlatFeeType(rawType);
+        }
+
         uint64 beforeBlock;
-        (rgbOpId, beforeBlock) = abi.decode(settlementData, (uint256, uint64));
+        (rgbOpId, beforeBlock) = abi.decode(settlementData[:64], (uint256, uint64));
         if (rgbOpId == 0) revert InvalidRgbOpId();
 
         uint256 l2Block = ARBSYS.arbBlockNumber();
