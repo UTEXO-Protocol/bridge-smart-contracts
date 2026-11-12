@@ -36,7 +36,10 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         usdt0.mint(user, AMOUNT * 10);
         vm.prank(user);
         bytes32 backing = bridge.fundsIn(
-            AMOUNT * 10, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(backingMint, RGB_BEFORE_BLOCK)
+            AMOUNT * 10,
+            MINT_BURN_FIXTURE_CHAIN_ID,
+            RGB_DST_ADDR,
+            bytes.concat(abi.encode(backingMint, RGB_BEFORE_BLOCK), hex"00")
         );
         IBridge.RebalanceParams memory p = _mintBurnToChainAParams(AMOUNT, backing);
         p.destinationChainId = SOURCE_CHAIN_ID;
@@ -144,7 +147,9 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         uint256 topUp = uint256(type(uint64).max) - currentSupply;
         usdt0.mint(user, topUp);
         vm.prank(user);
-        bridge.fundsIn(topUp, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 9_100, RGB_BEFORE_BLOCK));
+        bridge.fundsIn(
+            topUp, RGB_CHAIN_ID, RGB_DST_ADDR, bytes.concat(abi.encode(RGB_LOCK_ID + 9_100, RGB_BEFORE_BLOCK), hex"00")
+        );
 
         IBridge.RebalanceParams memory p = _chainAToRgbParams(1, RGB_LOCK_ID + 9_101);
         bytes32 operationId = _deriveRebalanceOpId(p);

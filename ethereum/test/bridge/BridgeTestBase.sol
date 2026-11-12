@@ -187,17 +187,17 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     /// @dev RGB-route `settlementData` for `fundsIn`: the module decodes a
     ///      a non-zero `uint256 lockId` and exclusive `uint64 beforeBlock`.
     function _rgbData() internal pure returns (bytes memory) {
-        return abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK);
+        return bytes.concat(abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK), hex"00");
     }
 
     /// @dev RGB-route `settlementData` with an explicit lock ID (for tests that
     ///      need distinct ids or the zero-id revert path).
     function _rgbData(uint256 lockId) internal pure returns (bytes memory) {
-        return abi.encode(lockId, RGB_BEFORE_BLOCK);
+        return bytes.concat(abi.encode(lockId, RGB_BEFORE_BLOCK), hex"00");
     }
 
     function _rgbData(uint256 lockId, uint64 beforeBlock) internal pure returns (bytes memory) {
-        return abi.encode(lockId, beforeBlock);
+        return bytes.concat(abi.encode(lockId, beforeBlock), hex"00");
     }
 
     function _setArbitrumL2Block(uint256 l2Block) internal {
