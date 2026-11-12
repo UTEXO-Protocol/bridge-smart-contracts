@@ -230,7 +230,9 @@ abstract contract MultisigProxyTestBase is Test, BridgeProxyTestUtils {
         vm.stopPrank();
 
         vm.prank(user);
-        seedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
+        seedOpId = bridge.fundsIn(
+            AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, bytes.concat(abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK), hex"00")
+        );
     }
 
     function _encSigSet2of3() internal pure returns (uint256[] memory pks, uint256 bitmap) {

@@ -180,12 +180,17 @@ abstract contract BridgeRebalanceTestBase is Test, BridgeProxyTestUtils {
         vm.prank(user);
         usdt0.approve(address(bridge), type(uint256).max);
         vm.prank(user);
-        rgbSeedOpId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
+        rgbSeedOpId = bridge.fundsIn(
+            AMOUNT * 10, RGB_CHAIN_ID, RGB_DST_ADDR, bytes.concat(abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK), hex"00")
+        );
         vm.prank(user);
         bridge.fundsIn(AMOUNT * 10, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
         vm.prank(user);
         secondaryRgbSeedOpId = bridge.fundsIn(
-            AMOUNT * 10, SECONDARY_RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_OP_ID + 100, RGB_BEFORE_BLOCK)
+            AMOUNT * 10,
+            SECONDARY_RGB_CHAIN_ID,
+            RGB_DST_ADDR,
+            bytes.concat(abi.encode(RGB_OP_ID + 100, RGB_BEFORE_BLOCK), hex"00")
         );
     }
 

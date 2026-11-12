@@ -425,7 +425,7 @@ contract MultisigEmergencyTest is MultisigProxyTestBase {
         // Inbound deposits are frozen.
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK));
+        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, bytes.concat(abi.encode(RGB_OP_ID, RGB_BEFORE_BLOCK), hex"00"));
 
         // Enclave-signed release is frozen too — the revert propagates from
         // Bridge.fundsOut through proxy.fundsOutCall.

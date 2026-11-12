@@ -4,7 +4,7 @@ pragma solidity 0.8.35;
 import {Script, console2} from "forge-std/Script.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Bridge} from "../../src/Bridge.sol";
-import {ICommissionManager} from "../../src/interfaces/ICommissionManager.sol";
+import {FlatFeeType, ICommissionManager} from "../../src/interfaces/ICommissionManager.sol";
 
 /// @title BridgeFundsIn
 /// @notice Approves tokens and submits a direct RGB deposit from PRIVATE_KEY.
@@ -14,7 +14,7 @@ import {ICommissionManager} from "../../src/interfaces/ICommissionManager.sol";
 ///      Bridge refunds excess native value and returns the logged operationId.
 ///      Inputs (see the matching .env example for values):
 ///      `PRIVATE_KEY`, `BRIDGE_ADDRESS`, `AMOUNT`, `DESTINATION_CHAIN_ID`, `DESTINATION_ADDRESS`,
-///      `RGB_OP_ID`, `RGB_BEFORE_BLOCK`.
+///      `RGB_OP_ID`, `RGB_BEFORE_BLOCK`, `RGB_FEE_TYPE` (0 = BASE, 1 = WITNESS).
 contract BridgeFundsIn is Script {
     /// @dev Drift headroom attached on top of the quote. Kept below the
     ///      Bridge's `NATIVE_COMMISSION_TOLERANCE_BPS` so a quote that is still
@@ -29,9 +29,13 @@ contract BridgeFundsIn is Script {
         string memory dAddr = vm.envString("DESTINATION_ADDRESS");
         uint256 rgbOpId = vm.envUint("RGB_OP_ID");
         uint256 beforeBlockValue = vm.envUint("RGB_BEFORE_BLOCK");
+        uint256 feeTypeValue = vm.envUint("RGB_FEE_TYPE");
         require(beforeBlockValue <= type(uint64).max, "RGB_BEFORE_BLOCK exceeds uint64");
+        require(feeTypeValue <= uint8(FlatFeeType.WITNESS), "RGB_FEE_TYPE must be 0 or 1");
         // forge-lint: disable-next-line(unsafe-typecast)
         uint64 beforeBlock = uint64(beforeBlockValue);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        FlatFeeType feeType = FlatFeeType(uint8(feeTypeValue));
 
         Bridge bridge = Bridge(bridgeAddr);
         address token = bridge.TOKEN();
@@ -39,7 +43,7 @@ contract BridgeFundsIn is Script {
         ICommissionManager cm = bridge.commissionManager();
         bytes32 feeSubject = bytes32(uint256(uint160(vm.addr(pk))));
         (, uint256 nativeCommission,) =
-            cm.calculateFundsInCommission(block.chainid, destChainId, token, amount, feeSubject);
+            cm.calculateFundsInCommission(block.chainid, destChainId, token, amount, feeSubject, feeType);
 
         // Attach a buffer; Bridge refunds any excess over its execution-time quote.
         uint256 nativeValue = nativeCommission + (nativeCommission * NATIVE_BUFFER_BPS) / 10_000;
@@ -52,9 +56,10 @@ contract BridgeFundsIn is Script {
         vm.startBroadcast(pk);
         IERC20(token).approve(bridgeAddr, amount);
         // RGB route: `settlementData` carries the RGB OpId and an exclusive
-        // Arbitrum L2 deadline. Other routes define their own blob layout.
-        bytes32 operationId =
-            bridge.fundsIn{value: nativeValue}(amount, destChainId, dAddr, abi.encode(rgbOpId, beforeBlock));
+        // Arbitrum L2 deadline, followed by one raw flat-fee selector byte.
+        // Other routes define their own blob layout.
+        bytes memory settlementData = bytes.concat(abi.encode(rgbOpId, beforeBlock), bytes1(uint8(feeType)));
+        bytes32 operationId = bridge.fundsIn{value: nativeValue}(amount, destChainId, dAddr, settlementData);
         vm.stopBroadcast();
 
         console2.log("fundsIn succeeded. Derived operationId:");
