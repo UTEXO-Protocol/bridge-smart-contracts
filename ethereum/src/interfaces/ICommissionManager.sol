@@ -15,6 +15,12 @@ enum CommissionCurrency {
     NATIVE
 }
 
+/// @notice Selects the flat component of an inbound commission quote.
+enum FlatFeeType {
+    BASE,
+    WITNESS
+}
+
 /// @notice Fee parameters for one directional route.
 /// @dev Fee in token smallest units is amount * stablePercent / multiplier^2 + baseFee.
 ///      Both components may be zero to disable commission.
@@ -36,6 +42,13 @@ struct PayerTier {
     bool isSet;
 }
 
+/// @notice Optional flat fee for an RGB witness-bearing inbound transaction.
+/// @dev Denominated in bridge-token smallest units, like `CommissionConfig.baseFee`.
+struct WitnessFeeConfig {
+    uint256 witnessFee;
+    bool isSet;
+}
+
 /// @title ICommissionManager
 /// @notice Commission quotes, owner configuration, and custody of bridge fees.
 /// @dev EVM routes use EVM chain ids; RGB uses the protocol-assigned id 827166.
@@ -49,6 +62,8 @@ interface ICommissionManager {
     error InvalidToken();
     error InvalidRecipient();
     error InvalidFeeSubject();
+    error WitnessFeeNotConfigured(bytes32 routeKey);
+    error WitnessFeeOnlyFundsIn();
     error StablePercentTooHigh();
     error MultiplierZero();
     error InvalidFeeShape(uint256 stablePercent, uint8 multiplier);
@@ -100,6 +115,8 @@ interface ICommissionManager {
         uint256 sourceChainId, uint256 destChainId, address indexed token, bytes32 indexed feeSubject, PayerTier tier
     );
 
+    event WitnessFeeUpdated(uint256 sourceChainId, uint256 destChainId, address indexed token, WitnessFeeConfig config);
+
     event TokenCommissionReceived(address indexed token, uint256 amount);
     event NativeCommissionReceived(uint256 amount);
 
@@ -138,6 +155,8 @@ interface ICommissionManager {
 
     function payerTiers(bytes32 routeKey, bytes32 feeSubject) external view returns (uint256 stablePercent, bool isSet);
 
+    function witnessFeeConfigs(bytes32 routeKey) external view returns (uint256 witnessFee, bool isSet);
+
     function ethUsdFeed() external view returns (address);
 
     function ethUsdHeartbeat() external view returns (uint256);
@@ -162,6 +181,15 @@ interface ICommissionManager {
         bytes32 feeSubject
     ) external view returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount);
 
+    function calculateFundsInCommission(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        uint256 amount,
+        bytes32 feeSubject,
+        FlatFeeType flatFeeType
+    ) external view returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount);
+
     function calculateFundsOutCommission(
         uint256 sourceChainId,
         uint256 destChainId,
@@ -183,6 +211,15 @@ interface ICommissionManager {
         address token,
         uint256 amount,
         bytes32 feeSubject
+    ) external view returns (uint256);
+
+    function calculateTotalFee(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        uint256 amount,
+        bytes32 feeSubject,
+        FlatFeeType flatFeeType
     ) external view returns (uint256);
 
     /// @notice The Bridge's current `minFundsInAmount`. Every configured
@@ -247,6 +284,9 @@ interface ICommissionManager {
         PayerTier calldata tier
     ) external;
 
+    function setWitnessFee(uint256 sourceChainId, uint256 destChainId, address token, WitnessFeeConfig calldata config)
+        external;
+
     function setBridgeAddress(address newBridge) external;
 
     function getGlobalDefaults()
@@ -269,6 +309,11 @@ interface ICommissionManager {
         external
         view
         returns (PayerTier memory);
+
+    function getWitnessFee(uint256 sourceChainId, uint256 destChainId, address token)
+        external
+        view
+        returns (WitnessFeeConfig memory);
 
     function buildRouteKey(uint256 sourceChainId, uint256 destChainId, address token) external pure returns (bytes32);
 

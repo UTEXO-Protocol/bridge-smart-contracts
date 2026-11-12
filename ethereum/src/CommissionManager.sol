@@ -14,8 +14,10 @@ import {
     CommissionConfig,
     CommissionCurrency,
     CommissionSide,
+    FlatFeeType,
     ICommissionManager,
-    PayerTier
+    PayerTier,
+    WitnessFeeConfig
 } from "./interfaces/ICommissionManager.sol";
 
 /// @notice Bridge amount floors used to validate fee rules.
@@ -73,6 +75,9 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
 
     /// @notice Per-route client tiers, keyed first by route and then authenticated fee subject.
     mapping(bytes32 routeKey => mapping(bytes32 feeSubject => PayerTier tier)) public payerTiers;
+
+    /// @notice Per-route flat fee selected by witness-bearing RGB deposits.
+    mapping(bytes32 routeKey => WitnessFeeConfig config) public witnessFeeConfigs;
 
     /// @notice Accrued ERC-20 commission per token (tracks balance held for that token).
     mapping(address => uint256) public tokenCommissionPool;
@@ -152,21 +157,34 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         uint256 amount,
         bytes32 feeSubject
     ) external view returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) {
+        return calculateFundsInCommission(sourceChainId, destChainId, token, amount, feeSubject, FlatFeeType.BASE);
+    }
+
+    /// @inheritdoc ICommissionManager
+    function calculateFundsInCommission(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        uint256 amount,
+        bytes32 feeSubject,
+        FlatFeeType flatFeeType
+    ) public view returns (uint256 tokenCommission, uint256 nativeCommission, uint256 netAmount) {
         bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
         CommissionConfig memory config = getEffectiveConfig(ruleKey);
+        uint256 flatFee = _resolveFundsInFlatFee(ruleKey, config, flatFeeType);
 
         // Only calculate if this config is for FUNDS_IN
         if (config.side != CommissionSide.FUNDS_IN) {
             return (0, 0, amount);
         }
 
-        // Total fee in token units: proportional part plus the flat `baseFee`.
+        // Total fee in token units: proportional part plus the selected flat fee.
         CommissionConfig memory effectiveConfig = _applyPayerTier(ruleKey, feeSubject, config);
-        uint256 totalFee = calculateStableFee(amount, effectiveConfig.stablePercent, effectiveConfig.multiplier)
-            + effectiveConfig.baseFee;
-        _requireNonZeroConfiguredCommission(amount, totalFee, effectiveConfig);
+        uint256 totalFee =
+            calculateStableFee(amount, effectiveConfig.stablePercent, effectiveConfig.multiplier) + flatFee;
+        _requireNonZeroConfiguredCommission(amount, totalFee, effectiveConfig, flatFee);
         // Recheck the current floor: it may have changed since this rule was configured.
-        _requireFeeFitsAmountFloor(config);
+        _requireFeeFitsAmountFloor(config, flatFee);
 
         if (effectiveConfig.currency == CommissionCurrency.TOKEN) {
             // TOKEN commission: deduct from amount
@@ -220,8 +238,8 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         CommissionConfig memory effectiveConfig = _applyPayerTier(ruleKey, feeSubject, config);
         uint256 totalFee = calculateStableFee(amount, effectiveConfig.stablePercent, effectiveConfig.multiplier)
             + effectiveConfig.baseFee;
-        _requireNonZeroConfiguredCommission(amount, totalFee, effectiveConfig);
-        _requireFeeFitsAmountFloor(config);
+        _requireNonZeroConfiguredCommission(amount, totalFee, effectiveConfig, effectiveConfig.baseFee);
+        _requireFeeFitsAmountFloor(config, config.baseFee);
 
         if (effectiveConfig.currency == CommissionCurrency.TOKEN) {
             if (totalFee >= amount) revert ZeroNetAmount(amount, totalFee);
@@ -257,6 +275,17 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     }
 
     /// @inheritdoc ICommissionManager
+    function calculateTotalFee(
+        uint256 sourceChainId,
+        uint256 destChainId,
+        address token,
+        uint256 amount,
+        bytes32 feeSubject
+    ) external view returns (uint256) {
+        return calculateTotalFee(sourceChainId, destChainId, token, amount, feeSubject, FlatFeeType.BASE);
+    }
+
+    /// @inheritdoc ICommissionManager
     /// @dev Convenience view for the backend: resolves the effective rule and
     ///      returns the full `proportional + flat` fee without the side/currency
     ///      branching the `calculate*Commission` entrypoints apply.
@@ -265,11 +294,14 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         uint256 destChainId,
         address token,
         uint256 amount,
-        bytes32 feeSubject
-    ) external view returns (uint256) {
+        bytes32 feeSubject,
+        FlatFeeType flatFeeType
+    ) public view returns (uint256) {
         bytes32 ruleKey = buildRouteKey(sourceChainId, destChainId, token);
-        CommissionConfig memory config = _applyPayerTier(ruleKey, feeSubject, getEffectiveConfig(ruleKey));
-        return calculateStableFee(amount, config.stablePercent, config.multiplier) + config.baseFee;
+        CommissionConfig memory routeConfig = getEffectiveConfig(ruleKey);
+        uint256 flatFee = _resolveFundsInFlatFee(ruleKey, routeConfig, flatFeeType);
+        CommissionConfig memory config = _applyPayerTier(ruleKey, feeSubject, routeConfig);
+        return calculateStableFee(amount, config.stablePercent, config.multiplier) + flatFee;
     }
 
     /// @inheritdoc ICommissionManager
@@ -308,16 +340,16 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
     /// @dev For flat-fee rules, requires total fee below the current side's floor.
     ///      With a proportional rate below 100%, positive TOKEN net at the floor
     ///      implies positive net at every larger amount. Also applied to NATIVE rules.
-    function _requireFeeFitsAmountFloor(CommissionConfig memory config) private view {
+    function _requireFeeFitsAmountFloor(CommissionConfig memory config, uint256 flatFee) private view {
         // Only a FLAT fee needs this bound. A purely proportional fee is already
         // held below 100% by `InvalidFeeShape`, so it leaves a positive net at
         // every amount on its own. Skipping the read here keeps the Bridge
         // dependency — and its failure mode — off the quote path of every route
         // that charges no flat fee.
-        if (config.baseFee == 0) return;
+        if (flatFee == 0) return;
 
         uint256 floor = _amountFloor(config.side);
-        uint256 feeAtFloor = calculateStableFee(floor, config.stablePercent, config.multiplier) + config.baseFee;
+        uint256 feeAtFloor = calculateStableFee(floor, config.stablePercent, config.multiplier) + flatFee;
         if (feeAtFloor >= floor) revert FeeAboveAmountFloor(feeAtFloor, floor);
     }
 
@@ -443,7 +475,8 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
                 side: side,
                 currency: currency,
                 isSet: true
-            })
+            }),
+            baseFee
         );
     }
 
@@ -510,6 +543,12 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         // Build route key
         bytes32 key = buildRouteKey(sourceChainId, destChainId, token);
 
+        WitnessFeeConfig memory witnessConfig = witnessFeeConfigs[key];
+        if (witnessConfig.isSet) {
+            if (config.side != CommissionSide.FUNDS_IN) revert WitnessFeeOnlyFundsIn();
+            _requireFeeFitsAmountFloor(config, witnessConfig.witnessFee);
+        }
+
         commissionRules[key] = config;
         commissionRules[key].isSet = true;
 
@@ -550,6 +589,27 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
             payerTiers[routeKey][feeSubject] = tier;
             emit PayerTierUpdated(sourceChainId, destChainId, token, feeSubject, tier);
         }
+    }
+
+    /// @inheritdoc ICommissionManager
+    function setWitnessFee(uint256 sourceChainId, uint256 destChainId, address token, WitnessFeeConfig calldata config)
+        external
+        onlyOwner
+    {
+        if (token == address(0)) revert InvalidToken();
+
+        bytes32 routeKey = buildRouteKey(sourceChainId, destChainId, token);
+        if (!config.isSet) {
+            delete witnessFeeConfigs[routeKey];
+            emit WitnessFeeUpdated(sourceChainId, destChainId, token, WitnessFeeConfig({witnessFee: 0, isSet: false}));
+            return;
+        }
+
+        CommissionConfig memory routeConfig = getEffectiveConfig(routeKey);
+        if (routeConfig.side != CommissionSide.FUNDS_IN) revert WitnessFeeOnlyFundsIn();
+        _requireFeeFitsAmountFloor(routeConfig, config.witnessFee);
+        witnessFeeConfigs[routeKey] = config;
+        emit WitnessFeeUpdated(sourceChainId, destChainId, token, config);
     }
 
     /// @notice Updates `bridgeAddress` (only that address may credit commissions).
@@ -601,12 +661,29 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         return config;
     }
 
-    /// @dev A configured fee must not round to zero; an explicitly zero-fee rule is allowed.
-    function _requireNonZeroConfiguredCommission(uint256 amount, uint256 totalFee, CommissionConfig memory config)
+    /// @dev Resolves the selected flat component for an inbound quote. Witness
+    ///      mode fails closed until the route has an explicit configuration.
+    function _resolveFundsInFlatFee(bytes32 routeKey, CommissionConfig memory config, FlatFeeType flatFeeType)
         private
-        pure
+        view
+        returns (uint256)
     {
-        if ((config.stablePercent != 0 || config.baseFee != 0) && totalFee == 0) {
+        if (flatFeeType == FlatFeeType.BASE) return config.baseFee;
+        if (config.side != CommissionSide.FUNDS_IN) revert WitnessFeeOnlyFundsIn();
+
+        WitnessFeeConfig memory witnessConfig = witnessFeeConfigs[routeKey];
+        if (!witnessConfig.isSet) revert WitnessFeeNotConfigured(routeKey);
+        return witnessConfig.witnessFee;
+    }
+
+    /// @dev A configured fee must not round to zero; an explicitly zero-fee rule is allowed.
+    function _requireNonZeroConfiguredCommission(
+        uint256 amount,
+        uint256 totalFee,
+        CommissionConfig memory config,
+        uint256 flatFee
+    ) private pure {
+        if ((config.stablePercent != 0 || flatFee != 0) && totalFee == 0) {
             revert CommissionRoundsToZero(amount, config.stablePercent, config.multiplier);
         }
     }
@@ -652,6 +729,15 @@ contract CommissionManager is Ownable2Step, ReentrancyGuard, ICommissionManager 
         returns (PayerTier memory)
     {
         return payerTiers[buildRouteKey(sourceChainId, destChainId, token)][feeSubject];
+    }
+
+    /// @inheritdoc ICommissionManager
+    function getWitnessFee(uint256 sourceChainId, uint256 destChainId, address token)
+        external
+        view
+        returns (WitnessFeeConfig memory)
+    {
+        return witnessFeeConfigs[buildRouteKey(sourceChainId, destChainId, token)];
     }
 
     /// @notice Deterministic route id for commission rules.
