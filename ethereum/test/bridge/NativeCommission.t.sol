@@ -49,7 +49,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         uint256 poolBefore = cm.nativeCommissionPool();
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn{value: quote}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsInWithValue(bridge, quote, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(cm.nativeCommissionPool(), poolBefore + quote, "pool credited exactly the quote");
         assertEq(user.balance, 0, "nothing to refund");
@@ -68,7 +68,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         uint256 poolBefore = cm.nativeCommissionPool();
 
         vm.prank(user);
-        bridge.fundsIn{value: attached}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsInWithValue(bridge, attached, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(cm.nativeCommissionPool(), poolBefore + quote, "protocol collected ONLY the quote");
         assertEq(user.balance, attached - quote, "caller refunded the whole surplus");
@@ -82,7 +82,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
 
         vm.deal(user, maximum);
         vm.prank(user);
-        bridge.fundsIn{value: maximum}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsInWithValue(bridge, maximum, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(cm.nativeCommissionPool(), quote, "still only the quote is collected");
         assertEq(user.balance, maximum - quote, "full headroom refunded");
@@ -99,7 +99,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
             abi.encodeWithSelector(IBridge.NativeCommissionOutOfBounds.selector, provided, minimum, maximum)
         );
         vm.prank(user);
-        bridge.fundsIn{value: provided}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsInWithValue(bridge, provided, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
     function test_fundsIn_revertsAboveNativeTolerance() public {
@@ -113,7 +113,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
             abi.encodeWithSelector(IBridge.NativeCommissionOutOfBounds.selector, provided, minimum, maximum)
         );
         vm.prank(user);
-        bridge.fundsIn{value: provided}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsInWithValue(bridge, provided, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
     /// @notice An adverse price move raises the fresh native quote; the attached
@@ -132,7 +132,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
 
         vm.deal(user, attached);
         vm.prank(user);
-        bridge.fundsIn{value: attached}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsInWithValue(bridge, attached, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(cm.nativeCommissionPool(), freshQuote, "charged the fresh quote, not the stale one");
         assertEq(user.balance, attached - freshQuote, "remaining buffer refunded");
@@ -150,7 +150,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
 
         vm.deal(user, quotedAtSubmit);
         vm.prank(user);
-        bridge.fundsIn{value: quotedAtSubmit}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsInWithValue(bridge, quotedAtSubmit, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(cm.nativeCommissionPool(), freshQuote, "charged the fresh, lower quote");
         assertEq(user.balance, quotedAtSubmit - freshQuote, "difference refunded");
@@ -169,7 +169,9 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
             (, uint256 maximum) = _directNativeBounds(quote);
             vm.deal(user, maximum);
             vm.prank(user);
-            bridge.fundsIn{value: maximum}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 900 + i));
+            _authorizedFundsInWithValue(
+                bridge, maximum, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 900 + i)
+            );
             expected += quote;
         }
 
@@ -188,7 +190,16 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
 
         // Exact quote: nothing to refund, so the deposit goes through.
         vm.deal(address(depositor), quote);
-        depositor.deposit(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(), quote);
+        IBridge.FundsInAuthorization memory authorization = _fundsInAuthorization(
+            bridge,
+            AMOUNT,
+            SOURCE_CHAIN_ID,
+            bytes32(uint256(uint160(address(depositor)))),
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData()
+        );
+        depositor.deposit(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(), quote, authorization);
         assertEq(cm.nativeCommissionPool(), quote, "exact quote accepted from a non-payable caller");
 
         // With a buffer the refund cannot land, and the deposit reverts.
@@ -197,7 +208,16 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         vm.expectRevert(
             abi.encodeWithSelector(IBridge.NativeRefundFailed.selector, address(depositor), attached - quote)
         );
-        depositor.deposit(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 951), attached);
+        authorization = _fundsInAuthorization(
+            bridge,
+            AMOUNT,
+            SOURCE_CHAIN_ID,
+            bytes32(uint256(uint160(address(depositor)))),
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData(RGB_LOCK_ID + 951)
+        );
+        depositor.deposit(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 951), attached, authorization);
     }
 
     function test_fundsInFromAdapter_collectsComposeValueWithinSymmetricBand() public {
@@ -218,8 +238,15 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         // source-chain payer cannot be refunded.
         vm.deal(adapter, minimum);
         vm.prank(adapter);
-        bridge.fundsIn{value: minimum}(
-            AMOUNT, SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData()
+        _authorizedAdapterFundsInWithValue(
+            bridge,
+            minimum,
+            AMOUNT,
+            SOURCE_CHAIN_ID,
+            bytes32(uint256(uint160(user))),
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData()
         );
         assertEq(cm.nativeCommissionPool(), minimum, "source-agreed value collected in full");
         assertEq(adapter.balance, 0, "adapter is not refunded");
@@ -227,7 +254,9 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         // Above the quote is likewise collected in full, not refunded.
         vm.deal(adapter, maximum);
         vm.prank(adapter);
-        bridge.fundsIn{value: maximum}(
+        _authorizedAdapterFundsInWithValue(
+            bridge,
+            maximum,
             AMOUNT,
             SOURCE_CHAIN_ID,
             bytes32(uint256(uint160(user))),
@@ -256,8 +285,15 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
             abi.encodeWithSelector(IBridge.NativeCommissionOutOfBounds.selector, provided, minimum, maximum)
         );
         vm.prank(adapter);
-        bridge.fundsIn{value: provided}(
-            AMOUNT, SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData()
+        _authorizedAdapterFundsInWithValue(
+            bridge,
+            provided,
+            AMOUNT,
+            SOURCE_CHAIN_ID,
+            bytes32(uint256(uint160(user))),
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData()
         );
     }
 
@@ -277,8 +313,15 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
             abi.encodeWithSelector(IBridge.NativeCommissionOutOfBounds.selector, provided, minimum, maximum)
         );
         vm.prank(adapter);
-        bridge.fundsIn{value: provided}(
-            AMOUNT, SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData()
+        _authorizedAdapterFundsInWithValue(
+            bridge,
+            provided,
+            AMOUNT,
+            SOURCE_CHAIN_ID,
+            bytes32(uint256(uint160(user))),
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData()
         );
     }
 
@@ -292,7 +335,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
             abi.encodeWithSelector(IBridge.NativeCommissionOutOfBounds.selector, uint256(0), minimum, maximum)
         );
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
     function test_fundsIn_nativeCommissionRoutesToCM() public {
@@ -307,7 +350,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
 
         vm.deal(user, nativeC);
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn{value: nativeC}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsInWithValue(bridge, nativeC, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(usdt0.balanceOf(address(bridge)), AMOUNT);
         assertEq(address(cm).balance, nativeC);
@@ -320,7 +363,7 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         assertEq(bridge.BPS_DENOMINATOR(), 10_000, "basis-point policy uses 10000 units");
     }
 
-    function test_fundsIn_nativeForwardFailureRestoresCustodyNonceAndLiquidity() public {
+    function test_fundsIn_nativeForwardFailureRestoresCustodyAuthorizationNonceAndLiquidity() public {
         _setFundsInNativeRule(100);
         uint256 quote = _nativeQuote(AMOUNT);
         bytes32 expectedId = _deriveRgbMintDepositId(RGB_CHAIN_ID, RGB_LOCK_ID, AMOUNT);
@@ -329,13 +372,8 @@ contract BridgeNativeCommissionTest is BridgeTestBase {
         vm.mockCallRevert(address(cm), quote, bytes(""), bytes("native receive rejected"));
         vm.expectRevert(IBridge.NativeValueMismatch.selector);
         vm.prank(user);
-        bridge.fundsIn{value: quote}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsInWithValue(bridge, quote, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _assertLedgerUnchanged(beforeState, expectedId);
-        assertEq(
-            bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))),
-            0,
-            "failed forwarding restores nonce"
-        );
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 0, "failed forwarding creates no chain liquidity");
         assertEq(bridge.totalLockedLiquidity(), 0, "failed forwarding creates no total liquidity");
     }

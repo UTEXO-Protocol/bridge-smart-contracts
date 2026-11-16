@@ -97,7 +97,7 @@ contract BridgeRollbackTest is BridgeTestBase {
 
         vm.expectRevert(expectedRevert);
         vm.prank(user);
-        bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         _assertLedgerUnchanged(before, expectedOpId);
 
@@ -130,7 +130,7 @@ contract BridgeRollbackTest is BridgeTestBase {
         // module revert prevents successful Bridge events from persisting.
         vm.expectRevert(MockSettlementModule.MockModuleForcedRevert.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         _assertLedgerUnchanged(beforeState, expectedOpId);
         assertEq(revertingModule.onFundsInCount(), 0, "module state unchanged");
@@ -164,7 +164,7 @@ contract BridgeRollbackTest is BridgeTestBase {
         // late revert prevents successful Bridge events from persisting.
         vm.expectRevert(ICommissionManager.OnlyBridge.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         _assertLedgerUnchanged(beforeState, expectedOpId);
     }
@@ -172,7 +172,7 @@ contract BridgeRollbackTest is BridgeTestBase {
     function test_fundsOut_verifierRevertRollsBackBurnIdAndRecords() public {
         ReleaseRollbackSnapshot memory beforeState;
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         // Well-formed two-pair proof, but the source block is unknown to the relay.
@@ -227,9 +227,9 @@ contract BridgeRollbackTest is BridgeTestBase {
         uint256 releaseAmount = AMOUNT / 2;
 
         vm.prank(user);
-        bytes32 opId1 = bridge.fundsIn(amount1, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
+        bytes32 opId1 = _authorizedFundsIn(bridge, amount1, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
         vm.prank(user);
-        bytes32 opId2 = bridge.fundsIn(amount2, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
+        bytes32 opId2 = _authorizedFundsIn(bridge, amount2, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
         _ensureRgbSafetyCapacity(releaseAmount);
 
         // Reference one valid record followed by an unknown id so the settlement

@@ -51,7 +51,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
 
     function test_fundsOut_transfersAndEmits() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         bytes memory proof = _proof();
@@ -72,7 +72,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
 
     function test_fundsOut_keepsRecordAfterRelease() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         vm.prank(multisig);
@@ -93,7 +93,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
 
     function test_fundsOut_revertsAndRollsBackWhenCommissionManagerReturnsZeroNetAmount() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         ZeroNetCommissionManager zeroNetManager = new ZeroNetCommissionManager(address(bridge));
@@ -147,9 +147,9 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
         uint256 amount2 = AMOUNT * 2 / 5;
 
         vm.prank(user);
-        bytes32 opId1 = bridge.fundsIn(amount1, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
+        bytes32 opId1 = _authorizedFundsIn(bridge, amount1, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
         vm.prank(user);
-        bytes32 opId2 = bridge.fundsIn(amount2, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
+        bytes32 opId2 = _authorizedFundsIn(bridge, amount2, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
         _ensureRgbSafetyCapacity(amount1 + amount2);
 
         bytes32[] memory ids = new bytes32[](2);
@@ -176,7 +176,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
 
     function test_fundsOut_revertsOnUnverifiedBlock() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         // Well-formed two-pair proof, but the source block is unknown to the relay.
@@ -199,7 +199,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
 
     function test_fundsOut_rejectsEmptySettlementRecords() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         bytes memory proof = _proof();
@@ -218,7 +218,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
 
     function test_fundsOut_revertsOnUnknownFundsInId() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         bytes32 unknown = bytes32(uint256(999));
@@ -233,7 +233,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
 
     function test_fundsOut_revertsForNonOwner() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, user));
         vm.prank(user);
@@ -251,7 +251,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
 
     function test_fundsOut_revertsOnZeroRecipient() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         vm.expectRevert(BridgeBaseUpgradeable.InvalidRecipientAddress.selector);
         vm.prank(multisig);
@@ -269,7 +269,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
 
     function test_fundsOut_revertsIfAmountExceedsPool() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         vm.expectRevert(BridgeBaseUpgradeable.AmountExceedBridgePool.selector);
         vm.prank(multisig);
@@ -298,7 +298,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
             RGB_CHAIN_ID, alternateDestinationChainId, true, address(rgbVerifier), address(rgbModule)
         );
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(releaseAmount);
 
         ReleaseSnapshot memory beforeState = ReleaseSnapshot({
@@ -346,7 +346,7 @@ contract BridgeWithdrawalsTest is BridgeTestBase {
 
     function test_fundsOut_revertsOnZeroSourceOrDestinationChain() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
         bytes memory settlement = _settlement(_ids(opId));
         for (uint256 field; field < 2; ++field) {

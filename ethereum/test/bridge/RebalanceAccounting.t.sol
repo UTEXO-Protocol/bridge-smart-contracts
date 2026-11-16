@@ -35,7 +35,8 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         uint256 backingMint = RGB_LOCK_ID + 600;
         usdt0.mint(user, AMOUNT * 10);
         vm.prank(user);
-        bytes32 backing = bridge.fundsIn(
+        bytes32 backing = _authorizedFundsIn(
+            bridge,
             AMOUNT * 10,
             MINT_BURN_FIXTURE_CHAIN_ID,
             RGB_DST_ADDR,
@@ -126,7 +127,7 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         // source liquidity and bucket capacity to reach the RGB event boundary.
         usdt0.mint(user, additionalLiquidity);
         vm.prank(user);
-        bridge.fundsIn(additionalLiquidity, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
+        _authorizedFundsIn(bridge, additionalLiquidity, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
 
         IBridge.RebalanceParams memory p = _chainAToRgbParams(amount, RGB_LOCK_ID + 9_000);
         bytes32 operationId = _deriveRebalanceOpId(p);
@@ -147,8 +148,12 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         uint256 topUp = uint256(type(uint64).max) - currentSupply;
         usdt0.mint(user, topUp);
         vm.prank(user);
-        bridge.fundsIn(
-            topUp, RGB_CHAIN_ID, RGB_DST_ADDR, bytes.concat(abi.encode(RGB_LOCK_ID + 9_100, RGB_BEFORE_BLOCK), hex"00")
+        _authorizedFundsIn(
+            bridge,
+            topUp,
+            RGB_CHAIN_ID,
+            RGB_DST_ADDR,
+            bytes.concat(abi.encode(RGB_LOCK_ID + 9_100, RGB_BEFORE_BLOCK), hex"00")
         );
 
         IBridge.RebalanceParams memory p = _chainAToRgbParams(1, RGB_LOCK_ID + 9_101);
@@ -316,7 +321,7 @@ contract BridgeRebalanceAccountingTest is BridgeRebalanceTestBase {
         // preserve a stale, higher reference.
         usdt0.mint(user, AMOUNT);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
+        _authorizedFundsIn(bridge, AMOUNT, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
         vm.warp(vm.getBlockTimestamp() + bridge.BUCKET_REFILL_WINDOW() + 1);
         _rebalance(second);
 

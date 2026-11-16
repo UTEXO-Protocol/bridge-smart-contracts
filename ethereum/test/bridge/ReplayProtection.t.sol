@@ -8,9 +8,9 @@ import {BridgeTestBase} from "./BridgeTestBase.sol";
 contract BridgeReplayProtectionTest is BridgeTestBase {
     function test_fundsOut_revertsOnReplayedBurnId() public {
         vm.prank(user);
-        bytes32 opId1 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
+        bytes32 opId1 = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
         vm.prank(user);
-        bytes32 opId2 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
+        bytes32 opId2 = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
         _ensureRgbSafetyCapacity(AMOUNT);
 
         bytes32[] memory ids1 = _ids(opId1);
@@ -30,7 +30,7 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
 
     function test_fundsOut_revertsOnInvalidDerivedBurnId() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         bytes memory proof = _proof();
         bytes memory settlementData = _settlement(_ids(opId));
@@ -50,7 +50,7 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
     /// @dev Changing a valid relay head preserves the burn key and cannot bypass replay protection.
     function test_fundsOut_changedProofCannotReplaySameBurn() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
         bytes memory settlementData = _settlement(_ids(opId));
         uint256 burnId = _deriveBurnId(AMOUNT, RGB_CHAIN_ID, SRC_ADDR, SRC_BURN_TX_ID);
@@ -83,7 +83,7 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
     ///      need distinct sourceBurnTxId values, regardless of payload contents.
     function test_fundsOut_revertsOnZeroSourceBurnTxId() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         bytes memory settlementData = _settlement(_ids(opId));
@@ -111,7 +111,7 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
     ///      `rebalanceLiquidity` share one replay namespace.
     function test_fundsOut_revertsWhenSourceBurnTxIdChangesAfterBurnIdDerivation() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         bytes memory proof = _proof();
         bytes memory settlementData = _settlement(_ids(opId));
@@ -132,7 +132,7 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
 
     function test_fundsOut_rejectsLegacyBurnIdFormula() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         bytes memory settlementData = _settlement(_ids(opId));
         uint256 legacyBurnId = uint256(
             keccak256(
@@ -164,9 +164,9 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
 
     function test_fundsOut_changedBackingRecordsCannotReplaySameBurn() public {
         vm.prank(user);
-        bytes32 opId1 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
+        bytes32 opId1 = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
         vm.prank(user);
-        bytes32 opId2 = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
+        bytes32 opId2 = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
         _ensureRgbSafetyCapacity(AMOUNT);
 
         bytes memory proof = _proof();
@@ -201,7 +201,7 @@ contract BridgeReplayProtectionTest is BridgeTestBase {
         bridge.setGlobalOutflowLimit(1_900, 100);
         vm.stopPrank();
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT * 10, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         bytes memory settlementData = _settlement(_ids(opId));
 
         vm.prank(multisig);

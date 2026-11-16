@@ -40,7 +40,7 @@ contract BridgeWitnessFeesTest is BridgeTestBase {
         uint256 expectedFee = AMOUNT / 100 + WITNESS_FEE;
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbDataWithType(RGB_LOCK_ID, 1));
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbDataWithType(RGB_LOCK_ID, 1));
 
         assertEq(usdt0.balanceOf(address(cm)), expectedFee);
         assertEq(rgbModule.fundsInRecords(opId), AMOUNT - expectedFee);
@@ -51,7 +51,7 @@ contract BridgeWitnessFeesTest is BridgeTestBase {
         uint256 expectedFee = AMOUNT / 100 + BASE_FEE;
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbDataWithType(RGB_LOCK_ID, 0));
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbDataWithType(RGB_LOCK_ID, 0));
         assertEq(usdt0.balanceOf(address(cm)), expectedFee);
     }
 
@@ -59,7 +59,7 @@ contract BridgeWitnessFeesTest is BridgeTestBase {
         bytes32 routeKey = cm.buildRouteKey(SOURCE_CHAIN_ID, RGB_CHAIN_ID, address(usdt0));
         vm.expectRevert(abi.encodeWithSelector(ICommissionManager.WitnessFeeNotConfigured.selector, routeKey));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbDataWithType(RGB_LOCK_ID, 1));
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbDataWithType(RGB_LOCK_ID, 1));
         assertEq(usdt0.balanceOf(user), AMOUNT * 10);
         assertEq(usdt0.balanceOf(address(bridge)), 0);
     }
@@ -78,22 +78,24 @@ contract BridgeWitnessFeesTest is BridgeTestBase {
         usdt0.approve(address(bridge), AMOUNT);
 
         vm.prank(adapter);
-        bridge.fundsIn(AMOUNT, sourceChainId, sourceSender, RGB_CHAIN_ID, DST_ADDR, _rgbDataWithType(RGB_LOCK_ID, 1));
+        _authorizedAdapterFundsIn(
+            bridge, AMOUNT, sourceChainId, sourceSender, RGB_CHAIN_ID, DST_ADDR, _rgbDataWithType(RGB_LOCK_ID, 1)
+        );
         assertEq(usdt0.balanceOf(address(cm)), AMOUNT / 100 + WITNESS_FEE);
     }
 
     function test_rgbDepositRejectsMissingExtraAndUnknownSelector() public {
         vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidRgbSettlementDataLength.selector, 64));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK));
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK));
 
         bytes memory extra = bytes.concat(_rgbDataWithType(RGB_LOCK_ID, 0), hex"00");
         vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidRgbSettlementDataLength.selector, 66));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, extra);
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, extra);
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidFlatFeeType.selector, uint8(2)));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbDataWithType(RGB_LOCK_ID, 2));
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbDataWithType(RGB_LOCK_ID, 2));
     }
 }

@@ -147,6 +147,25 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         assertTrue(bridge.paused());
     }
 
+    function test_proposeAdminExecute_canRotateFundsInSigner() public {
+        address newSigner = makeAddr("newFundsInSigner");
+        bytes memory callData = abi.encodeCall(IBridge.setFundsInSigner, (newSigner));
+        uint256 nonce = proxy.proposalNonce();
+        uint256 deadline = vm.getBlockTimestamp() + 1 days;
+
+        bytes32 digest = MultisigHelper.digestProposeAdminExecute(
+            domainSep, proxy.bridge(), bytes4(callData), callData, nonce, deadline
+        );
+        (uint256[] memory pks, uint256 bitmap) = _fedSigSet2of3();
+        bytes32 id =
+            proxy.proposeAdminExecute(callData, nonce, deadline, bitmap, MultisigHelper.signAll(vm, digest, pks));
+
+        vm.warp(vm.getBlockTimestamp() + TIMELOCK + 1);
+        proxy.executeProposal(id, callData);
+
+        assertEq(bridge.fundsInSigner(), newSigner);
+    }
+
     function test_adminExecute_rejectsFundsOutSelectorInAllLanes() public {
         bytes memory callData = abi.encodeCall(IBridge.fundsOut, (_fundsOutParams()));
         _assertGenericPathsRejectSelector(callData, IMultisigProxy.ForbiddenBridgeReleaseSelector.selector);
@@ -211,8 +230,12 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
 
         uint256 depositAmount = 1e18;
         vm.prank(user);
-        bridge.fundsIn(
-            depositAmount, RGB_CHAIN_ID, DST_ADDR, bytes.concat(abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK), hex"00")
+        _authorizedFundsIn(
+            bridge,
+            depositAmount,
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            bytes.concat(abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK), hex"00")
         );
 
         uint256 expectedCommission = (depositAmount * 400) / 100 / 100;
@@ -770,7 +793,9 @@ contract MultisigGovernanceTest is MultisigProxyTestBase {
         // Deposits are frozen...
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, bytes.concat(abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK), hex"00"));
+        _authorizedFundsIn(
+            bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, bytes.concat(abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK), hex"00")
+        );
 
         // ...but the enclave release still executes.
         IBridge.FundsOutParams memory params = _fundsOutParams();

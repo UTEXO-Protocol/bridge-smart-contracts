@@ -16,7 +16,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         uint256 expectedNet = AMOUNT - expectedCommission;
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(usdt0.balanceOf(address(bridge)), expectedNet, "bridge net");
         assertEq(usdt0.balanceOf(address(cm)), expectedCommission, "cm pool");
@@ -56,7 +56,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         uint256 expectedNet = AMOUNT - expectedCommission;
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(usdt0.balanceOf(address(bridge)), expectedNet, "bridge net");
         assertEq(usdt0.balanceOf(address(cm)), expectedCommission, "cm pool holds percentage + flat");
@@ -83,7 +83,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         assertEq(usdt0.balanceOf(address(cm)), donation, "pre cm balance holds donation");
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         // Pool grew by exactly the real commission — the donation was not folded in.
         assertEq(cm.tokenCommissionPool(address(usdt0)), expectedCommission, "pool grew only by real commission");
@@ -92,7 +92,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
 
     function test_fundsOut_tokenCommissionRoutesToCM() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         uint256 percent = 500; // 5%
@@ -122,7 +122,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         vm.deal(user, 1 ether);
         vm.expectRevert(IBridge.NativeValueMismatch.selector);
         vm.prank(user);
-        bridge.fundsIn{value: 1 ether}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsInWithValue(bridge, 1 ether, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
     function test_fundsIn_collectsTokenCommissionAndCreditsNetLiquidity() public {
@@ -141,6 +141,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         assertEq(beforeState.cmPool, 0, "pre cm pool");
         assertEq(beforeState.nativePool, 0, "pre native pool");
         assertEq(beforeState.record, 0, "pre record");
+        bytes32 authorizationNonce = _nextFundsInAuthorizationNonce();
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(netAmount));
@@ -149,7 +150,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
             expectedOpId,
             bytes32(uint256(uint160(user))),
             user,
-            0,
+            authorizationNonce,
             AMOUNT,
             netAmount,
             tokenCommission,
@@ -163,7 +164,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         // Pull user tokens, forward commission to CM, dispatch the RGB hook,
         // then emit Bridge events.
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(opId, expectedOpId, "returned id matches derivation");
 
         assertEq(usdt0.balanceOf(user), beforeState.userToken - AMOUNT, "user gross spent");
@@ -208,6 +209,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         assertEq(beforeState.cmPool, 0, "pre token pool");
         assertEq(beforeState.nativePool, 0, "pre native pool");
         assertEq(beforeState.record, 0, "pre record");
+        bytes32 authorizationNonce = _nextFundsInAuthorizationNonce();
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(netAmount));
@@ -216,7 +218,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
             expectedOpId,
             bytes32(uint256(uint160(user))),
             user,
-            0,
+            authorizationNonce,
             AMOUNT,
             netAmount,
             0,
@@ -229,7 +231,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
 
         // Execute exact-value native commission path; token principal stays whole.
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn{value: nativeCommission}(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsInWithValue(bridge, nativeCommission, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(opId, expectedOpId, "returned id matches derivation");
 
         assertEq(usdt0.balanceOf(user), beforeState.userToken - AMOUNT, "user token gross spent");
@@ -254,7 +256,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         uint256 percent = 500; // 5%
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(releaseAmount);
         _setFundsOutTokenRule(percent);
 
@@ -347,8 +349,15 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         assertEq(cmBefore, 0, "pre cm token");
         assertEq(cmPoolBefore, 0, "pre cm pool");
 
+        bytes32 authorizationNonce = _nextFundsInAuthorizationNonce();
         bytes32 expectedOpId = _deriveOpId(
-            SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), 0, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData()
+            SOURCE_CHAIN_ID,
+            bytes32(uint256(uint160(user))),
+            authorizationNonce,
+            AMOUNT,
+            RGB_CHAIN_ID,
+            DST_ADDR,
+            _rgbData()
         );
 
         vm.expectEmit(true, true, false, true, address(bridge));
@@ -358,7 +367,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
             expectedOpId,
             bytes32(uint256(uint160(user))),
             user,
-            0,
+            authorizationNonce,
             AMOUNT,
             netAmount,
             tokenCommission,
@@ -370,7 +379,7 @@ contract BridgeCommissionAccountingTest is BridgeTestBase {
         );
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(observingModule.onFundsInCount(), 1, "module called once");
         assertEq(observingModule.lastNetAmount(), netAmount, "module got net amount");

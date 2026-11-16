@@ -70,7 +70,7 @@ contract RgbSettlementModuleTest is Test {
             grossAmount: netAmount, // gross == net for these tests
             netAmount: netAmount,
             operationId: operationId,
-            senderNonce: 0,
+            authorizationNonce: 0,
             sourceChainId: EVM_CHAIN_ID,
             destChainId: rgbChainId,
             destAddress: ""

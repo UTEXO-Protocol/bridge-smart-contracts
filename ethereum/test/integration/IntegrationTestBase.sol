@@ -364,10 +364,10 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     function _depositN(uint256 n, uint256 lockIdBase) internal returns (bytes32 firstOpId) {
         vm.prank(user);
-        firstOpId = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, _rgbFundsInData(lockIdBase));
+        firstOpId = _authorizedFundsIn(bridge, USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, _rgbFundsInData(lockIdBase));
         for (uint256 i = 1; i < n; i++) {
             vm.prank(user);
-            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, _rgbFundsInData(lockIdBase + i));
+            _authorizedFundsIn(bridge, USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, _rgbFundsInData(lockIdBase + i));
         }
     }
 

@@ -218,7 +218,7 @@ contract BridgeFlowPausesTest is BridgeTestBase {
         assertFalse(bridge.paused(), "planned resume opens proxy inflow");
         assertTrue(bridge.outflowPaused(), "planned resume preserves proxy outflow freeze");
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1));
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1));
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT * 11, "deposit credits the frozen-outflow chain");
         vm.expectRevert(BridgeBase.OutflowEnforcedPause.selector);
         vm.prank(multisig);

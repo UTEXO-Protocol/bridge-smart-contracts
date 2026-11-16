@@ -128,7 +128,7 @@ contract BridgeAmountFloorsTest is BridgeTestBase {
         // Floor is 1 (setUp), so a zero deposit is below the minimum.
         vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(0), uint256(1)));
         vm.prank(user);
-        bridge.fundsIn(0, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, 0, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
     function test_fundsOut_revertsOnZeroAmount() public {
@@ -154,7 +154,7 @@ contract BridgeAmountFloorsTest is BridgeTestBase {
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(999), uint256(1000)));
         vm.prank(user);
-        bridge.fundsIn(999, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, 999, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
     function test_fundsIn_acceptsExactlyAtMinimum() public {
@@ -162,7 +162,7 @@ contract BridgeAmountFloorsTest is BridgeTestBase {
         bridge.setMinFundsInAmount(1000);
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(1000, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, 1000, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(rgbModule.fundsInRecords(opId), 1000, "deposit at the floor is accepted");
     }
 
@@ -171,7 +171,7 @@ contract BridgeAmountFloorsTest is BridgeTestBase {
         bridge.setMinFundsInAmount(1000);
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(1001, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, 1001, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(rgbModule.fundsInRecords(opId), 1001, "deposit above the floor is accepted");
     }
 
@@ -190,18 +190,18 @@ contract BridgeAmountFloorsTest is BridgeTestBase {
             )
         );
         vm.prank(user);
-        bridge.fundsIn(24, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, 24, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         // The smallest amount that produces one fee unit is accepted.
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(25, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, 25, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(rgbModule.fundsInRecords(opId), 24, "net = 25 - 1 commission");
     }
 
     function test_fundsOut_dustThatRoundsCommissionToZeroIsRejected() public {
         uint256 dustAmount = 24;
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(dustAmount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, dustAmount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(dustAmount);
         _setFundsOutTokenRule(400);
 
@@ -236,6 +236,8 @@ contract BridgeAmountFloorsTest is BridgeTestBase {
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.AmountBelowMinimum.selector, uint256(999), uint256(1000)));
         vm.prank(mockAdapter);
-        bridge.fundsIn(999, SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedAdapterFundsIn(
+            bridge, 999, SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))), RGB_CHAIN_ID, DST_ADDR, _rgbData()
+        );
     }
 }
