@@ -4,6 +4,7 @@ pragma solidity 0.8.35;
 import {Script, console2} from "forge-std/Script.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Bridge} from "../../src/Bridge.sol";
+import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {FlatFeeType, ICommissionManager} from "../../src/interfaces/ICommissionManager.sol";
 
 /// @title BridgeFundsIn
@@ -14,7 +15,9 @@ import {FlatFeeType, ICommissionManager} from "../../src/interfaces/ICommissionM
 ///      Bridge refunds excess native value and returns the logged operationId.
 ///      Inputs (see the matching .env example for values):
 ///      `PRIVATE_KEY`, `BRIDGE_ADDRESS`, `AMOUNT`, `DESTINATION_CHAIN_ID`, `DESTINATION_ADDRESS`,
-///      `RGB_LOCK_ID`, `RGB_BEFORE_BLOCK`, `RGB_FEE_TYPE` (0 = BASE, 1 = WITNESS).
+///      `RGB_LOCK_ID`, `RGB_BEFORE_BLOCK`, `RGB_FEE_TYPE` (0 = BASE, 1 = WITNESS),
+///      `FUNDS_IN_AUTHORIZATION_NONCE`, `FUNDS_IN_AUTHORIZATION_DEADLINE`,
+///      `FUNDS_IN_AUTHORIZATION_SIGNATURE`.
 contract BridgeFundsIn is Script {
     /// @dev Drift headroom attached on top of the quote. Kept below the
     ///      Bridge's `NATIVE_COMMISSION_TOLERANCE_BPS` so a quote that is still
@@ -30,6 +33,9 @@ contract BridgeFundsIn is Script {
         uint256 lockId = vm.envUint("RGB_LOCK_ID");
         uint256 beforeBlockValue = vm.envUint("RGB_BEFORE_BLOCK");
         uint256 feeTypeValue = vm.envUint("RGB_FEE_TYPE");
+        bytes32 authorizationNonce = vm.envBytes32("FUNDS_IN_AUTHORIZATION_NONCE");
+        uint256 authorizationDeadline = vm.envUint("FUNDS_IN_AUTHORIZATION_DEADLINE");
+        bytes memory authorizationSignature = vm.envBytes("FUNDS_IN_AUTHORIZATION_SIGNATURE");
         require(beforeBlockValue <= type(uint64).max, "RGB_BEFORE_BLOCK exceeds uint64");
         require(feeTypeValue <= uint8(FlatFeeType.WITNESS), "RGB_FEE_TYPE must be 0 or 1");
         // forge-lint: disable-next-line(unsafe-typecast)
@@ -58,7 +64,17 @@ contract BridgeFundsIn is Script {
         // Arbitrum L2 deadline, followed by one raw flat-fee selector byte.
         // Other routes define their own blob layout.
         bytes memory settlementData = bytes.concat(abi.encode(lockId, beforeBlock), bytes1(uint8(feeType)));
-        bytes32 operationId = bridge.fundsIn{value: nativeValue}(amount, destChainId, dAddr, settlementData);
+        bytes32 operationId = bridge.fundsIn{value: nativeValue}(
+            amount,
+            destChainId,
+            dAddr,
+            settlementData,
+            IBridge.FundsInAuthorization({
+                authorizationNonce: authorizationNonce,
+                deadline: authorizationDeadline,
+                signature: authorizationSignature
+            })
+        );
         vm.stopBroadcast();
 
         console2.log("fundsIn succeeded. Derived operationId:");
