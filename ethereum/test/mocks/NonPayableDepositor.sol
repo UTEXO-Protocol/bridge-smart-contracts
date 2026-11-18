@@ -2,6 +2,7 @@
 pragma solidity 0.8.35;
 
 import {Bridge} from "../../src/Bridge.sol";
+import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {MockERC20} from "./MockERC20.sol";
 
 /// @notice Depositor that cannot receive native refunds, exercising NativeRefundFailed.
@@ -24,8 +25,11 @@ contract NonPayableDepositor {
         uint256 destinationChainId,
         string calldata destinationAddress,
         bytes calldata settlementData,
-        uint256 nativeValue
+        uint256 nativeValue,
+        IBridge.FundsInAuthorization calldata authorization
     ) external returns (bytes32) {
-        return _bridge.fundsIn{value: nativeValue}(amount, destinationChainId, destinationAddress, settlementData);
+        return _bridge.fundsIn{value: nativeValue}(
+            amount, destinationChainId, destinationAddress, settlementData, authorization
+        );
     }
 }

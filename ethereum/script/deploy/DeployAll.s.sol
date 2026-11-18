@@ -20,7 +20,7 @@ import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.so
 ///      oracle settings before handoff. Federation accepts ownership and registers routes
 ///      separately. Verifier thresholds default to 3/2/2 and accept environment overrides.
 ///      Inputs (see the matching .env example for values):
-///      `PRIVATE_KEY`, `USDT0_ADDRESS`, `BTC_RELAY_ADDRESS`, `ENCLAVE_SIGNERS`,
+///      `PRIVATE_KEY`, `USDT0_ADDRESS`, `BTC_RELAY_ADDRESS`, `FUNDS_IN_SIGNER`, `ENCLAVE_SIGNERS`,
 ///      `ENCLAVE_THRESHOLD`, `INITIAL_ENCLAVE_SOURCE_CHAIN_ID`, `FEDERATION_SIGNERS`,
 ///      `FEDERATION_THRESHOLD`, `EMERGENCY_GUARDIAN`, `COMMISSION_RECIPIENT`, `TIMELOCK_DURATION`,
 ///      `MIN_TIMELOCK`, `ETH_USD_FEED`, `ETH_USD_HEARTBEAT`, `MIN_FUNDS_IN_AMOUNT`,
@@ -49,6 +49,7 @@ contract DeployAll is Script {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address usdt0 = vm.envAddress("USDT0_ADDRESS");
         address btcRelay = vm.envAddress("BTC_RELAY_ADDRESS");
+        address fundsInSigner = vm.envAddress("FUNDS_IN_SIGNER");
         address[] memory enc = vm.envAddress("ENCLAVE_SIGNERS", ",");
         uint256 encThr = vm.envUint("ENCLAVE_THRESHOLD");
         uint256 initialSrcChain = vm.envUint("INITIAL_ENCLAVE_SOURCE_CHAIN_ID");
@@ -113,7 +114,16 @@ contract DeployAll is Script {
         Bridge bridgeImplementation = new Bridge();
         bytes memory bridgeInitializationData = abi.encodeCall(
             Bridge.initialize,
-            (usdt0, address(routeRegistry), payable(address(cm)), address(0), minFundsIn, minFundsOut, deployer)
+            (
+                usdt0,
+                address(routeRegistry),
+                payable(address(cm)),
+                address(0),
+                fundsInSigner,
+                minFundsIn,
+                minFundsOut,
+                deployer
+            )
         );
         BridgeProxy bridgeProxy = new BridgeProxy(address(bridgeImplementation), bridgeInitializationData);
         bridge = Bridge(address(bridgeProxy));
@@ -175,6 +185,7 @@ contract DeployAll is Script {
         console2.log("RouteRegistry deployed at:      ", address(routeRegistry));
         console2.log("Bridge deployed at:             ", address(bridge));
         console2.log("Bridge implementation at:      ", address(bridgeImplementation));
+        console2.log("Funds-in signer:               ", bridge.fundsInSigner());
         console2.log("RGBVerifier deployed at:        ", address(rgbVerifier));
         console2.log("  minSourceConfirmations:       ", rgbVerifier.minSourceConfirmations());
         console2.log("  maxLatestConfirmations:       ", rgbVerifier.maxLatestConfirmations());
@@ -220,6 +231,7 @@ contract DeployAll is Script {
             address(outboundModule.rgbModule()) == address(rgbModule), "RgbOutboundSettlementModule.rgbModule mismatch"
         );
         require(bridge.routeRegistry() == address(routeRegistry), "Bridge.routeRegistry mismatch");
+        require(bridge.fundsInSigner() == fundsInSigner, "Bridge.fundsInSigner mismatch");
         require(cm.bridgeAddress() == address(bridge), "CM.bridgeAddress mismatch");
         require(proxy.emergencyGuardian() == emergencyGuardian, "MultisigProxy guardian mismatch");
         (uint128 chainTokens,, bool chainEnabled, uint128 chainCapacity, uint128 chainRate) =

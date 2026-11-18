@@ -81,7 +81,7 @@ contract RgbOutboundSettlementModuleTest is BridgeRebalanceTestBase {
                 grossAmount: AMOUNT,
                 netAmount: AMOUNT,
                 operationId: bytes32(0),
-                senderNonce: 0,
+                authorizationNonce: 0,
                 sourceChainId: RGB_CHAIN_ID,
                 destChainId: CHAIN_A_ID,
                 destAddress: CHAIN_A_DST_ADDR

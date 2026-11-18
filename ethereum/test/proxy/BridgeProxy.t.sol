@@ -35,6 +35,8 @@ contract BridgeProxyTest is Test {
 
     address internal lzAdapter = makeAddr("lzAdapter");
 
+    address internal fundsInSigner = makeAddr("fundsInSigner");
+
     function setUp() public {
         token = new MockERC20("Mock USDT0", "USDT0");
         implementation = new Bridge();
@@ -56,7 +58,16 @@ contract BridgeProxyTest is Test {
     function _initializationData() private view returns (bytes memory) {
         return abi.encodeCall(
             Bridge.initialize,
-            (address(token), routeRegistry, commissionManager, lzAdapter, uint256(22), uint256(11), owner)
+            (
+                address(token),
+                routeRegistry,
+                commissionManager,
+                lzAdapter,
+                fundsInSigner,
+                uint256(22),
+                uint256(11),
+                owner
+            )
         );
     }
 
@@ -68,13 +79,16 @@ contract BridgeProxyTest is Test {
         assertEq(bridge.routeRegistry(), routeRegistry);
         assertEq(address(bridge.commissionManager()), commissionManager);
         assertEq(bridge.lzAdapter(), lzAdapter);
+        assertEq(bridge.fundsInSigner(), fundsInSigner);
         assertEq(bridge.minFundsInAmount(), 22);
         assertEq(bridge.minFundsOutAmount(), 11);
     }
 
     function test_initialize_rejectsDirectImplementationCall() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        implementation.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 22, 11, owner);
+        implementation.initialize(
+            address(token), routeRegistry, commissionManager, lzAdapter, fundsInSigner, 22, 11, owner
+        );
     }
 
     function test_rgbMintDepositId_matchesPublishedVectorThroughProxy() public {
@@ -87,7 +101,8 @@ contract BridgeProxyTest is Test {
             0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc,
             bytes32(uint256(uint160(address(implementation))))
         );
-        Bridge(vectorBridge).initialize(vectorToken, routeRegistry, commissionManager, address(0), 1, 1, owner);
+        Bridge(vectorBridge)
+            .initialize(vectorToken, routeRegistry, commissionManager, address(0), fundsInSigner, 1, 1, owner);
         assertEq(
             Bridge(vectorBridge).RGB_MINT_DEPOSIT_TYPEHASH(),
             bytes32(0x1a137b1271ebe5dab41e95404f65ad059a653667420a6527377e0d45e75d3e36)
@@ -100,7 +115,7 @@ contract BridgeProxyTest is Test {
 
     function test_initialize_rejectsSecondProxyInitialization() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        bridge.initialize(address(token), routeRegistry, commissionManager, lzAdapter, 22, 11, owner);
+        bridge.initialize(address(token), routeRegistry, commissionManager, lzAdapter, fundsInSigner, 22, 11, owner);
     }
 
     function test_burnId_matchesPublishedVectorOnBothPathsThroughProxy() public {
@@ -117,7 +132,7 @@ contract BridgeProxyTest is Test {
         vm.etch(vectorToken, address(token).code);
         MockERC20(vectorToken).mint(vectorBridge, 1_000_000);
         Bridge pinned = Bridge(vectorBridge);
-        pinned.initialize(vectorToken, routeRegistry, commissionManager, address(0), 1, 1, owner);
+        pinned.initialize(vectorToken, routeRegistry, commissionManager, address(0), fundsInSigner, 1, 1, owner);
         assertEq(pinned.BURN_TYPEHASH(), bytes32(0x09f8684e07c29653e96d992d7bca89a5ff94761a0d3c0d5e67c35dda03184e41));
 
         // InvalidBurnId exposes the actual private derivation before route calls.

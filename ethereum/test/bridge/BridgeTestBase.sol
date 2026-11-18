@@ -216,7 +216,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     function _deriveOpId(
         uint256 sourceChainId,
         bytes32 sourceSender,
-        uint256 senderNonce,
+        bytes32 authorizationNonce,
         uint256 grossAmount,
         uint256 destinationChainId,
         string memory destinationAddress,
@@ -228,7 +228,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                 address(bridge),
                 sourceChainId,
                 sourceSender,
-                senderNonce,
+                authorizationNonce,
                 bridge.TOKEN(),
                 grossAmount,
                 destinationChainId,
@@ -384,7 +384,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
             uint256 topUp = requiredLiquidity - currentLiquidity;
             usdt0.mint(user, topUp);
             vm.prank(user);
-            bridge.fundsIn(topUp, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1_000_000));
+            _authorizedFundsIn(bridge, topUp, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1_000_000));
         }
 
         _configureMaxSafeBuckets();
@@ -404,7 +404,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         _seedAmt = seededLiquidity; // no fundsIn commission in this suite → net == gross
         usdt0.mint(user, seededLiquidity);
         vm.prank(user);
-        _seedOpId = bridge.fundsIn(seededLiquidity, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _seedOpId = _authorizedFundsIn(bridge, seededLiquidity, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _configureMaxSafeBuckets();
     }
 

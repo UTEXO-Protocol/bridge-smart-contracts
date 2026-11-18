@@ -163,7 +163,9 @@ contract IntegrationLifecycleTest is IntegrationTestBase {
         vm.deal(user, nativeQuote);
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn{value: nativeQuote}(USER_DEPOSIT, RGB_CHAIN_ID, "", _rgbFundsInData(RGB_LOCK_ID));
+        bytes32 opId = _authorizedFundsInWithValue(
+            bridge, nativeQuote, USER_DEPOSIT, RGB_CHAIN_ID, "", _rgbFundsInData(RGB_LOCK_ID)
+        );
 
         assertEq(token.balanceOf(address(bridge)), USER_DEPOSIT, "bridge got full token amount");
         assertEq(token.balanceOf(address(cm)), 0, "cm no token commission");

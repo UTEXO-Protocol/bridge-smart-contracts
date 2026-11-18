@@ -12,7 +12,10 @@ class StorageLayoutTest(unittest.TestCase):
         self.new = copy.deepcopy(self.base)
 
     def test_append_allowed(self):
-        self.new["storage"].append(dict(label="upgradeValue", slot="91", offset=0,
+        end = max(int(field["slot"]) * 32 + field["offset"] + int(field["numberOfBytes"])
+                  for field in self.base["storage"])
+        next_slot = (end + 31) // 32
+        self.new["storage"].append(dict(label="upgradeValue", slot=str(next_slot), offset=0,
                                         type="uint256", numberOfBytes="32"))
         check_layout(self.base, self.new)
 

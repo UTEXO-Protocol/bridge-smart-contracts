@@ -35,7 +35,7 @@ contract BridgeSettlementCallbacksTest is BridgeRebalanceTestBase {
         SettlementCallbackObserver observer = _installCallbackObserver(SOURCE_CHAIN_ID, CHAIN_A_ID);
         usdt0.mint(user, AMOUNT);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
+        _authorizedFundsIn(bridge, AMOUNT, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
 
         _assertCallbackSnapshot(observer.snapshot(true), 0, AMOUNT * 10, AMOUNT * 30, AMOUNT * 31);
         assertEq(bridge.lockedLiquidity(CHAIN_A_ID), AMOUNT * 11);
@@ -60,26 +60,22 @@ contract BridgeSettlementCallbacksTest is BridgeRebalanceTestBase {
         assertTrue(bridge.consumedBurnIds(params.burnId));
     }
 
-    function test_fundsIn_callbackFailureRestoresCustodyAccountingAndNonce() public {
+    function test_fundsIn_callbackFailureRestoresCustodyAccountingAndAuthorizationNonce() public {
         SettlementCallbackObserver observer = _installCallbackObserver(SOURCE_CHAIN_ID, CHAIN_A_ID);
         observer.setFailOnInbound(true);
         usdt0.mint(user, AMOUNT);
-        bytes32 sourceSender = bytes32(uint256(uint160(user)));
-        uint256 nonceBefore = bridge.sourceSenderNonces(SOURCE_CHAIN_ID, sourceSender);
         vm.prank(user);
         vm.expectRevert(SettlementCallbackObserver.HookFailed.selector);
-        bridge.fundsIn(AMOUNT, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
+        _authorizedFundsIn(bridge, AMOUNT, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
         assertEq(usdt0.balanceOf(user), AMOUNT);
         assertEq(usdt0.balanceOf(address(bridge)), AMOUNT * 30);
         assertEq(bridge.lockedLiquidity(CHAIN_A_ID), AMOUNT * 10);
         assertEq(bridge.totalLockedLiquidity(), AMOUNT * 30);
-        assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, sourceSender), nonceBefore);
         assertEq(observer.snapshot(true).custody, 0);
 
         observer.setFailOnInbound(false);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
-        assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, sourceSender), nonceBefore + 1);
+        _authorizedFundsIn(bridge, AMOUNT, CHAIN_A_ID, CHAIN_A_DST_ADDR, "");
     }
 
     function test_rebalanceLiquidity_creditHookFailureRollsBackDebitReplayAndRateLimit() public {

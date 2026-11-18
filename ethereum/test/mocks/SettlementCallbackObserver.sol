@@ -3,6 +3,7 @@ pragma solidity 0.8.35;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Bridge} from "../../src/Bridge.sol";
+import {IBridge} from "../../src/interfaces/IBridge.sol";
 import {ISettlementModule} from "../../src/interfaces/ISettlementModule.sol";
 import {FundsInContext, FundsOutContext} from "../../src/interfaces/RouteTypes.sol";
 
@@ -64,7 +65,14 @@ contract SettlementCallbackObserver is ISettlementModule {
         observed.burnConsumed = _bridge.consumedBurnIds(_burnId);
         (bool ok, bytes memory reason) = address(_bridge)
             .call(
-                abi.encodeWithSignature("fundsIn(uint256,uint256,string,bytes)", 1, destinationChainId, "", bytes(""))
+                abi.encodeWithSignature(
+                    "fundsIn(uint256,uint256,string,bytes,(bytes32,uint256,bytes))",
+                    1,
+                    destinationChainId,
+                    "",
+                    bytes(""),
+                    IBridge.FundsInAuthorization({authorizationNonce: bytes32(0), deadline: 0, signature: ""})
+                )
             );
         require(!ok, "nested deposit succeeded");
         observed.reentryError = reason;

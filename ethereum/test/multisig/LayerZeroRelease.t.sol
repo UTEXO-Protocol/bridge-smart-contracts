@@ -345,8 +345,8 @@ contract MultisigLayerZeroReleaseTest is MultisigProxyTestBase {
     function test_lzFundsOutCall_acceptsDuplicateSettlementIdsOnFullRelease() public {
         ReleaseSnapshot memory beforeState;
         vm.prank(user);
-        bytes32 secondOpId = bridge.fundsIn(
-            AMOUNT, RGB_CHAIN_ID, DST_ADDR, bytes.concat(abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK), hex"00")
+        bytes32 secondOpId = _authorizedFundsIn(
+            bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, bytes.concat(abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK), hex"00")
         );
 
         _setTokenCommission(500); // 5%

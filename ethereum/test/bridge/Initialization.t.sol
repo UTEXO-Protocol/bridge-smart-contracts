@@ -56,6 +56,26 @@ contract BridgeInitializationTest is BridgeTestBase {
         assertEq(b.lzAdapter(), initialAdapter, "lzAdapter set in initializer");
     }
 
+    function test_initialize_storesFundsInSigner() public view {
+        assertEq(bridge.fundsInSigner(), FUNDS_IN_SIGNER);
+    }
+
+    function test_initialize_revertsOnZeroFundsInSigner() public {
+        Bridge implementation = new Bridge();
+        vm.expectRevert(IBridge.InvalidFundsInSigner.selector);
+        _deployBridgeFromImplementationWithSigner(
+            implementation,
+            address(usdt0),
+            address(routeRegistry),
+            payable(address(cm)),
+            address(0),
+            address(0),
+            1,
+            1,
+            deployer
+        );
+    }
+
     function test_initialize_storesMinFundsInAmount() public {
         vm.prank(deployer);
         Bridge b =

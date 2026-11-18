@@ -160,7 +160,7 @@ contract BridgeConfigurationTest is BridgeTestBase {
 
         uint256 oldPoolBefore = cm.tokenCommissionPool(address(usdt0));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         uint256 expectedCommission = AMOUNT * percent / 100 / 100;
         assertEq(newCm.tokenCommissionPool(address(usdt0)), expectedCommission, "replacement receives fees");
@@ -190,7 +190,7 @@ contract BridgeConfigurationTest is BridgeTestBase {
 
     function test_getContractBalance_returnsCustodiedBalance() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(bridge.getContractBalance(), AMOUNT);
     }
