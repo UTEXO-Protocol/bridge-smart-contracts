@@ -136,7 +136,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
 
         usdt0.mint(user, 500e6);
         vm.prank(user);
-        bridge.fundsIn(500e6, other, DST_ADDR, _rgbData(RGB_LOCK_ID + 888));
+        _authorizedFundsIn(bridge, 500e6, other, DST_ADDR, _rgbData(RGB_LOCK_ID + 888));
 
         uint256 otherBps = _bpsOfChain(other, 50e6);
         vm.prank(multisig);
@@ -196,7 +196,7 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
         // Fund the unconfigured chain's isolated liquidity so only the missing
         // (disabled) bucket blocks the release.
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(100e6, unconfigured, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, 100e6, unconfigured, DST_ADDR, _rgbData());
 
         vm.prank(multisig);
         bridge.setGlobalOutflowLimit(MAX_BURST_BPS, MAX_REFILL_BPS);
@@ -348,11 +348,11 @@ contract BridgeOutflowPolicyTest is BridgeTestBase {
 
         usdt0.mint(user, 1_100e6);
         vm.prank(user);
-        bridge.fundsIn(100e6, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 4_001));
+        _authorizedFundsIn(bridge, 100e6, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 4_001));
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 5e6, "5% of 100e6");
 
         vm.prank(user);
-        bridge.fundsIn(900e6, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 4_002));
+        _authorizedFundsIn(bridge, 900e6, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 4_002));
         assertEq(bridge.availableOutflow(RGB_CHAIN_ID), 50e6, "5% of 1000e6, no reconfiguration");
     }
 

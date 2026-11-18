@@ -17,14 +17,14 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
     function test_isolatedLiquidity_fundsInCreditsNetAmount() public {
         // No commission in setUp → net == gross.
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), AMOUNT, "bucket credited net amount");
     }
 
     function test_isolatedLiquidity_tokenCommissionCreditsNetNotGross() public {
         _setFundsInTokenRule(400); // 4%
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         uint256 fee = cm.calculateStableFee(AMOUNT, 400, 100);
         assertGt(fee, 0, "sanity: positive fee");
@@ -33,7 +33,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
 
     function test_isolatedLiquidity_fundsOutDebitsGrossAmount() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         uint256 release = AMOUNT * 2 / 5;
         _ensureRgbSafetyCapacity(release);
@@ -60,7 +60,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
     function test_isolatedLiquidity_chainCannotConsumeAnotherChainsLiquidity() public {
         // Fund only the RGB bucket.
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         // A different source chain has no isolated liquidity. This guard runs
         // before its bucket, so the missing liquidity is the precise blocker.
@@ -82,7 +82,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
 
     function test_fundsOut_verifierRevertRestoresLiquidityDebit() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         _ensureRgbSafetyCapacity(AMOUNT);
         uint256 liquidityBefore = bridge.lockedLiquidity(RGB_CHAIN_ID);
@@ -110,7 +110,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
         amount = bound(amount, 1e6, AMOUNT * 10);
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, amount, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), amount, "credited");
 
         // Mint an unlocked buffer so the pool balance exceeds the locked amount;
@@ -205,6 +205,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
         assertEq(rgbModule.fundsInRecords(expectedOpId), recordBefore, "record not created");
         assertEq(bridge.lockedLiquidity(RGB_CHAIN_ID), 0, "direct transfer creates no chain liquidity");
         assertEq(bridge.totalLockedLiquidity(), 0, "direct transfer creates no total liquidity");
+        bytes32 authorizationNonce = _nextFundsInAuthorizationNonce();
 
         vm.expectEmit(true, true, false, true, address(bridge));
         emit IBridge.FundsIn(user, RGB_LOCK_ID, uint64(AMOUNT));
@@ -213,7 +214,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
             expectedOpId,
             bytes32(uint256(uint160(user))),
             user,
-            0,
+            authorizationNonce,
             AMOUNT,
             AMOUNT,
             0,
@@ -225,7 +226,7 @@ contract BridgeLiquidityAccountingTest is BridgeTestBase {
         );
 
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(usdt0.balanceOf(user), userBefore - AMOUNT, "user fundsIn spent");
         assertEq(

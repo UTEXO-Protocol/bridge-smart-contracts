@@ -146,6 +146,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
             )
         );
         bytes32 sourceSender = bytes32(uint256(uint160(user)));
+        bytes32 authorizationNonce = _nextFundsInAuthorizationNonce();
 
         // BridgeFundsIn must carry gross `amount == AMOUNT` and `netAmount == received`.
         vm.expectEmit(true, true, false, true, address(s.bridge));
@@ -155,7 +156,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
             expectedOperationId,
             sourceSender,
             user,
-            0,
+            authorizationNonce,
             AMOUNT,
             received,
             0,
@@ -167,7 +168,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
         );
 
         vm.prank(user);
-        bytes32 opId = s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(s.bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(opId, expectedOperationId, "id uses actual received");
         assertEq(s.module.fundsInRecords(opId), received, "record credits actual received");
@@ -186,7 +187,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
         assertGt(tokenCommission, 0, "sanity: non-zero commission");
 
         vm.prank(user);
-        bytes32 opId = s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(s.bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(
             opId,
@@ -226,14 +227,14 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
         uint256 received = AMOUNT - s.token.feeOn(AMOUNT);
 
         vm.prank(user);
-        bytes32 opId = s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(s.bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         assertEq(s.module.fundsInRecords(opId), received, "record == actual received");
 
         // Nine more equal deposits make the first record's amount fit
         // the 10% bucket burst.
         for (uint256 i = 1; i < 10; i++) {
             vm.prank(user);
-            s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + i));
+            _authorizedFundsIn(s.bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + i));
         }
 
         // Ten equal deposits back the release, so `received` is ~10% of chain
@@ -276,7 +277,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.InsufficientReceived.selector, received, tokenCommission));
         vm.prank(user);
-        s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(s.bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
     }
 
     /// @dev A nominally valid (<100%) commission can still consume the full
@@ -292,7 +293,7 @@ contract BridgeFeeOnTransferTest is BridgeTestBase {
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.InsufficientReceived.selector, received, tokenCommission));
         vm.prank(user);
-        s.bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(s.bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         assertEq(s.bridge.lockedLiquidity(RGB_CHAIN_ID), 0, "zero-net liquidity was not recorded");
         assertEq(s.cm.tokenCommissionPool(address(s.token)), 0, "commission transfer rolled back");

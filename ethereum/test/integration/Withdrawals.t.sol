@@ -204,7 +204,7 @@ contract IntegrationWithdrawalsTest is IntegrationTestBase {
 
         vm.prank(user);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(RGB_LOCK_ID + 100, RGB_BEFORE_BLOCK));
+        _authorizedFundsIn(bridge, USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, _rgbFundsInData(RGB_LOCK_ID + 100));
         _assertReleaseUnchanged(burnId, beforeState);
 
         uint256 unpauseNonce = proxy.emergencyNonce();

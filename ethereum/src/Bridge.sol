@@ -5,10 +5,11 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {BridgeBaseUpgradeable} from "./BridgeBaseUpgradeable.sol";
 import {IBridge} from "./interfaces/IBridge.sol";
-import {ICommissionManager} from "./interfaces/ICommissionManager.sol";
+import {FlatFeeType, ICommissionManager} from "./interfaces/ICommissionManager.sol";
 import {IRouteRegistry} from "./interfaces/IRouteRegistry.sol";
 import {IRgbSettlementModule} from "./interfaces/IRgbSettlementModule.sol";
 import {FundsInContext, FundsOutContext, RouteConfig} from "./interfaces/RouteTypes.sol";
@@ -43,8 +44,13 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     uint256 public constant MAX_PROOF_LENGTH = 1024;
 
     /// @notice Maximum byte length of deposit settlement data.
-    /// @dev RGB deposits encode `(uint256 lockId, uint64 beforeBlock)` in 64 bytes.
+    /// @dev RGB deposits append one raw flat-fee selector byte to the 64-byte tuple.
     uint256 public constant MAX_SETTLEMENT_DATA_IN_LENGTH = 128;
+
+    /// @dev RGB rebalance credits retain the legacy two-word payload, while
+    ///      user deposits append one raw byte selecting BASE or WITNESS.
+    uint256 private constant _RGB_SETTLEMENT_FIELDS_LENGTH = 64;
+    uint256 private constant _RGB_FUNDS_IN_DATA_LENGTH = 65;
 
     /// @notice Maximum byte length of each release or rebalance settlement payload.
     /// @dev One dynamic bytes32 array encodes as 64 + 32 * n bytes; 90,000 bytes
@@ -84,9 +90,19 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///         make allowance return faster.
     uint256 public constant BUCKET_REFILL_WINDOW = 24 hours;
 
+    bytes32 private constant _EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant _EIP712_NAME_HASH = keccak256("UtexoBridge");
+    bytes32 private constant _EIP712_VERSION_HASH = keccak256("1");
+
+    /// @notice EIP-712 type hash for backend-authorized deposits.
+    bytes32 public constant FUNDS_IN_AUTHORIZATION_TYPEHASH = keccak256(
+        "FundsInAuthorization(address token,uint256 amount,uint256 sourceChainId,bytes32 sourceSender,uint256 destinationChainId,string destinationAddress,bytes settlementData,bytes32 authorizationNonce,uint256 deadline)"
+    );
+
     /// @notice Domain separator for non-RGB deposit identifiers; not an EIP-712 digest.
     bytes32 public constant FUNDS_IN_OPERATION_TYPEHASH = keccak256(
-        "UtexoFundsInOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,uint256 senderNonce,address token,uint256 grossAmount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataHash,uint256 chainId)"
+        "UtexoFundsInOperation(address bridge,uint256 sourceChainId,bytes32 sourceSender,bytes32 authorizationNonce,address token,uint256 grossAmount,uint256 destinationChainId,bytes32 destinationAddressHash,bytes32 settlementDataHash,uint256 chainId)"
     );
 
     /// @notice RGB backing identity derived only from a mint lock and pinned config.
@@ -126,17 +142,17 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @inheritdoc IBridge
     address public override lzAdapter;
 
+    /// @inheritdoc IBridge
+    address public override fundsInSigner;
+
     /// @notice Set of Bridge-derived burn identifiers already consumed by a
     ///         successful `fundsOut` or `rebalanceLiquidity`. Both paths use the
     ///         same `BURN_TYPEHASH` and field set, so the same canonical source
     ///         burn derives the same id on either path and can settle only once.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
-    /// @notice Per-`(sourceChainId, sourceSender)` monotonic nonce. Folded into
-    ///         non-RGB `operationId` so otherwise-identical deposits from the same
-    ///         sender still produce distinct ids. Incremented once per successful
-    ///         `fundsIn`; a downstream revert rolls the increment back.
-    mapping(uint256 sourceChainId => mapping(bytes32 sourceSender => uint256 nonce)) public sourceSenderNonces;
+    /// @inheritdoc IBridge
+    mapping(bytes32 authorizationNonce => bool used) public override usedFundsInAuthorizationNonces;
 
     /// @notice Accounted liquidity available to each remote network.
     /// @dev Deposits credit their destination; releases debit their source. Rebalances
@@ -209,6 +225,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         address routeRegistry_,
         address payable commissionManager_,
         address lzAdapter_,
+        address fundsInSigner_,
         uint256 minFundsInAmount_,
         uint256 minFundsOutAmount_,
         address initialOwner_
@@ -217,6 +234,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
 
         if (routeRegistry_ == address(0)) revert InvalidRouteRegistryAddress();
         if (commissionManager_ == address(0)) revert InvalidCommissionManagerAddress();
+        if (fundsInSigner_ == address(0)) revert InvalidFundsInSigner();
         if (minFundsInAmount_ == 0) revert InvalidMinFundsInAmount();
         if (minFundsOutAmount_ == 0) revert InvalidMinFundsOutAmount();
         if (minFundsInAmount_ < minFundsOutAmount_) {
@@ -226,6 +244,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         routeRegistry = routeRegistry_;
         commissionManager = ICommissionManager(commissionManager_);
         lzAdapter = lzAdapter_;
+        fundsInSigner = fundsInSigner_;
         minFundsInAmount = minFundsInAmount_;
         minFundsOutAmount = minFundsOutAmount_;
     }
@@ -254,6 +273,14 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         address old = lzAdapter;
         lzAdapter = address(0);
         emit LZAdapterDisabled(old);
+    }
+
+    /// @inheritdoc IBridge
+    function setFundsInSigner(address newSigner) external override onlyOwner {
+        if (newSigner == address(0)) revert InvalidFundsInSigner();
+        address oldSigner = fundsInSigner;
+        fundsInSigner = newSigner;
+        emit FundsInSignerUpdated(oldSigner, newSigner);
     }
 
     /// @inheritdoc IBridge
@@ -403,7 +430,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         uint256 amount,
         uint256 destinationChainId,
         string calldata destinationAddress,
-        bytes calldata settlementData
+        bytes calldata settlementData,
+        FundsInAuthorization calldata authorization
     ) external payable override whenNotPaused nonReentrant returns (bytes32 operationId) {
         // Direct deposits can refund native surplus to the caller.
         address caller = _msgSender();
@@ -415,6 +443,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             destinationChainId,
             destinationAddress,
             settlementData,
+            authorization,
             true
         );
     }
@@ -426,7 +455,8 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         bytes32 sourceSender,
         uint256 destinationChainId,
         string calldata destinationAddress,
-        bytes calldata settlementData
+        bytes calldata settlementData,
+        FundsInAuthorization calldata authorization
     ) external payable override whenNotPaused nonReentrant onlyLZAdapter returns (bytes32 operationId) {
         // The adapter authenticates the source sender and forwards the user's native payment.
         // The payer is on the source chain, so no refund is sent to the adapter.
@@ -438,6 +468,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             destinationChainId,
             destinationAddress,
             settlementData,
+            authorization,
             false
         );
     }
@@ -596,7 +627,9 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         // Derive the credit id and record the destination settlement.
         bytes32 operationId = IRouteRegistry(routeRegistry)
             .usesRgbMintDepositId(params.sourceChainId, params.destinationChainId)
-            ? rgbMintDepositId(params.destinationChainId, _decodeLockId(params.settlementDataIn), params.amount)
+            ? rgbMintDepositId(
+                params.destinationChainId, _decodeRebalanceLockId(params.settlementDataIn), params.amount
+            )
             : _deriveRebalanceOperationId(params, sourceSender, expectedBurnId);
         uint256 lockId = IRouteRegistry(routeRegistry)
             .onFundsIn(
@@ -607,7 +640,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
                 grossAmount: params.amount,
                 netAmount: params.amount,
                 operationId: operationId,
-                senderNonce: 0, // rebalance consumes no nonce stream; id is nonce-free
+                authorizationNonce: bytes32(0), // rebalance credit ids use the source burn instead
                 sourceChainId: params.sourceChainId,
                 destChainId: params.destinationChainId,
                 destAddress: params.destinationAddress
@@ -780,6 +813,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         uint256 destinationChainId,
         string memory destinationAddress,
         bytes calldata settlementData,
+        FundsInAuthorization calldata authorization,
         bool refundNativeSurplus
     ) private returns (bytes32 operationId) {
         if (amount < minFundsInAmount) {
@@ -794,9 +828,17 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
         if (sourceChainId == 0) revert InvalidSourceChainId();
         if (destinationChainId == 0) revert InvalidDestinationChainId();
 
+        _consumeFundsInAuthorization(
+            amount, sourceChainId, sourceSender, destinationChainId, destinationAddress, settlementData, authorization
+        );
+
+        bool quoteUsesRgbMintId = IRouteRegistry(routeRegistry).usesRgbMintDepositId(sourceChainId, destinationChainId);
+        FlatFeeType flatFeeType = FlatFeeType.BASE;
+        if (quoteUsesRgbMintId) flatFeeType = _decodeRgbFlatFeeType(settlementData);
+
         // Quote on the requested amount; derive net liquidity from the actual token receipt.
         (uint256 tokenCommission, uint256 nativeCommission,) =
-            commissionManager.calculateFundsInCommission(sourceChainId, destinationChainId, TOKEN, amount);
+            commissionManager.calculateFundsInCommission(sourceChainId, destinationChainId, TOKEN, amount, flatFeeType);
 
         // Direct deposits pay the quote and receive a surplus refund.
         // Adapter deposits pay the full supplied value within the symmetric tolerance.
@@ -825,7 +867,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             }
         }
 
-        // Increment the event nonce for all deposits; only non-RGB ids include it.
+        // Carry the backend-issued authorization nonce into the event and non-RGB id.
         FundsInContext memory ctx = FundsInContext({
             token: TOKEN,
             sender: from,
@@ -833,7 +875,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             grossAmount: amount,
             netAmount: 0, // set below from the ACTUAL received amount
             operationId: bytes32(0), // derived after actual netAmount is known
-            senderNonce: sourceSenderNonces[sourceChainId][sourceSender]++,
+            authorizationNonce: authorization.authorizationNonce,
             sourceChainId: sourceChainId,
             destChainId: destinationChainId,
             destAddress: destinationAddress
@@ -852,7 +894,12 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
 
         // Resolve identity after commission callbacks, immediately before the
         // record write.
-        ctx.operationId = _deriveOperationId(ctx, settlementData);
+        // Resolve again after commission callbacks: an authorized manager may
+        // rotate the route while receiving token commission.
+        bool currentUsesRgbMintId =
+            IRouteRegistry(routeRegistry).usesRgbMintDepositId(sourceChainId, destinationChainId);
+        if (currentUsesRgbMintId != quoteUsesRgbMintId) revert RouteFeeModeChanged();
+        ctx.operationId = _deriveOperationId(ctx, settlementData, currentUsesRgbMintId);
 
         // Record the deposit and obtain the optional RGB event id.
         uint256 lockId = IRouteRegistry(routeRegistry).onFundsIn(ctx, settlementData);
@@ -874,7 +921,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
             ctx.operationId,
             ctx.sourceSender,
             ctx.sender,
-            ctx.senderNonce,
+            ctx.authorizationNonce,
             ctx.grossAmount,
             ctx.netAmount,
             tokenCommission,
@@ -899,6 +946,98 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     ///      used by `operationId` derivation and the LZ overload.
     function _toSourceSender(address account) private pure returns (bytes32) {
         return bytes32(uint256(uint160(account)));
+    }
+
+    /// @inheritdoc IBridge
+    function DOMAIN_SEPARATOR() public view override returns (bytes32) {
+        return keccak256(
+            abi.encode(_EIP712_DOMAIN_TYPEHASH, _EIP712_NAME_HASH, _EIP712_VERSION_HASH, block.chainid, address(this))
+        );
+    }
+
+    /// @inheritdoc IBridge
+    function fundsInAuthorizationDigest(
+        uint256 amount,
+        uint256 sourceChainId,
+        bytes32 sourceSender,
+        uint256 destinationChainId,
+        string calldata destinationAddress,
+        bytes calldata settlementData,
+        bytes32 authorizationNonce,
+        uint256 deadline
+    ) external view override returns (bytes32) {
+        return _fundsInAuthorizationDigest(
+            amount,
+            sourceChainId,
+            sourceSender,
+            destinationChainId,
+            destinationAddress,
+            settlementData,
+            authorizationNonce,
+            deadline
+        );
+    }
+
+    function _consumeFundsInAuthorization(
+        uint256 amount,
+        uint256 sourceChainId,
+        bytes32 sourceSender,
+        uint256 destinationChainId,
+        string memory destinationAddress,
+        bytes calldata settlementData,
+        FundsInAuthorization calldata authorization
+    ) private {
+        if (block.timestamp > authorization.deadline) {
+            revert FundsInAuthorizationExpired(authorization.deadline);
+        }
+        if (usedFundsInAuthorizationNonces[authorization.authorizationNonce]) {
+            revert FundsInAuthorizationAlreadyUsed(authorization.authorizationNonce);
+        }
+
+        bytes32 digest = _fundsInAuthorizationDigest(
+            amount,
+            sourceChainId,
+            sourceSender,
+            destinationChainId,
+            destinationAddress,
+            settlementData,
+            authorization.authorizationNonce,
+            authorization.deadline
+        );
+        (address recovered, ECDSA.RecoverError recoverError,) =
+            ECDSA.tryRecoverCalldata(digest, authorization.signature);
+        if (recoverError != ECDSA.RecoverError.NoError || recovered != fundsInSigner) {
+            revert InvalidFundsInAuthorizationSignature();
+        }
+
+        usedFundsInAuthorizationNonces[authorization.authorizationNonce] = true;
+    }
+
+    function _fundsInAuthorizationDigest(
+        uint256 amount,
+        uint256 sourceChainId,
+        bytes32 sourceSender,
+        uint256 destinationChainId,
+        string memory destinationAddress,
+        bytes calldata settlementData,
+        bytes32 authorizationNonce,
+        uint256 deadline
+    ) private view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                FUNDS_IN_AUTHORIZATION_TYPEHASH,
+                TOKEN,
+                amount,
+                sourceChainId,
+                sourceSender,
+                destinationChainId,
+                keccak256(bytes(destinationAddress)),
+                keccak256(settlementData),
+                authorizationNonce,
+                deadline
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash));
     }
 
     /// @dev Transfers commission and credits only the recipient's measured balance increase.
@@ -989,19 +1128,43 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     }
 
     function _decodeLockId(bytes calldata settlementData) private pure returns (uint256 lockId) {
-        (lockId,) = abi.decode(settlementData, (uint256, uint64));
+        if (settlementData.length < _RGB_SETTLEMENT_FIELDS_LENGTH) {
+            revert InvalidRgbSettlementDataLength(settlementData.length);
+        }
+        (lockId,) = abi.decode(settlementData[:_RGB_SETTLEMENT_FIELDS_LENGTH], (uint256, uint64));
         if (lockId == 0) revert InvalidRgbOpId();
+    }
+
+    /// @dev Rebalance credits deliberately keep the legacy two-word payload and
+    ///      never carry a user-selected fee mode.
+    function _decodeRebalanceLockId(bytes calldata settlementData) private pure returns (uint256 lockId) {
+        if (settlementData.length != _RGB_SETTLEMENT_FIELDS_LENGTH) {
+            revert InvalidRgbSettlementDataLength(settlementData.length);
+        }
+        return _decodeLockId(settlementData);
+    }
+
+    /// @dev RGB user deposits must append exactly one raw selector byte to the
+    ///      legacy `(lockId, beforeBlock)` payload.
+    function _decodeRgbFlatFeeType(bytes calldata settlementData) private pure returns (FlatFeeType flatFeeType) {
+        if (settlementData.length != _RGB_FUNDS_IN_DATA_LENGTH) {
+            revert InvalidRgbSettlementDataLength(settlementData.length);
+        }
+
+        uint8 rawType = uint8(settlementData[_RGB_SETTLEMENT_FIELDS_LENGTH]);
+        if (rawType > uint8(FlatFeeType.WITNESS)) revert InvalidFlatFeeType(rawType);
+        flatFeeType = FlatFeeType(rawType);
     }
 
     /// @dev RGB ids bind the mint and actual net amount; all other routes retain
     ///      the sender/nonce/gross-amount formula. The route module chooses the
     ///      mode before the record is written. ctx.operationId is ignored.
-    function _deriveOperationId(FundsInContext memory ctx, bytes calldata settlementData)
+    function _deriveOperationId(FundsInContext memory ctx, bytes calldata settlementData, bool usesRgbMintId)
         private
         view
         returns (bytes32)
     {
-        if (IRouteRegistry(routeRegistry).usesRgbMintDepositId(ctx.sourceChainId, ctx.destChainId)) {
+        if (usesRgbMintId) {
             return rgbMintDepositId(ctx.destChainId, _decodeLockId(settlementData), ctx.netAmount);
         }
         return keccak256(
@@ -1010,7 +1173,7 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
                 address(this),
                 ctx.sourceChainId,
                 ctx.sourceSender,
-                ctx.senderNonce,
+                ctx.authorizationNonce,
                 TOKEN,
                 ctx.grossAmount,
                 ctx.destChainId,

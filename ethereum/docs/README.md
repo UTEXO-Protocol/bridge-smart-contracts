@@ -48,21 +48,45 @@ Ownership renunciation is disabled.
 The direct public entry point is:
 
 ```solidity
-fundsIn(amount, destinationChainId, destinationAddress, settlementData)
+fundsIn(amount, destinationChainId, destinationAddress, settlementData, authorization)
 ```
 
 Bridge derives the source network from `block.chainid`, pulls tokens from the
 caller and credits destination liquidity with the actual receipt minus token
-commission. For RGB,
-`settlementData = abi.encode(uint256 lockId, uint64 beforeBlock)` and
-`destinationAddress` must be empty: the destination is carried in the RGB
-consignment, not supplied again as an EVM argument. `beforeBlock` is an
-exclusive Arbitrum L2 deadline: the deposit reverts when
+commission. Every deposit requires a backend-issued `FundsInAuthorization`
+containing an unordered `bytes32 authorizationNonce`, a Unix `deadline`, and an
+EIP-712 signature from `fundsInSigner`. The signature binds the token, amount,
+source chain and sender, destination chain and address, settlement payload,
+nonce, and deadline to the current chain and Bridge proxy. The nonce is consumed
+globally only after signature validation; replaying it reverts, while any later
+revert rolls the consumption back with the transaction. An authorization remains
+valid at exactly `deadline` and expires when `block.timestamp > deadline`.
+
+The EIP-712 domain is `UtexoBridge`, version `1`, the current chain ID, and the
+Bridge proxy as verifying contract. The backend can use
+`fundsInAuthorizationDigest(...)` as the canonical digest reference and should
+generate cryptographically random, globally unique authorization nonces.
+`fundsInSigner` is set during deployment and can be rotated by federation
+governance through `AdminExecute` calling `Bridge.setFundsInSigner(address)`.
+
+For RGB, user deposits require exactly 65 bytes:
+`bytes.concat(abi.encode(uint256 lockId, uint64 beforeBlock), bytes1(feeType))`,
+where `feeType = 0` selects the route `baseFee` and `feeType = 1` selects its
+configured `witnessFee`. Do not use `abi.encode(..., feeType)`, which produces a
+96-byte payload. `destinationAddress` must be empty: the destination is carried
+in the RGB consignment, not supplied again as an EVM argument. `beforeBlock` is
+an exclusive Arbitrum L2 deadline: the deposit reverts when
 `ArbSys.arbBlockNumber() >= beforeBlock`.
+
+The backend determines whether the RGB transaction actually uses a witness.
+The on-chain flag selects pricing but is not a cryptographic witness proof. A
+missing witness-fee configuration or an unknown flag fails closed. RGB rebalance
+credits retain the legacy 64-byte tuple, carry no flag and pay no commission.
 
 An adapter-only overload additionally takes `sourceChainId` and `sourceSender`.
 The configured LayerZero adapter authenticates those values and supplies tokens.
-Bridge does not independently authenticate the originating cross-chain message.
+Bridge also requires its backend signature over those authenticated values; it
+does not independently authenticate the originating cross-chain message.
 
 For direct native-fee deposits, `msg.value` must be between the fresh quote and
 5% above it. Bridge collects the quote and refunds excess after state updates.
@@ -164,9 +188,22 @@ getters while being paired with a newer registry.
 
 CM resolves a directional rule keyed by
 `keccak256(abi.encode(sourceChainId, destChainId, token))`, or uses global defaults.
-The token-denominated fee is `amount * stablePercent / multiplier^2 + baseFee`.
-The effective proportional rate is capped at 90%. Both components zero disable
-commission; an enabled fee must not round to zero.
+The normal token-denominated fee is
+`amount * stablePercent / multiplier^2 + baseFee`.
+The effective proportional rate is capped at 90%. In BASE mode, both components
+zero disable commission; an enabled fee must not round to zero.
+
+RGB inbound routes may additionally configure a route-scoped `witnessFee`, in
+the same token-smallest-unit denomination as `baseFee`:
+
+```text
+amount * stablePercent / multiplier^2 + (baseFee OR witnessFee)
+```
+
+`witnessFee` replaces `baseFee`; they are never added together. An explicit
+`{witnessFee: 0, isSet: true}` is valid, while `isSet: false` clears the setting
+and makes WITNESS quotes revert. NATIVE routes convert the selected
+token-denominated total through the existing oracle path.
 
 Deposits support TOKEN fees deducted from principal or NATIVE fees paid separately.
 Releases support TOKEN only. Native conversion assumes the bridge token is
@@ -210,12 +247,13 @@ consume the regular proposal nonce.
 
 | Operation | Target / effect |
 | --- | --- |
-| `AdminExecute` | Allowed generic Bridge calls |
+| `AdminExecute` | Allowed generic Bridge calls, including `setFundsInSigner` rotation |
 | `AdminExecuteCommissionManager` | Allowed CM configuration calls and ownership acceptance |
 | `AdminExecuteRouteRegistry` | Allowed registry calls and ownership acceptance |
 | `AdminExecuteAdapter` | Allowed calls to the current adapter |
 | `UpdateEnclaveSigners` / `UpdateFederationSigners` | Signer-set changes |
 | `WithdrawTokenCommissionCM` / `WithdrawNativeCommissionCM` | Withdraw commissions to the fixed recipient |
+| `setWitnessFee` through `AdminExecuteCommissionManager` | Set or clear a route-scoped RGB inbound witness fee |
 | `UpdateCommissionManager` | Update Bridge and proxy CM pointers atomically |
 | `SetRoute` / `UpdateRouteRegistry` | Route configuration / Bridge registry pointer |
 | `UpdateLZAdapter` / `DisableLZAdapter` | Set / clear the proxy's adapter target |
@@ -261,7 +299,7 @@ forge script script/deploy/DeployAll.s.sol --rpc-url "$RPC_URL" --broadcast --ve
 ```
 
 The template documents all inputs. Set token/relay addresses, amount floors,
-signer sets, initial source network (`827166` for RGB), guardian, recipient,
+the backend `FUNDS_IN_SIGNER`, governance signer sets, initial source network (`827166` for RGB), guardian, recipient,
 timelock and outflow policy. Native fee quotes additionally require the oracle
 configuration.
 
@@ -278,7 +316,7 @@ The script **does not accept ownership or register routes**. After deployment:
    and execute the printed `opData`. Use `getRoute(src, dst)` to check the result.
 3. Configure and verify fee rules and oracle inputs.
 4. Check Bridge/registry/CM bindings, owner and pendingOwner values, signer sets,
-   per-chain nonces, verifier parameters, amount floors and outflow policies.
+   the funds-in signer, verifier parameters, amount floors and outflow policies.
 5. Exercise deposit and release paths with the deployed configuration.
 
 `DeployBridge` creates a fresh implementation and proxy; it is not an upgrade
@@ -364,6 +402,11 @@ To replace an existing CM:
    `acceptOwnership()` calldata. Wait for this proposal's timelock and execute it.
 6. Verify both CM pointers and the new manager's owner, recipient, configuration
    and binding.
+
+When deploying this witness-fee ABI, install the new CM before upgrading Bridge:
+the replacement keeps the legacy four-argument funds-in quote (BASE only), while
+the upgraded Bridge uses the five-argument quote. External callers must use the
+five-argument overload to quote WITNESS deposits.
 
 Do not prepare acceptance before the update: the proposal would bind the old CM
 and become stale after switching. This sequence requires a second timelock during

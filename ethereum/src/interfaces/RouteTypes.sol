@@ -14,8 +14,7 @@ pragma solidity 0.8.35;
 ///                               rebalances.
 /// @param operationId            Bridge-derived record id, using RGB mint identity or non-RGB
 ///                               context.
-/// @param senderNonce            Deposit nonce for (sourceChainId, sourceSender); zero for
-///                               rebalances.
+/// @param authorizationNonce     Backend-issued deposit authorization nonce; zero for rebalances.
 /// @param sourceChainId          Local chain for direct deposits; authenticated origin otherwise.
 /// @param destChainId            Destination network id.
 /// @param destAddress            Route-specific address; empty for RGB because it is in the
@@ -27,7 +26,7 @@ struct FundsInContext {
     uint256 grossAmount;
     uint256 netAmount;
     bytes32 operationId;
-    uint256 senderNonce;
+    bytes32 authorizationNonce;
     uint256 sourceChainId;
     uint256 destChainId;
     string destAddress;

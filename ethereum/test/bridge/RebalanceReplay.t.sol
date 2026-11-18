@@ -19,17 +19,29 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
     {
         usdt0.mint(user, AMOUNT * 17);
         vm.prank(user);
-        bytes32 backingOperationId = bridge.fundsIn(
-            AMOUNT, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 3_000, RGB_BEFORE_BLOCK)
+        bytes32 backingOperationId = _authorizedFundsIn(
+            bridge,
+            AMOUNT,
+            MINT_BURN_FIXTURE_CHAIN_ID,
+            RGB_DST_ADDR,
+            bytes.concat(abi.encode(RGB_LOCK_ID + 3_000, RGB_BEFORE_BLOCK), hex"00")
         );
         // Headroom under the 10% bucket burst; each deposit stays within uint64.
         vm.prank(user);
-        bridge.fundsIn(
-            AMOUNT * 8, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 3_001, RGB_BEFORE_BLOCK)
+        _authorizedFundsIn(
+            bridge,
+            AMOUNT * 8,
+            MINT_BURN_FIXTURE_CHAIN_ID,
+            RGB_DST_ADDR,
+            bytes.concat(abi.encode(RGB_LOCK_ID + 3_001, RGB_BEFORE_BLOCK), hex"00")
         );
         vm.prank(user);
-        bridge.fundsIn(
-            AMOUNT * 8, MINT_BURN_FIXTURE_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 3_002, RGB_BEFORE_BLOCK)
+        _authorizedFundsIn(
+            bridge,
+            AMOUNT * 8,
+            MINT_BURN_FIXTURE_CHAIN_ID,
+            RGB_DST_ADDR,
+            bytes.concat(abi.encode(RGB_LOCK_ID + 3_002, RGB_BEFORE_BLOCK), hex"00")
         );
 
         p = _mintBurnToChainAParams(AMOUNT, backingOperationId);
@@ -83,8 +95,13 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         // Second RGB deposit → a distinct record to reference for the 2nd burn.
         usdt0.mint(user, AMOUNT);
         vm.prank(user);
-        bytes32 secondSeedOpId =
-            bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 50, RGB_BEFORE_BLOCK));
+        bytes32 secondSeedOpId = _authorizedFundsIn(
+            bridge,
+            AMOUNT,
+            RGB_CHAIN_ID,
+            RGB_DST_ADDR,
+            bytes.concat(abi.encode(RGB_LOCK_ID + 50, RGB_BEFORE_BLOCK), hex"00")
+        );
 
         IBridge.RebalanceParams memory first = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
         IBridge.RebalanceParams memory second = _rgbToChainAParams(AMOUNT, secondSeedOpId);
@@ -186,8 +203,13 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
     function test_rebalanceLiquidity_changedBackingRecordsCannotReplaySameBurn() public {
         usdt0.mint(user, AMOUNT);
         vm.prank(user);
-        bytes32 otherRecord =
-            bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(RGB_LOCK_ID + 51, RGB_BEFORE_BLOCK));
+        bytes32 otherRecord = _authorizedFundsIn(
+            bridge,
+            AMOUNT,
+            RGB_CHAIN_ID,
+            RGB_DST_ADDR,
+            bytes.concat(abi.encode(RGB_LOCK_ID + 51, RGB_BEFORE_BLOCK), hex"00")
+        );
         IBridge.RebalanceParams memory first = _rgbToChainAParams(AMOUNT, rgbSeedOpId);
         IBridge.RebalanceParams memory second = _rgbToChainAParams(AMOUNT, otherRecord);
         second.sourceBurnTxId = first.sourceBurnTxId;
@@ -269,7 +291,9 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         uint256 lockId = RGB_LOCK_ID + 500;
         usdt0.mint(user, AMOUNT);
         vm.prank(user);
-        bytes32 depositId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(lockId, RGB_BEFORE_BLOCK));
+        bytes32 depositId = _authorizedFundsIn(
+            bridge, AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, bytes.concat(abi.encode(lockId, RGB_BEFORE_BLOCK), hex"00")
+        );
         IBridge.RebalanceParams memory p = _chainAToRgbParams(AMOUNT, lockId);
         assertEq(_deriveRebalanceOpId(p), depositId, "deposit and credit leg share the identity");
         uint256 sourceBefore = bridge.lockedLiquidity(CHAIN_A_ID);
@@ -297,13 +321,13 @@ contract BridgeRebalanceReplayTest is BridgeRebalanceTestBase {
         usdt0.mint(user, AMOUNT);
         uint256 balanceBefore = usdt0.balanceOf(user);
         uint256 totalBefore = bridge.totalLockedLiquidity();
-        uint256 nonceBefore = bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user))));
         vm.expectRevert(RgbSettlementModule.DuplicateOperationId.selector);
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, abi.encode(lockId, RGB_BEFORE_BLOCK));
+        _authorizedFundsIn(
+            bridge, AMOUNT, RGB_CHAIN_ID, RGB_DST_ADDR, bytes.concat(abi.encode(lockId, RGB_BEFORE_BLOCK), hex"00")
+        );
         assertEq(usdt0.balanceOf(user), balanceBefore);
         assertEq(bridge.totalLockedLiquidity(), totalBefore);
-        assertEq(bridge.sourceSenderNonces(SOURCE_CHAIN_ID, bytes32(uint256(uint160(user)))), nonceBefore);
         assertEq(rgbModule.fundsInRecords(_deriveRebalanceOpId(p)), AMOUNT);
     }
 

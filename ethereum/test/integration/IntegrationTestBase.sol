@@ -106,6 +106,10 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     uint64 internal constant RGB_BEFORE_BLOCK = 1_100_000;
 
+    function _rgbFundsInData(uint256 lockId) internal pure returns (bytes memory) {
+        return bytes.concat(abi.encode(lockId, RGB_BEFORE_BLOCK), hex"00");
+    }
+
     bytes32 internal constant SRC_BURN_TX_ID = keccak256("integration-burn-tx-default");
 
     // RGB proof = two (height, commit) pairs: a deep source block (RGB
@@ -360,10 +364,10 @@ abstract contract IntegrationTestBase is Test, BridgeProxyTestUtils {
 
     function _depositN(uint256 n, uint256 lockIdBase) internal returns (bytes32 firstOpId) {
         vm.prank(user);
-        firstOpId = bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(lockIdBase, RGB_BEFORE_BLOCK));
+        firstOpId = _authorizedFundsIn(bridge, USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, _rgbFundsInData(lockIdBase));
         for (uint256 i = 1; i < n; i++) {
             vm.prank(user);
-            bridge.fundsIn(USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, abi.encode(lockIdBase + i, RGB_BEFORE_BLOCK));
+            _authorizedFundsIn(bridge, USER_DEPOSIT, RGB_CHAIN_ID, RGB_INVOICE, _rgbFundsInData(lockIdBase + i));
         }
     }
 

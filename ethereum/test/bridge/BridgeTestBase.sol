@@ -187,17 +187,17 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     /// @dev RGB-route `settlementData` for `fundsIn`: the module decodes a
     ///      a non-zero `uint256 lockId` and exclusive `uint64 beforeBlock`.
     function _rgbData() internal pure returns (bytes memory) {
-        return abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK);
+        return bytes.concat(abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK), hex"00");
     }
 
     /// @dev RGB-route `settlementData` with an explicit lock ID (for tests that
     ///      need distinct ids or the zero-id revert path).
     function _rgbData(uint256 lockId) internal pure returns (bytes memory) {
-        return abi.encode(lockId, RGB_BEFORE_BLOCK);
+        return bytes.concat(abi.encode(lockId, RGB_BEFORE_BLOCK), hex"00");
     }
 
     function _rgbData(uint256 lockId, uint64 beforeBlock) internal pure returns (bytes memory) {
-        return abi.encode(lockId, beforeBlock);
+        return bytes.concat(abi.encode(lockId, beforeBlock), hex"00");
     }
 
     function _setArbitrumL2Block(uint256 l2Block) internal {
@@ -216,7 +216,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
     function _deriveOpId(
         uint256 sourceChainId,
         bytes32 sourceSender,
-        uint256 senderNonce,
+        bytes32 authorizationNonce,
         uint256 grossAmount,
         uint256 destinationChainId,
         string memory destinationAddress,
@@ -228,7 +228,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
                 address(bridge),
                 sourceChainId,
                 sourceSender,
-                senderNonce,
+                authorizationNonce,
                 bridge.TOKEN(),
                 grossAmount,
                 destinationChainId,
@@ -384,7 +384,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
             uint256 topUp = requiredLiquidity - currentLiquidity;
             usdt0.mint(user, topUp);
             vm.prank(user);
-            bridge.fundsIn(topUp, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1_000_000));
+            _authorizedFundsIn(bridge, topUp, RGB_CHAIN_ID, DST_ADDR, _rgbData(RGB_LOCK_ID + 1_000_000));
         }
 
         _configureMaxSafeBuckets();
@@ -404,7 +404,7 @@ abstract contract BridgeTestBase is Test, BridgeProxyTestUtils {
         _seedAmt = seededLiquidity; // no fundsIn commission in this suite → net == gross
         usdt0.mint(user, seededLiquidity);
         vm.prank(user);
-        _seedOpId = bridge.fundsIn(seededLiquidity, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _seedOpId = _authorizedFundsIn(bridge, seededLiquidity, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _configureMaxSafeBuckets();
     }
 

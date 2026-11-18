@@ -13,7 +13,7 @@ import {BridgeProxy} from "../../src/BridgeProxy.sol";
 ///      Keep that nonce unchanged between prediction and broadcast. Use DeployAll
 ///      for a fresh stack; upgrades use DeployBridgeImplementation and governance.
 ///      Inputs (see the matching .env example for values):
-///      `PRIVATE_KEY`, `USDT0_ADDRESS`, `ROUTE_REGISTRY_ADDRESS`, `COMMISSION_MANAGER`,
+///      `PRIVATE_KEY`, `USDT0_ADDRESS`, `ROUTE_REGISTRY_ADDRESS`, `COMMISSION_MANAGER`, `FUNDS_IN_SIGNER`,
 ///      `LZ_ADAPTER`, `MIN_FUNDS_IN_AMOUNT`, `MIN_FUNDS_OUT_AMOUNT`.
 contract DeployBridge is Script {
     function run() external returns (Bridge bridge) {
@@ -22,6 +22,7 @@ contract DeployBridge is Script {
         address routeRegistry = vm.envAddress("ROUTE_REGISTRY_ADDRESS");
         address commissionManager = vm.envAddress("COMMISSION_MANAGER");
         address lzAdapter = vm.envOr("LZ_ADAPTER", address(0));
+        address fundsInSigner = vm.envAddress("FUNDS_IN_SIGNER");
         uint256 minFundsInAmount = vm.envUint("MIN_FUNDS_IN_AMOUNT");
         uint256 minFundsOutAmount = vm.envUint("MIN_FUNDS_OUT_AMOUNT");
         address deployer = vm.addr(pk);
@@ -37,6 +38,7 @@ contract DeployBridge is Script {
                     routeRegistry,
                     payable(commissionManager),
                     lzAdapter,
+                    fundsInSigner,
                     minFundsInAmount,
                     minFundsOutAmount,
                     deployer
@@ -53,6 +55,7 @@ contract DeployBridge is Script {
         console2.log("RouteRegistry:       ", address(bridge.routeRegistry()));
         console2.log("CommissionManager:   ", address(bridge.commissionManager()));
         console2.log("LZ adapter:          ", bridge.lzAdapter());
+        console2.log("Funds-in signer:     ", bridge.fundsInSigner());
         console2.log("Min fundsIn amount:  ", bridge.minFundsInAmount());
     }
 }

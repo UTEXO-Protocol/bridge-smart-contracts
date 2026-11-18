@@ -4,6 +4,16 @@ pragma solidity 0.8.35;
 import {ICommissionManager} from "./ICommissionManager.sol";
 
 interface IBridge {
+    /// @notice Backend authorization attached to every deposit.
+    /// @param authorizationNonce Globally unique, unordered nonce issued by the backend.
+    /// @param deadline Unix timestamp through which the authorization is valid.
+    /// @param signature EIP-712 signature produced by the configured funds-in signer.
+    struct FundsInAuthorization {
+        bytes32 authorizationNonce;
+        uint256 deadline;
+        bytes signature;
+    }
+
     /// @notice Stable marker accepted by BridgeProxy implementations.
     /// @dev Must be called directly on an implementation, never through delegatecall.
     function bridgeProxyCompatibilityUUID() external view returns (bytes32);
@@ -15,6 +25,7 @@ interface IBridge {
         address routeRegistry,
         address payable commissionManager,
         address lzAdapter,
+        address fundsInSigner,
         uint256 minFundsInAmount,
         uint256 minFundsOutAmount,
         address initialOwner
@@ -30,6 +41,9 @@ interface IBridge {
     error ZeroNetAmount();
     error InvalidRgbOpId();
     error CirculatingSupplyOverflow(uint256 currentSupply, uint256 amount);
+    error InvalidRgbSettlementDataLength(uint256 length);
+    error InvalidFlatFeeType(uint8 value);
+    error RouteFeeModeChanged();
     error CommissionConservationBroken();
     error AmountBelowMinimum(uint256 amount, uint256 minimum);
     error InsufficientReceived(uint256 received, uint256 tokenCommission);
@@ -45,6 +59,10 @@ interface IBridge {
     error InvalidCommissionManagerAddress();
     error NotLZAdapter();
     error InvalidLZAdapter();
+    error InvalidFundsInSigner();
+    error InvalidFundsInAuthorizationSignature();
+    error FundsInAuthorizationExpired(uint256 deadline);
+    error FundsInAuthorizationAlreadyUsed(bytes32 authorizationNonce);
     error InvalidBurnId(uint256 provided, uint256 expected);
     error ZeroSourceBurnTxId();
     error BurnIdAlreadyConsumed(uint256 burnId);
@@ -73,6 +91,9 @@ interface IBridge {
     ///         explicitly closed (distinct from a rotation).
     /// @param oldAdapter             Adapter that was cleared.
     event LZAdapterDisabled(address indexed oldAdapter);
+
+    /// @notice Emitted when the backend signer authorized to approve deposits is rotated.
+    event FundsInSignerUpdated(address indexed oldSigner, address indexed newSigner);
 
     /// @notice Emitted on every successful `setRouteRegistry`.
     /// @param oldRegistry            Previous registry (the initialization value
@@ -145,8 +166,7 @@ interface IBridge {
     /// @param sender                 EVM caller Bridge saw (the EOA on the public
     ///                               overload, or the LZ adapter on the adapter-only
     ///                               overload).
-    /// @param senderNonce            Per-`(sourceChainId, sourceSender)` nonce folded
-    ///                               into non-RGB `operationId`.
+    /// @param authorizationNonce     Backend-issued nonce folded into non-RGB `operationId`.
     /// @param amount                 Gross amount the user supplied (pre-commission).
     /// @param netAmount              Amount actually bridged after token commission is taken.
     /// @param tokenCommission        Fee charged in the bridged token (deducted from `amount`).
@@ -161,7 +181,7 @@ interface IBridge {
         bytes32 indexed operationId,
         bytes32 indexed sourceSender,
         address indexed sender,
-        uint256 senderNonce,
+        bytes32 authorizationNonce,
         uint256 amount,
         uint256 netAmount,
         uint256 tokenCommission,
@@ -239,14 +259,18 @@ interface IBridge {
     /// @param destinationChainId     Destination network id.
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
-    /// @param settlementData         Route payload; RGB uses
-    ///                               `abi.encode(uint256 lockId, uint64 beforeBlock)`.
+    /// @param settlementData         Route payload; RGB uses the 64-byte
+    ///                               `abi.encode(uint256 lockId, uint64 beforeBlock)` followed
+    ///                               by one raw byte: `0` = BASE, `1` = WITNESS.
+    /// @param authorization          Single-use, deadline-bound backend authorization for all
+    ///                               deposit parameters and the caller-derived source sender.
     /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,
         uint256 destinationChainId,
         string calldata destinationAddress,
-        bytes calldata settlementData
+        bytes calldata settlementData,
+        FundsInAuthorization calldata authorization
     ) external payable returns (bytes32 operationId);
 
     /// @notice Canonical RGB mint backing id, reproducible from a validated
@@ -273,8 +297,11 @@ interface IBridge {
     /// @param destinationChainId     Destination network id.
     /// @param destinationAddress     Route-specific address; empty for RGB because it is in the
     ///                               consignment.
-    /// @param settlementData         Route payload; RGB uses
-    ///                               `abi.encode(uint256 lockId, uint64 beforeBlock)`.
+    /// @param settlementData         Route payload; RGB uses the 64-byte
+    ///                               `abi.encode(uint256 lockId, uint64 beforeBlock)` followed
+    ///                               by one raw byte: `0` = BASE, `1` = WITNESS.
+    /// @param authorization          Single-use, deadline-bound backend authorization for all
+    ///                               authenticated source and deposit parameters.
     /// @return operationId Bridge-derived deposit identifier.
     function fundsIn(
         uint256 amount,
@@ -282,8 +309,30 @@ interface IBridge {
         bytes32 sourceSender,
         uint256 destinationChainId,
         string calldata destinationAddress,
-        bytes calldata settlementData
+        bytes calldata settlementData,
+        FundsInAuthorization calldata authorization
     ) external payable returns (bytes32 operationId);
+
+    /// @notice EIP-712 domain separator used for deposit authorizations.
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
+
+    /// @notice Returns the exact digest the backend must sign for a deposit.
+    function fundsInAuthorizationDigest(
+        uint256 amount,
+        uint256 sourceChainId,
+        bytes32 sourceSender,
+        uint256 destinationChainId,
+        string calldata destinationAddress,
+        bytes calldata settlementData,
+        bytes32 authorizationNonce,
+        uint256 deadline
+    ) external view returns (bytes32);
+
+    function fundsInSigner() external view returns (address);
+    function usedFundsInAuthorizationNonces(bytes32 authorizationNonce) external view returns (bool);
+
+    /// @notice Rotates the backend signer. Callable only by the Bridge owner.
+    function setFundsInSigner(address newSigner) external;
 
     // =========================================================================
     // External — owner-only (called via MultisigProxy)

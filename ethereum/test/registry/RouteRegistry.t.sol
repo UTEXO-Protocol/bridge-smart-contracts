@@ -57,7 +57,7 @@ contract RouteRegistryTest is Test {
             grossAmount: 100e18,
             netAmount: 95e18,
             operationId: bytes32(uint256(42)),
-            senderNonce: 0,
+            authorizationNonce: 0,
             sourceChainId: SOURCE_CHAIN_ID,
             destChainId: DEST_CHAIN_ID,
             destAddress: "rgb:asset/utxo1abc"

@@ -20,7 +20,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.AddressTooLong.selector, max + 1, max));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, tooLong, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, tooLong, _rgbData());
     }
 
     function test_fundsIn_acceptsDestinationAddressAtMaxLength() public {
@@ -30,7 +30,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
         routeRegistry.setRoute(SOURCE_CHAIN_ID, RGB_CHAIN_ID, true, address(rgbVerifier), address(permissiveModule));
 
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, _str(max), _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, _str(max), _rgbData());
         assertEq(permissiveModule.onFundsInCount(), 1, "generic route accepts the address-length cap");
     }
 
@@ -46,32 +46,28 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
 
         vm.expectRevert(abi.encodeWithSelector(IBridge.SettlementDataTooLong.selector, max + 1, max));
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, tooLong);
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, tooLong);
     }
 
-    function test_fundsIn_acceptsSettlementDataAtMaxLength() public {
-        // The length guard lives in Bridge, ahead of the route module. A
-        // maximal-length blob with a canonical tuple prefix still decodes as
-        // valid RGB data, so the deposit clears the guard and records normally
-        // under the bridge-derived operationId.
+    function test_fundsIn_rejectsNonCanonicalRgbSettlementDataBelowGlobalCap() public {
         uint256 max = bridge.MAX_SETTLEMENT_DATA_IN_LENGTH();
         bytes memory prefix = abi.encode(RGB_LOCK_ID, RGB_BEFORE_BLOCK);
         bytes memory atMax = bytes.concat(prefix, PayloadHelper.filledBytes(max - prefix.length));
 
+        vm.expectRevert(abi.encodeWithSelector(IBridge.InvalidRgbSettlementDataLength.selector, max));
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, atMax);
-        assertEq(rgbModule.fundsInRecords(opId), AMOUNT, "deposit at the settlement-data cap is accepted");
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, atMax);
     }
 
     function test_fundsOut_acceptsSettlementDataAboveInboundCap() public {
         // A three-record release payload (64 + 32 * 3 = 160 bytes) is above the
         // inbound cap; the release path must be bounded by the outbound cap only.
         vm.prank(user);
-        bytes32 opA = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
+        bytes32 opA = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(1));
         vm.prank(user);
-        bytes32 opB = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
+        bytes32 opB = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(2));
         vm.prank(user);
-        bytes32 opC = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(3));
+        bytes32 opC = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData(3));
         _ensureRgbSafetyCapacity(AMOUNT);
 
         bytes32[] memory ids = new bytes32[](3);
@@ -88,7 +84,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
 
     function test_fundsOut_revertsOnSettlementDataTooLong() public {
         vm.prank(user);
-        bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         uint256 max = bridge.MAX_SETTLEMENT_DATA_OUT_LENGTH();
         bytes memory tooLong = PayloadHelper.filledBytes(max + 1);
@@ -100,7 +96,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
 
     function test_fundsOut_acceptsSettlementDataAtMaxLength() public {
         vm.prank(user);
-        bytes32 operationId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 operationId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
         bytes memory settlementData = _settlement(_ids(operationId));
         bytes memory proof = _proof();
@@ -114,7 +110,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
 
     function test_fundsOut_revertsOnSourceAddressTooLong() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         uint256 max = bridge.MAX_ADDRESS_LENGTH();
         string memory tooLong = _str(max + 1);
@@ -128,7 +124,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
 
     function test_fundsOut_sourceAddressAtMaxLengthPassesBridgeLengthGuard() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         // At the length cap, validation reaches RGBVerifier's canonical-address check.
@@ -150,7 +146,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
     /// @dev Non-empty RGB source addresses must not create alternate burn replay keys.
     function test_fundsOut_rgbRouteRejectsNonEmptySourceAddress() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         vm.expectRevert(RGBVerifier.UnexpectedSourceAddress.selector);
@@ -169,7 +165,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
 
     function test_fundsOut_revertsOnProofTooLong() public {
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
 
         uint256 max = bridge.MAX_PROOF_LENGTH();
         bytes memory tooLong = PayloadHelper.filledBytes(max + 1);
@@ -183,7 +179,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
 
     function test_fundsOut_acceptsProofAtMaxLength() public {
         vm.prank(user);
-        bytes32 operationId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 operationId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
         bytes memory settlementData = _settlement(_ids(operationId));
         bytes memory proof = _proof();
@@ -198,7 +194,7 @@ contract BridgePayloadBoundsTest is BridgeTestBase {
         // The production-shaped 128-byte RGB proof is well under the cap and the
         // happy path still succeeds.
         vm.prank(user);
-        bytes32 opId = bridge.fundsIn(AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
+        bytes32 opId = _authorizedFundsIn(bridge, AMOUNT, RGB_CHAIN_ID, DST_ADDR, _rgbData());
         _ensureRgbSafetyCapacity(AMOUNT);
 
         assertLt(_proof().length, bridge.MAX_PROOF_LENGTH(), "sanity: real proof under cap");
