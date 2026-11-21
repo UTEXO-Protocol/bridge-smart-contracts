@@ -142,17 +142,18 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @inheritdoc IBridge
     address public override lzAdapter;
 
-    /// @inheritdoc IBridge
-    address public override fundsInSigner;
-
     /// @notice Set of Bridge-derived burn identifiers already consumed by a
     ///         successful `fundsOut` or `rebalanceLiquidity`. Both paths use the
     ///         same `BURN_TYPEHASH` and field set, so the same canonical source
     ///         burn derives the same id on either path and can settle only once.
     mapping(uint256 burnId => bool consumed) public consumedBurnIds;
 
-    /// @inheritdoc IBridge
-    mapping(bytes32 authorizationNonce => bool used) public override usedFundsInAuthorizationNonces;
+    /// @notice Deprecated per-sender deposit nonce retained for compatibility
+    ///         with the Bridge implementation deployed to stage.
+    /// @dev New deposits use backend-issued unordered authorization nonces.
+    ///      Never remove, reorder or repurpose this field: it occupies the
+    ///      legacy proxy storage slot immediately after `consumedBurnIds`.
+    mapping(uint256 sourceChainId => mapping(bytes32 sourceSender => uint256 nonce)) public sourceSenderNonces;
 
     /// @notice Accounted liquidity available to each remote network.
     /// @dev Deposits credit their destination; releases debit their source. Rebalances
@@ -189,6 +190,14 @@ contract Bridge is BridgeBaseUpgradeable, IBridge, ReentrancyGuard {
     /// @inheritdoc IBridge
     /// @dev Non-zero release minimum; must not exceed minFundsInAmount.
     uint256 public override minFundsOutAmount;
+
+    /// @inheritdoc IBridge
+    /// @dev Appended after the complete legacy stage layout for proxy-upgrade safety.
+    address public override fundsInSigner;
+
+    /// @inheritdoc IBridge
+    /// @dev Appended after the complete legacy stage layout for proxy-upgrade safety.
+    mapping(bytes32 authorizationNonce => bool used) public override usedFundsInAuthorizationNonces;
 
     // =========================================================================
     // Modifiers

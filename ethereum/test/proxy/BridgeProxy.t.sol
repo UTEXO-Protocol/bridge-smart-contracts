@@ -15,6 +15,7 @@ import {MissingOwnerImplementation} from "../mocks/MissingOwnerImplementation.so
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {RevertingOwnerImplementation} from "../mocks/RevertingOwnerImplementation.sol";
 import {SpoofedOwnerImplementation} from "../mocks/SpoofedOwnerImplementation.sol";
+import {StageBridgeV1Mock} from "../mocks/StageBridgeV1Mock.sol";
 import {WordFallbackImplementation} from "../mocks/WordFallbackImplementation.sol";
 
 /// @notice Atomic initialization, compatibility validation and state-preserving upgrades.
@@ -332,6 +333,69 @@ contract BridgeProxyTest is Test {
         assertEq(upgraded.minFundsOutAmount(), 11);
         assertTrue(upgraded.paused());
         assertEq(token.balanceOf(address(proxy)), 123 ether);
+    }
+
+    function test_stageUpgrade_preservesDevLayoutAndAtomicallyInitializesFundsInSigner() public {
+        StageBridgeV1Mock legacyImplementation = new StageBridgeV1Mock();
+        bytes memory legacyInitializationData = abi.encodeCall(
+            StageBridgeV1Mock.initialize,
+            (address(token), routeRegistry, commissionManager, lzAdapter, uint256(22), uint256(11), owner)
+        );
+        BridgeProxy stageProxy = new BridgeProxy(address(legacyImplementation), legacyInitializationData);
+        StageBridgeV1Mock legacyBridge = StageBridgeV1Mock(address(stageProxy));
+
+        uint256 sourceChainId = 10_001;
+        bytes32 sourceSender = keccak256("stage-source-sender");
+        uint256 burnId = 77;
+        vm.prank(owner);
+        legacyBridge.seedLegacyState(sourceChainId, sourceSender, burnId);
+
+        bytes32[] memory legacySlots = new bytes32[](91);
+        for (uint256 slot; slot <= 90; ++slot) {
+            legacySlots[slot] = vm.load(address(stageProxy), bytes32(slot));
+        }
+
+        Bridge stageImplementation = new Bridge();
+        vm.prank(owner);
+        stageProxy.upgradeToAndCall(
+            address(stageImplementation), abi.encodeCall(Bridge.setFundsInSigner, (fundsInSigner))
+        );
+
+        for (uint256 slot; slot <= 90; ++slot) {
+            assertEq(vm.load(address(stageProxy), bytes32(slot)), legacySlots[slot], "legacy slot changed");
+        }
+
+        Bridge upgraded = Bridge(address(stageProxy));
+        assertEq(stageProxy.implementation(), address(stageImplementation));
+        assertEq(upgraded.TOKEN(), address(token));
+        assertEq(upgraded.owner(), owner);
+        assertEq(address(upgraded.commissionManager()), commissionManager);
+        assertEq(upgraded.routeRegistry(), routeRegistry);
+        assertEq(upgraded.lzAdapter(), lzAdapter);
+        assertTrue(upgraded.consumedBurnIds(burnId));
+        assertEq(upgraded.sourceSenderNonces(sourceChainId, sourceSender), 17);
+        assertEq(upgraded.lockedLiquidity(sourceChainId), 4_321);
+        assertEq(upgraded.totalLockedLiquidity(), 4_321);
+        (uint128 chainTokens, uint32 chainUpdated, bool chainEnabled, uint128 chainCapacity, uint128 chainRate) =
+            upgraded.chainBuckets(sourceChainId);
+        assertEq(chainTokens, 101);
+        assertEq(chainUpdated, 202);
+        assertTrue(chainEnabled);
+        assertEq(chainCapacity, 303);
+        assertEq(chainRate, 4);
+        (uint128 globalTokens, uint32 globalUpdated, bool globalEnabled, uint128 globalCapacity, uint128 globalRate) =
+            upgraded.globalBucket();
+        assertEq(globalTokens, 505);
+        assertEq(globalUpdated, 606);
+        assertTrue(globalEnabled);
+        assertEq(globalCapacity, 707);
+        assertEq(globalRate, 8);
+        assertEq(upgraded.availableChainSafetyOutflow(sourceChainId), 137);
+        assertEq(upgraded.availableGlobalSafetyOutflow(), 56);
+        assertEq(upgraded.minFundsInAmount(), 22);
+        assertEq(upgraded.minFundsOutAmount(), 11);
+        assertEq(upgraded.fundsInSigner(), fundsInSigner);
+        assertFalse(upgraded.usedFundsInAuthorizationNonces(keccak256("unused-stage-authorization")));
     }
 
     function test_upgradeCalldata_acceptsExactly4096Bytes() public {

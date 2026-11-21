@@ -19,6 +19,8 @@ import {NullSettlementModule} from "../../src/settlement/NullSettlementModule.so
 /// @dev Predicts BridgeProxy at deployer nonce + 3. Configures outflow policies and optional
 ///      oracle settings before handoff. Federation accepts ownership and registers routes
 ///      separately. Verifier thresholds default to 3/2/2 and accept environment overrides.
+///      DEPLOY_RGB_VERIFIER defaults to true. Only no-proof development profiles
+///      should disable it; then BTC_RELAY_ADDRESS is not read.
 ///      Inputs (see the matching .env example for values):
 ///      `PRIVATE_KEY`, `USDT0_ADDRESS`, `BTC_RELAY_ADDRESS`, `FUNDS_IN_SIGNER`, `ENCLAVE_SIGNERS`,
 ///      `ENCLAVE_THRESHOLD`, `INITIAL_ENCLAVE_SOURCE_CHAIN_ID`, `FEDERATION_SIGNERS`,
@@ -48,7 +50,8 @@ contract DeployAll is Script {
         // ---- 1. Load env --------------------------------------------------
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address usdt0 = vm.envAddress("USDT0_ADDRESS");
-        address btcRelay = vm.envAddress("BTC_RELAY_ADDRESS");
+        bool deployRgbVerifier = vm.envOr("DEPLOY_RGB_VERIFIER", true);
+        address btcRelay = deployRgbVerifier ? vm.envAddress("BTC_RELAY_ADDRESS") : address(0);
         address fundsInSigner = vm.envAddress("FUNDS_IN_SIGNER");
         address[] memory enc = vm.envAddress("ENCLAVE_SIGNERS", ",");
         uint256 encThr = vm.envUint("ENCLAVE_THRESHOLD");
@@ -128,8 +131,10 @@ contract DeployAll is Script {
         BridgeProxy bridgeProxy = new BridgeProxy(address(bridgeImplementation), bridgeInitializationData);
         bridge = Bridge(address(bridgeProxy));
 
-        // ---- 5. Route plugins (nonce n+4 .. n+8) -------------------------
-        rgbVerifier = new RGBVerifier(btcRelay, minSourceConf, maxLatestConf, minConfGap);
+        // ---- 5. Route plugins (RGBVerifier is optional) -----------------
+        if (deployRgbVerifier) {
+            rgbVerifier = new RGBVerifier(btcRelay, minSourceConf, maxLatestConf, minConfGap);
+        }
         rgbModule = new RgbSettlementModule(address(routeRegistry));
         // Optional verifier for routes whose finality is checked upstream.
         nullVerifier = new NullVerifier();
@@ -139,7 +144,7 @@ contract DeployAll is Script {
         // an external delivery layer still use an explicit non-zero module.
         nullModule = new NullSettlementModule();
 
-        // ---- 6. MultisigProxy (nonce n+9) -------------------------------
+        // ---- 6. MultisigProxy (nonce n+9, or n+8 without RGBVerifier) ----
         proxy = new MultisigProxy(
             address(bridge),
             address(cm),
@@ -186,10 +191,14 @@ contract DeployAll is Script {
         console2.log("Bridge deployed at:             ", address(bridge));
         console2.log("Bridge implementation at:      ", address(bridgeImplementation));
         console2.log("Funds-in signer:               ", bridge.fundsInSigner());
-        console2.log("RGBVerifier deployed at:        ", address(rgbVerifier));
-        console2.log("  minSourceConfirmations:       ", rgbVerifier.minSourceConfirmations());
-        console2.log("  maxLatestConfirmations:       ", rgbVerifier.maxLatestConfirmations());
-        console2.log("  minConfirmationGap:           ", rgbVerifier.minConfirmationGap());
+        if (deployRgbVerifier) {
+            console2.log("RGBVerifier deployed at:        ", address(rgbVerifier));
+            console2.log("  minSourceConfirmations:       ", rgbVerifier.minSourceConfirmations());
+            console2.log("  maxLatestConfirmations:       ", rgbVerifier.maxLatestConfirmations());
+            console2.log("  minConfirmationGap:           ", rgbVerifier.minConfirmationGap());
+        } else {
+            console2.log("DEV ONLY: RGBVerifier skipped; no Bitcoin proof verification.");
+        }
         console2.log("RgbSettlementModule deployed at:", address(rgbModule));
         console2.log("NullVerifier deployed at:       ", address(nullVerifier));
         console2.log("RgbOutboundSettlementModule at: ", address(outboundModule));

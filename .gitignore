@@ -4,3 +4,6 @@ target
 *.export
 contracts/.deps
 .vscode
+/.env.stage.local
+/stage-local.json
+/stage-upgrade-manifest.local.json
